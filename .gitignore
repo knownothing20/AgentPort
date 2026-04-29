@@ -1,6 +1,7 @@
 # 本地配置（不上传）
 local/
 SYNC.md
+sync-to-github.ps1
 
 # 自动生成
 server/.env
