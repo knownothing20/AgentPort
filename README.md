@@ -1,46 +1,21 @@
-# mcp-remote-agent - MCP Server for AI Agent Remote Development
+# mcp-remote-agent
+
+MCP Server for AI Agent Remote Development
+
+Enable AI Agents to operate remote Linux servers through MCP protocol, seamlessly connecting local development environments with remote servers.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-2.5.0-blue)](https://github.com/knownothing20/mcp-remote-agent)
-[![MCP](https://img.shields.io/badge/MCP-Compatible-green.svg)](https://modelcontextprotocol.io)
+[![Version](https://img.shields.io/badge/version-2.3.1-blue)](https://github.com/knownothing20/mcp-remote-agent)
 
-> **VS Code Remote SSH is for humans; mcp-remote-agent is for AI.**
-
-Enable AI Agents (Claude, Cursor, WorkBuddy, Windsurf, Cline) to directly read/write remote Linux server files and execute commands via MCP protocol. One-command setup, auto daemon deployment, seamless local-to-remote development.
-
-[中文文档](./README_CN.md) | [Quick Start](#quick-start) | [Features](#core-features)
+[中文文档](./README_CN.md)
 
 ---
 
-## Why mcp-remote-agent?
+## One-line Summary
 
-**Problem**: AI Agents can only work with local files. To develop on remote servers, you need to manually copy files, run commands, and manage connections.
+Enable AI Agents (like WorkBuddy, Claude Desktop, Cursor) to directly read/write remote Linux server files and execute commands via MCP, seamlessly connecting local development with remote servers.
 
-**Solution**: mcp-remote-agent gives AI Agents full remote server access through MCP protocol - read files, write code, execute commands, manage configs - all automated.
-
-**Use Cases**:
-- 🚀 **Remote Development**: AI writes code directly on your dev server
-- 🔧 **Server Management**: AI automates server运维 tasks
-- 📦 **Deployment**: AI handles deployment workflows
-- 🧪 **Testing**: AI runs tests on remote environments
-- 📊 **Monitoring**: AI checks server status and logs
-
----
-
-## Comparison with Other Tools
-
-| Feature | mcp-remote-agent | VS Code Remote SSH | SSH CLI | Ansible |
-|---------|------------------|-------------------|---------|---------|
-| **AI Agent Support** | ✅ Native MCP | ❌ Human only | ❌ Human only | ❌ Script only |
-| **Setup Complexity** | 1 command | GUI wizard | Manual | Complex YAML |
-| **File Operations** | ✅ Read/Write/Search | ✅ Full IDE | ❌ Manual | ✅ Playbooks |
-| **Command Execution** | ✅ Sync/Async | ✅ Terminal | ✅ Manual | ✅ Tasks |
-| **Multi-Server** | ✅ Dynamic switch | ❌ One at a time | ❌ Manual | ✅ Inventory |
-| **Config Management** | ✅ Hot reload | ❌ Restart needed | ❌ Manual | ✅ Handlers |
-| **Dashboard** | ✅ Web UI | ❌ None | ❌ None | ❌ None |
-| **Audit Logging** | ✅ Built-in | ❌ None | ❌ None | ✅ Callback |
-
-**Best for**: AI-powered development, automated server management, multi-server workflows
+**Analogy**: VS Code Remote SSH is for humans; mcp-remote-agent is for AI.
 
 ---
 
@@ -48,8 +23,6 @@ Enable AI Agents (Claude, Cursor, WorkBuddy, Windsurf, Cline) to directly read/w
 
 | Feature | Description |
 |---------|-------------|
-| SSH Direct Connection | Connect via SSH without deploying daemon (v2.4.0+) |
-| Guided Setup | `remote_setup` - one-command connection with auto daemon deployment (v2.5.0+) |
 | Remote File R/W | `remote_read` / `remote_write` / `remote_stat` |
 | Remote Search | `remote_glob` search files by glob pattern |
 | Command Execution | `remote_bash` for simple commands, `remote_script` for multi-line scripts |
@@ -64,35 +37,20 @@ Enable AI Agents (Claude, Cursor, WorkBuddy, Windsurf, Cline) to directly read/w
 
 ## Quick Start
 
-### Option 1: One-Command Setup (Recommended)
-
-Just tell your AI Agent:
-
-> "Connect to my server at 192.0.2.10 with username root and password xxx"
-
-The AI will automatically:
-1. ✅ Test SSH connection
-2. ✅ Deploy daemon to remote server
-3. ✅ Save configuration
-4. ✅ Switch to daemon mode
-5. ✅ Return Dashboard URL for monitoring
-
-**That's it!** No manual file editing, no SSH commands, no config files.
-
-### Option 2: Manual Setup
-
-<details>
-<summary>Click to expand manual setup steps</summary>
-
-#### 1. Clone and install
+### 1. Clone the repository
 
 ```bash
 git clone https://github.com/knownothing20/mcp-remote-agent.git
 cd mcp-remote-agent
+```
+
+### 2. Install dependencies
+
+```bash
 npm install
 ```
 
-#### 2. Configure
+### 3. Configure
 
 ```bash
 cp mcp-remote-agent.example.json local/mcp-remote-agent.json
@@ -108,23 +66,34 @@ Key variables:
 | `remoteUrl` | Remote daemon address |
 | `authToken` | Client authentication token |
 
-#### 3. Sync and deploy
+### 4. Sync configuration
 
 ```bash
-# Sync configuration
 node sync.cjs
-
-# Deploy to remote server
-ssh USER@SERVER "mkdir -p /path/to/daemon"
-scp server/* USER@SERVER:/path/to/daemon/
-ssh USER@SERVER "cd /path/to/daemon && npm install && nohup bash mcp-remote-agent-manager.sh >> boot.log 2>&1 &"
 ```
 
-#### 4. Restart AI tool
+### 5. Deploy remote daemon
+
+```bash
+# Create daemon directory on remote server
+ssh USER@SERVER "mkdir -p /path/to/daemon"
+
+# Upload server files to remote server
+scp server/server.js server/mcp-remote-agent-manager.sh server/package.json USER@SERVER:/path/to/daemon/
+
+# Upload generated .env config (created by sync.cjs in step 4)
+scp local/server/.env USER@SERVER:/path/to/daemon/
+
+# SSH to remote server
+ssh USER@SERVER
+cd /path/to/daemon
+npm install
+nohup bash mcp-remote-agent-manager.sh >> boot.log 2>&1 &
+```
+
+### 6. Restart AI tool
 
 After configuration takes effect, restart your AI tool to activate MCP registration.
-
-</details>
 
 ---
 
@@ -143,7 +112,6 @@ After configuration takes effect, restart your AI tool to activate MCP registrat
 
 | Tool | Function |
 |------|----------|
-| `remote_setup` | Guided connection setup with auto daemon deployment (v2.5.0+) |
 | `remote_health` | Check remote service reachability |
 | `remote_read` | Read remote file (ETag cache) |
 | `remote_write` | Write remote file (auto clean CRLF/BOM) |
