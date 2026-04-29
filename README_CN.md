@@ -1,19 +1,46 @@
-# mcp-remote-agent
-
-MCP Server for AI Agent Remote Development
-
-让 AI Agent 通过 MCP 协议操作远程 Linux 服务器，实现本地开发环境与远程服务器的无缝衔接。
+# mcp-remote-agent - AI Agent 远程开发 MCP 服务器
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-2.5.0-blue)](https://github.com/knownothing20/mcp-remote-agent)
+[![MCP](https://img.shields.io/badge/MCP-兼容-green.svg)](https://modelcontextprotocol.io)
+
+> **VS Code Remote SSH 是给人用的，mcp-remote-agent 是给 AI 用的。**
+
+让 AI Agent（Claude、Cursor、WorkBuddy、Windsurf、Cline）通过 MCP 协议直接读写远程 Linux 服务器文件、执行命令。一键连接，自动部署守护进程，本地开发与远程服务器无缝衔接。
+
+[English](./README.md) | [快速开始](#快速开始) | [核心功能](#核心功能)
 
 ---
 
-## 一句话简介
+## 为什么需要 mcp-remote-agent？
 
-让 AI Agent（如 WorkBuddy、Claude Desktop、Cursor）通过 MCP 直接读写远程 Linux 服务器文件、执行命令，实现本地开发环境与远程服务器的无缝衔接。
+**问题**：AI Agent 只能操作本地文件。要在远程服务器上开发，需要手动复制文件、执行命令、管理连接。
 
-**类比**：VS Code Remote SSH 是给人用的，mcp-remote-agent 是给 AI 用的。
+**解决方案**：mcp-remote-agent 通过 MCP 协议赋予 AI Agent 完整的远程服务器访问能力 - 读取文件、编写代码、执行命令、管理配置，全部自动化。
+
+**使用场景**：
+- 🚀 **远程开发**：AI 直接在开发服务器上编写代码
+- 🔧 **服务器管理**：AI 自动化运维任务
+- 📦 **部署上线**：AI 处理部署流程
+- 🧪 **测试验证**：AI 在远程环境运行测试
+- 📊 **监控检查**：AI 检查服务器状态和日志
+
+---
+
+## 与其他工具对比
+
+| 功能 | mcp-remote-agent | VS Code Remote SSH | SSH CLI | Ansible |
+|------|------------------|-------------------|---------|---------|
+| **AI Agent 支持** | ✅ 原生 MCP | ❌ 仅人工 | ❌ 仅人工 | ❌ 仅脚本 |
+| **配置复杂度** | 1 条命令 | GUI 向导 | 手动 | 复杂 YAML |
+| **文件操作** | ✅ 读/写/搜索 | ✅ 完整 IDE | ❌ 手动 | ✅ Playbook |
+| **命令执行** | ✅ 同步/异步 | ✅ 终端 | ✅ 手动 | ✅ Tasks |
+| **多服务器** | ✅ 动态切换 | ❌ 一次一个 | ❌ 手动 | ✅ Inventory |
+| **配置管理** | ✅ 热重载 | ❌ 需重启 | ❌ 手动 | ✅ Handlers |
+| **Dashboard** | ✅ Web UI | ❌ 无 | ❌ 无 | ❌ 无 |
+| **审计日志** | ✅ 内置 | ❌ 无 | ❌ 无 | ✅ Callback |
+
+**最适合**：AI 驱动开发、自动化服务器管理、多服务器工作流
 
 ---
 
@@ -37,63 +64,67 @@ MCP Server for AI Agent Remote Development
 
 ## 快速开始
 
-### 1. 复制 skill 到本地
+### 方式一：一键连接（推荐）
+
+只需告诉 AI Agent：
+
+> "连接到我的服务器 192.168.1.100，用户名 root，密码 xxx"
+
+AI 会自动完成：
+1. ✅ 测试 SSH 连接
+2. ✅ 部署守护进程到远程服务器
+3. ✅ 保存配置
+4. ✅ 切换到守护进程模式
+5. ✅ 返回 Dashboard 监控地址
+
+**就这么简单！** 无需手动编辑文件，无需 SSH 命令，无需配置文件。
+
+### 方式二：手动配置
+
+<details>
+<summary>点击展开手动配置步骤</summary>
+
+#### 1. 克隆并安装
 
 ```bash
 git clone https://github.com/knownothing20/mcp-remote-agent.git
 cd mcp-remote-agent
-```
-
-### 2. 安装依赖
-
-```bash
 npm install
 ```
 
-### 3. 配置
+#### 2. 配置
 
 ```bash
 cp mcp-remote-agent.example.json local/mcp-remote-agent.json
-# 编辑 local/mcp-remote-agent.json，填写 variables 区所有配置
+# 编辑 local/mcp-remote-agent.json，填写所有变量
 ```
 
-关键变量说明：
+关键变量：
 
 | 变量 | 说明 |
 |------|------|
 | `skillDir` | skill 安装目录的绝对路径 |
 | `mcpConfigPath` | 目标 AI 工具的 MCP 配置文件路径 |
-| `remoteUrl` | 远端守护进程地址 |
-| `authToken` | 客户端鉴权 token |
+| `remoteUrl` | 远程守护进程地址 |
+| `authToken` | 客户端认证 token |
 
-### 4. 同步配置
+#### 3. 同步并部署
 
 ```bash
+# 同步配置
 node sync.cjs
-```
 
-### 5. 部署远程守护进程
-
-```bash
-# 在远程服务器创建目录
+# 部署到远程服务器
 ssh USER@SERVER "mkdir -p /path/to/daemon"
-
-# 上传服务端文件到远程服务器
-scp server/server.js server/mcp-remote-agent-manager.sh server/package.json USER@SERVER:/path/to/daemon/
-
-# 上传生成的 .env 配置（步骤 4 由 sync.cjs 生成）
-scp local/server/.env USER@SERVER:/path/to/daemon/
-
-# SSH 到远程服务器
-ssh USER@SERVER
-cd /path/to/daemon
-npm install
-nohup bash mcp-remote-agent-manager.sh >> boot.log 2>&1 &
+scp server/* USER@SERVER:/path/to/daemon/
+ssh USER@SERVER "cd /path/to/daemon && npm install && nohup bash mcp-remote-agent-manager.sh >> boot.log 2>&1 &"
 ```
 
-### 6. 重启 AI 工具
+#### 4. 重启 AI 工具
 
-配置生效后，重启你的 AI 工具使 MCP 注册生效。
+配置生效后，重启 AI 工具以激活 MCP 注册。
+
+</details>
 
 ---
 
