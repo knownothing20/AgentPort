@@ -1,0 +1,19 @@
+{
+  "name": "mcp-remote-agent",
+  "version": "2.5.0",
+  "description": "MCP Server for AI Agent Remote Development - 让 AI Agent 通过 MCP 协议操作远程 Linux 服务器",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "test": "node test.cjs",
+    "sync": "node sync.cjs",
+    "sync:check": "node sync.cjs --check",
+    "sync:dry": "node sync.cjs --dry-run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "axios": "^1.6.8",
+    "ssh2": "1.15.0"
+  }
+}

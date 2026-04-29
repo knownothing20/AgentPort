@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MCP Remote Agent 监控面板</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root { --bg: #0a0a0f; --bg2: #12121a; --card: #1a1a24; --cardh: #22222e; --text: #f0f0f5; --text2: #8888a0; --muted: #555566; --cyan: #00d4ff; --green: #00ff88; --red: #ff4757; --orange: #ffa502; --purple: #a855f7; --border: #2a2a3a; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Outfit', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+    .container { max-width: 1400px; margin: 0 auto; padding: 24px; }
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 32px; padding-bottom: 20px; border-bottom: 1px solid var(--border); flex-wrap: wrap; gap: 12px; }
+    .header-left { display: flex; align-items: center; gap: 16px; }
+    .logo { width: 48px; height: 48px; background: linear-gradient(135deg, var(--cyan), var(--purple)); border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 24px; font-weight: 700; color: white; }
+    .title h1 { font-size: 28px; font-weight: 600; background: linear-gradient(90deg, var(--text), var(--cyan)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .title p { color: var(--text2); font-size: 14px; }
+    .header-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .status-badge { display: flex; align-items: center; gap: 8px; padding: 8px 16px; background: rgba(0,255,136,0.15); border: 1px solid var(--green); border-radius: 20px; font-size: 13px; color: var(--green); }
+    .status-dot { width: 8px; height: 8px; background: var(--green); border-radius: 50%; animation: pulse 2s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
+    .refresh-btn { padding: 10px 20px; background: var(--card); border: 1px solid var(--border); border-radius: 8px; color: var(--text); cursor: pointer; }
+    .refresh-btn:hover { background: var(--cardh); border-color: var(--cyan); }
+    .time-filter { display: flex; gap: 4px; background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 3px; }
+    .time-btn { padding: 6px 14px; background: transparent; border: none; border-radius: 6px; color: var(--text2); cursor: pointer; font-size: 13px; transition: 0.2s; }
+    .time-btn:hover { color: var(--text); }
+    .time-btn.active { background: var(--cyan); color: #000; font-weight: 600; }
+    .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
+    .stat-card { background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 20px; transition: 0.3s; }
+    .stat-card:hover { transform: translateY(-2px); border-color: var(--cyan); }
+    .stat-card .label { font-size: 13px; color: var(--text2); margin-bottom: 8px; }
+    .stat-card .value { font-size: 32px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+    .stat-card .value.cyan { color: var(--cyan); }
+    .stat-card .value.green { color: var(--green); }
+    .stat-card .value.red { color: var(--red); }
+    .stat-card .value.orange { color: var(--orange); }
+    .stat-card .detail { font-size: 12px; color: var(--muted); margin-top: 8px; }
+    .main-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 24px; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 16px; overflow: hidden; margin-bottom: 24px; }
+    .card-header { padding: 16px 20px; border-bottom: 1px solid var(--border); font-size: 16px; font-weight: 600; }
+    .card-body { padding: 20px; }
+    .perf-table { width: 100%; border-collapse: collapse; }
+    .perf-table th, .perf-table td { padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--border); }
+    .perf-table th { font-size: 12px; color: var(--text2); }
+    .perf-table td { font-family: 'JetBrains Mono', monospace; font-size: 14px; }
+    .type-badge { display: inline-block; padding: 4px 10px; border-radius: 6px; font-size: 12px; font-weight: 500; }
+    .type-badge.read { background: rgba(0,212,255,0.15); color: var(--cyan); }
+    .type-badge.write { background: rgba(0,255,136,0.15); color: var(--green); }
+    .type-badge.exec { background: rgba(255,165,2,0.15); color: var(--orange); }
+    .type-badge.fs { background: rgba(168,85,247,0.15); color: var(--purple); }
+    .error-list { max-height: 300px; overflow-y: auto; }
+    .error-item { padding: 12px 16px; border-bottom: 1px solid var(--border); display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center; }
+    .error-time { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted); }
+    .error-msg { font-size: 13px; color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .error-type { font-size: 11px; padding: 3px 8px; border-radius: 4px; background: rgba(255,71,87,0.15); color: var(--red); white-space: nowrap; }
+    .client-list { display: flex; flex-direction: column; gap: 10px; }
+    .client-item { display: flex; align-items: center; gap: 12px; padding: 12px 16px; background: var(--bg2); border-radius: 10px; }
+    .client-avatar { width: 36px; height: 36px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 14px; }
+    .client-avatar.codex { background: linear-gradient(135deg, #6366f1, #8b5cf6); }
+    .client-avatar.mcp { background: linear-gradient(135deg, #06b6d4, #00d4ff); }
+    .client-avatar.workbuddy { background: linear-gradient(135deg, #f59e0b, #fbbf24); }
+    .client-info { flex: 1; }
+    .client-name { font-size: 14px; font-weight: 500; }
+    .client-meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .client-status { padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+    .client-status.online { background: rgba(0,255,136,0.15); color: var(--green); }
+    .client-status.offline { background: rgba(85,85,102,0.2); color: var(--muted); }
+    .system-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+    .sys-item { padding: 12px; background: var(--bg2); border-radius: 8px; }
+    .sys-label { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+    .sys-value { font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 500; }
+    .svc-item { display: flex; align-items: flex-start; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+    .svc-item:last-child { border-bottom: none; }
+    .svc-main { flex: 1; min-width: 0; }
+    .svc-name { font-size: 13px; font-weight: 500; cursor: default; display: flex; align-items: center; gap: 6px; }
+    .svc-name.clickable { cursor: pointer; }
+    .svc-arrow { font-size: 10px; color: var(--muted); transition: transform 0.2s; display: inline-block; }
+    .svc-arrow.open { transform: rotate(90deg); }
+    .svc-sub { display: none; padding: 6px 0 0 0; }
+    .svc-sub.show { display: block; }
+    .svc-sub-item { font-size: 12px; color: var(--text2); padding: 3px 0; font-family: 'JetBrains Mono', monospace; display: flex; align-items: center; gap: 8px; }
+    .svc-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+    .svc-dot.ok { background: var(--green); }
+    .svc-dot.warn { background: var(--orange); }
+    .svc-dot.error { background: var(--red); }
+    .svc-detail { font-size: 11px; color: var(--muted); margin-top: 2px; }
+    .svc-badge { padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; white-space: nowrap; flex-shrink: 0; margin-top: 2px; }
+    .svc-badge.ok { background: rgba(0,255,136,0.15); color: var(--green); }
+    .svc-badge.warn { background: rgba(255,165,2,0.15); color: var(--orange); }
+    .svc-badge.error { background: rgba(255,71,87,0.15); color: var(--red); }
+    .loading { display: flex; align-items: center; justify-content: center; padding: 40px; color: var(--muted); }
+    .spinner { width: 24px; height: 24px; border: 2px solid var(--border); border-top-color: var(--cyan); border-radius: 50%; animation: spin 1s linear infinite; margin-right: 12px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg2); }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    @media (max-width:1200px){ .stats-grid{grid-template-columns:repeat(2,1fr)} .main-grid{grid-template-columns:1fr} }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <div class="header-left">
+        <div class="logo">M</div>
+        <div class="title">
+          <h1>MCP Remote Agent 监控面板</h1>
+          <p id="serverTime">加载中...</p>
+        </div>
+      </div>
+      <div class="header-right">
+        <div class="status-badge"><span class="status-dot"></span><span>在线</span></div>
+        <div class="time-filter" id="timeFilter">
+          <button class="time-btn active" data-days="1" onclick="setDays(1,this)">今天</button>
+          <button class="time-btn" data-days="3" onclick="setDays(3,this)">近3天</button>
+          <button class="time-btn" data-days="7" onclick="setDays(7,this)">近7天</button>
+        </div>
+        <button class="refresh-btn" onclick="loadData()">↻ 刷新</button>
+      </div>
+    </header>
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="label">总请求数</div>
+        <div class="value cyan" id="totalRequests">-</div>
+        <div class="detail" id="requestDetail">加载中...</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">平均响应</div>
+        <div class="value green" id="avgResponse">-</div>
+        <div class="detail">毫秒/请求</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">错误数</div>
+        <div class="value red" id="totalErrors">-</div>
+        <div class="detail" id="errorRate">加载中...</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">活跃执行</div>
+        <div class="value orange" id="activeExec">-</div>
+        <div class="detail" id="execDetail">/ 2 最大</div>
+      </div>
+    </div>
+    <div class="main-grid">
+      <div>
+        <div class="card">
+          <div class="card-header">📈 操作类型统计</div>
+          <div class="card-body">
+            <table class="perf-table"><thead><tr><th>操作类型</th><th>中文注释</th><th>次数</th><th>成功/失败</th><th>成功率</th><th>占比</th></tr></thead>
+            <tbody id="perfTable"><tr><td colspan="6"><div class="loading"><div class="spinner"></div>加载中...</div></td></tr></tbody></table>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header">⚠️ 最近错误</div>
+          <div class="card-body"><div class="error-list" id="errorList"><div class="loading"><div class="spinner"></div>加载中...</div></div></div>
+        </div>
+      </div>
+      <div>
+        <div class="card">
+          <div class="card-header">👥 客户端统计</div>
+          <div class="card-body"><div class="client-list" id="clientList"><div class="loading"><div class="spinner"></div>加载中...</div></div></div>
+        </div>
+        <div class="card">
+          <div class="card-header">🔧 服务状态</div>
+          <div class="card-body"><div id="serviceStatus"><div class="loading"><div class="spinner"></div>加载中...</div></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+    const TOKEN=new URLSearchParams(location.search).get('token')||'';
+    let currentDays=1;
+    let refreshTimer=null;
+    async function fetchJSON(url){return fetch(url+(TOKEN?(url.includes('?')?'&':'?')+'token='+encodeURIComponent(TOKEN):'')).then(r=>r.json())}
+    function fmtTime(iso){return new Date(iso).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}
+    function fmtTimeAgo(iso){
+      if(!iso)return'从未';
+      const diff=Date.now()-new Date(iso).getTime();
+      if(diff<60000)return'刚刚';
+      if(diff<3600000)return Math.floor(diff/60000)+'分钟前';
+      if(diff<86400000)return Math.floor(diff/3600000)+'小时前';
+      return Math.floor(diff/86400000)+'天前';
+    }
+    function getClientType(n){if(n.includes('codex'))return'codex';if(n.includes('mcp')||n.includes('remote'))return'mcp';return'workbuddy'}
+    function setDays(d,btn){
+      currentDays=d;
+      document.querySelectorAll('.time-btn').forEach(b=>b.classList.remove('active'));
+      btn.classList.add('active');
+      loadData();
+    }
+    function isOnline(lastSeen){
+      if(!lastSeen)return false;
+      return(Date.now()-new Date(lastSeen).getTime())<300000;
+    }
+    function fmtUptime(sec){
+      const d=Math.floor(sec/86400),h=Math.floor(sec%86400/3600),m=Math.floor(sec%3600/60);
+      return(d>0?d+'天':'')+(h>0?h+'小时':'')+m+'分钟';
+    }
+    async function loadData(){
+      try{
+        const[h,st,err,svc]=await Promise.all([
+          fetchJSON('/healthz'),
+          fetchJSON('/api/stats?days='+currentDays),
+          fetchJSON('/api/errors?limit=15&days='+currentDays),
+          fetchJSON('/api/service-status')
+        ]);
+        document.getElementById('serverTime').textContent='服务器: '+fmtTime(h.time)+' | '+h.workspaceRoot;
+        document.getElementById('totalRequests').textContent=st.total.toLocaleString();
+        document.getElementById('avgResponse').textContent=st.avgMs.toFixed(0);
+        document.getElementById('totalErrors').textContent=st.errors.toLocaleString();
+        document.getElementById('errorRate').textContent=st.total?(st.errors/st.total*100).toFixed(1)+'% 失败率':'-';
+        document.getElementById('activeExec').textContent=h.exec.running;
+        document.getElementById('execDetail').textContent='/ '+h.exec.max+' 最大';
+        // Performance table
+        const typeLabels={'fs.read':'文件读取','fs.write':'文件写入','fs.glob':'文件搜索','exec':'命令执行','exec.async':'异步命令执行','exec.script':'脚本执行','batch':'批量操作'};
+        const pt=document.getElementById('perfTable'),total=st.byType.reduce((s,t)=>s+t.count,0);
+        pt.innerHTML=st.byType.map(t=>{const rate=parseFloat(t.successRate);const color=rate>=95?'var(--green)':rate>=80?'var(--orange)':'var(--red)';return`<tr><td><span class="type-badge ${t.type.split('.')[0]}">${t.type}</span></td><td style="color:var(--text2)">${typeLabels[t.type]||t.type}</td><td>${t.count}</td><td style="color:var(--text2)">${t.ok}/${t.fail}</td><td style="color:${color};font-weight:600">${t.successRate}%</td><td>${total?(t.count/total*100).toFixed(1):'0'}%</td></tr>`}).join('');
+        // Client list
+        const cl=document.getElementById('clientList');
+        const clientEntries=Object.entries(st.byClient).sort((a,b)=>{
+          const aOn=isOnline(a[1].lastSeen)?0:1,bOn=isOnline(b[1].lastSeen)?0:1;
+          return aOn-bOn||b[1].count-a[1].count;
+        });
+        cl.innerHTML=clientEntries.map(([c,info])=>{
+          const on=isOnline(info.lastSeen);
+          return`<div class="client-item"><div class="client-avatar ${getClientType(c)}">${c.slice(0,2).toUpperCase()}</div><div class="client-info"><div class="client-name">${c}</div><div class="client-meta">${info.count} 次请求 · ${fmtTimeAgo(info.lastSeen)}</div></div><span class="client-status ${on?'online':'offline'}">${on?'在线':'离线'}</span></div>`;
+        }).join('');
+        // Errors
+        const el=document.getElementById('errorList');
+        if(err.errors&&err.errors.length>0)el.innerHTML=err.errors.map(e=>`<div class="error-item"><span class="error-time">${fmtTime(e.ts)}</span><span class="error-msg" title="${e.error}">${e.error}</span><span class="error-type">${e.type}</span></div>`).join('');
+        else el.innerHTML='<div style="text-align:center;padding:20px;color:var(--green)">✓ 暂无错误</div>';
+        // Service status (all items, deps has collapsible sub-items)
+        const ssEl=document.getElementById('serviceStatus');
+        const svcItems=Object.entries(svc).filter(([k])=>k!=='disk').map(([,s])=>s);
+        ssEl.innerHTML=svcItems.map((s,i)=>{
+          const badge=s.status==='ok'||s.status==='running'?'ok':s.status==='warn'?'warn':'error';
+          const label=s.status==='ok'||s.status==='running'?'正常':s.status==='warn'?'警告':'异常';
+          if(s.deps){
+            const subHtml=s.deps.map(d=>`<div class="svc-sub-item"><span class="svc-dot ${badge}"></span>${d}</div>`).join('');
+            return`<div class="svc-item"><div class="svc-main"><div class="svc-name clickable" onclick="toggleDeps(this)"><span class="svc-arrow" id="arrow${i}">▸</span>${s.name}</div><div class="svc-detail">${s.detail||''}</div><div class="svc-sub" id="deps${i}">${subHtml}</div></div><span class="svc-badge ${badge}">${label}</span></div>`;
+          }
+          return`<div class="svc-item"><div class="svc-main"><div class="svc-name">${s.name}</div><div class="svc-detail">${s.detail||''}</div></div><span class="svc-badge ${badge}">${label}</span></div>`;
+        }).join('');
+      }catch(e){document.body.innerHTML='<div style="padding:40px;text-align:center;color:var(--red)">加载失败: '+e.message+'</div>'}
+    }
+    loadData();
+    refreshTimer=setInterval(loadData,5000);
+    function toggleDeps(el){
+      const arrow=el.querySelector('.svc-arrow');
+      const sub=el.parentElement.querySelector('.svc-sub');
+      if(!sub)return;
+      sub.classList.toggle('show');
+      if(arrow)arrow.classList.toggle('open');
+    }
+  </script>
+</body>
+</html>

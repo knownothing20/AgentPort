@@ -1,0 +1,42 @@
+{
+  "name": "mcp-remote-agent",
+  "version": "0.0.0",
+  "description": "MCP Server for AI Agent Remote Development - 让 AI Agent 通过 MCP 协议操作远程 Linux 服务器",
+  "author": "YOUR_NAME",
+
+  "variables": {
+    "remoteUrl": "http://YOUR_SERVER_IP:3183",
+    "authToken": "YOUR_CLIENT_TOKEN",
+    "clientId": "YOUR_CLIENT_NAME",
+    "timeoutMs": "120000",
+    "skillDir": "ABSOLUTE_PATH_TO_SKILL_DIR",
+    "nodePath": "node",
+
+    "mcpConfigPath": "PATH_TO_YOUR_AI_TOOL_MCP_CONFIG",
+    "mcpServerName": "mcp-remote-agent",
+
+    "serverPort": "3183",
+    "serverBindHost": "0.0.0.0",
+    "serverWorkspaceRoot": "/home/YOUR_USER/YOUR_WORKSPACE",
+    "serverEnableDashboard": "true",
+    "serverExecTimeoutMs": "120000",
+    "serverExecMaxConcurrency": "2",
+    "serverDaemonDir": "/home/YOUR_USER/.mcp-remote-agent/daemon",
+    "serverAuditLogPath": "/home/YOUR_USER/.mcp-remote-agent/daemon/audit.log",
+    "serverAuthTokens": "client1=token1,client2=token2",
+    "serverAdminTokens": "token1,token2"
+  },
+
+  "mcp": {
+    "server": {
+      "command": "${nodePath}",
+      "args": ["${skillDir}/index.js"],
+      "env": {
+        "MCP_REMOTE_URL": "${remoteUrl}",
+        "MCP_REMOTE_AUTH_TOKEN": "${authToken}",
+        "MCP_REMOTE_CLIENT_ID": "${clientId}",
+        "MCP_REMOTE_TIMEOUT_MS": "${timeoutMs}"
+      }
+    }
+  }
+}
