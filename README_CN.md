@@ -5,7 +5,7 @@ MCP Server for AI Agent Remote Development
 让 AI Agent 通过 MCP 协议操作远程 Linux 服务器，实现本地开发环境与远程服务器的无缝衔接。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-2.3.1-blue)](https://github.com/your-repo/mcp-remote-agent)
+[![Version](https://img.shields.io/badge/version-2.5.0-blue)](https://github.com/knownothing20/mcp-remote-agent)
 
 ---
 
@@ -21,6 +21,8 @@ MCP Server for AI Agent Remote Development
 
 | 功能 | 说明 |
 |------|------|
+| SSH 直连 | 无需部署守护进程，直接 SSH 连接 (v2.4.0+) |
+| 引导式连接 | `remote_setup` 一键连接 + 自动部署守护进程 (v2.5.0+) |
 | 远程文件读写 | `remote_read` / `remote_write` / `remote_stat` |
 | 远程搜索 | `remote_glob` 按 glob 模式搜索文件 |
 | 命令执行 | `remote_bash` 执行简单命令，`remote_script` 执行多行脚本 |
@@ -38,7 +40,7 @@ MCP Server for AI Agent Remote Development
 ### 1. 复制 skill 到本地
 
 ```bash
-git clone https://github.com/your-repo/mcp-remote-agent.git
+git clone https://github.com/knownothing20/mcp-remote-agent.git
 cd mcp-remote-agent
 ```
 
@@ -110,6 +112,7 @@ nohup bash mcp-remote-agent-manager.sh >> boot.log 2>&1 &
 
 | 工具 | 功能 |
 |------|------|
+| `remote_setup` | 引导式连接设置 + 自动部署守护进程 (v2.5.0+) |
 | `remote_health` | 检查远端服务可达性 |
 | `remote_read` | 读取远程文件（ETag 缓存） |
 | `remote_write` | 写入远程文件（自动清理 CRLF/BOM） |

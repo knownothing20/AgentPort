@@ -5,7 +5,7 @@ MCP Server for AI Agent Remote Development
 Enable AI Agents to operate remote Linux servers through MCP protocol, seamlessly connecting local development environments with remote servers.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-2.3.1-blue)](https://github.com/knownothing20/mcp-remote-agent)
+[![Version](https://img.shields.io/badge/version-2.5.0-blue)](https://github.com/knownothing20/mcp-remote-agent)
 
 [中文文档](./README_CN.md)
 
@@ -23,6 +23,8 @@ Enable AI Agents (like WorkBuddy, Claude Desktop, Cursor) to directly read/write
 
 | Feature | Description |
 |---------|-------------|
+| SSH Direct Connection | Connect via SSH without deploying daemon (v2.4.0+) |
+| Guided Setup | `remote_setup` - one-command connection with auto daemon deployment (v2.5.0+) |
 | Remote File R/W | `remote_read` / `remote_write` / `remote_stat` |
 | Remote Search | `remote_glob` search files by glob pattern |
 | Command Execution | `remote_bash` for simple commands, `remote_script` for multi-line scripts |
@@ -112,6 +114,7 @@ After configuration takes effect, restart your AI tool to activate MCP registrat
 
 | Tool | Function |
 |------|----------|
+| `remote_setup` | Guided connection setup with auto daemon deployment (v2.5.0+) |
 | `remote_health` | Check remote service reachability |
 | `remote_read` | Read remote file (ETag cache) |
 | `remote_write` | Write remote file (auto clean CRLF/BOM) |
