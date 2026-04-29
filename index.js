@@ -215,8 +215,8 @@ async function ensureHealthy(hint) {
     if (probe.status === 200) markHealthy(probe.data?.workspaceRoot);
   } catch (_) {}
   if (!isHealthCacheValid()) {
-    const msg = hint || "建议先调用 remote_health 检查远端服务是否可达。";
-    throw Object.assign(new Error(`⚠️ 远程连接状态未知。${msg}`), { _isHealthError: true });
+    const msg = hint || "Consider calling remote_health first to check if the remote service is reachable.";
+    throw Object.assign(new Error(`⚠️ Remote connection status unknown. ${msg}`), { _isHealthError: true });
   }
 }
 
@@ -347,20 +347,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: "remote_connect",
-      description: "切换远程连接目标。可查看可用连接列表或切换到指定连接。",
+      description: "Switch remote connection target. View available connections or switch to a specific one.",
       inputSchema: {
         type: "object",
         properties: {
           connection: {
             type: "string",
-            description: "要切换的连接名称。留空则返回可用连接列表。",
+            description: "Connection name to switch to. Leave empty to return available connections list.",
           },
         },
       },
     },
     {
       name: "remote_health",
-      description: "检查远程守护进程是否可达。首次操作前必须调用。",
+      description: "Check if remote daemon is reachable. Must be called before first operation.",
       inputSchema: {
         type: "object",
         properties: {},
@@ -368,13 +368,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "remote_read",
-      description: "读取远程工作区文件内容，支持 ETag 缓存和条件读取。",
+      description: "Read remote workspace file content. Supports ETag cache and conditional read.",
       inputSchema: {
         type: "object",
         properties: {
           path: {
             type: "string",
-            description: "远程文件路径，支持绝对路径或工作区相对路径。",
+            description: "Remote file path. Supports absolute or workspace-relative path.",
           },
         },
         required: ["path"],
@@ -382,21 +382,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "remote_write",
-      description: "写入文件到远程工作区，自动处理 CRLF→LF 和 BOM 清理，支持乐观并发锁（expectedEtag）。",
+      description: "Write file to remote workspace. Auto CRLF→LF and BOM cleanup. Supports optimistic concurrency lock (expectedEtag).",
       inputSchema: {
         type: "object",
         properties: {
           path: {
             type: "string",
-            description: "远程文件路径，支持绝对路径或工作区相对路径。",
+            description: "Remote file path. Supports absolute or workspace-relative path.",
           },
           content: {
             type: "string",
-            description: "要写入的 UTF-8 文本内容，自动清理 Windows 换行符和 BOM。",
+            description: "UTF-8 text content to write. Auto cleans Windows line endings and BOM.",
           },
           expectedEtag: {
             type: "string",
-            description: "可选，乐观并发锁 token，防止覆盖他人修改。",
+            description: "Optional. Optimistic concurrency lock token to prevent overwriting others' changes.",
           },
         },
         required: ["path", "content"],
@@ -404,13 +404,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "remote_stat",
-      description: "获取远程文件元信息（大小、修改时间、是否为文件/目录），不读取文件内容。",
+      description: "Get remote file metadata (size, modified time, is file/directory). Does not read file content.",
       inputSchema: {
         type: "object",
         properties: {
           path: {
             type: "string",
-            description: "远程文件路径，支持绝对路径或工作区相对路径。",
+            description: "Remote file path. Supports absolute or workspace-relative path.",
           },
         },
         required: ["path"],
@@ -418,17 +418,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "remote_glob",
-      description: "按 glob 模式搜索远程工作区文件，例如 **/*.ts、src/**/*.py。",
+      description: "Search remote workspace files by glob pattern, e.g. **/*.ts, src/**/*.py.",
       inputSchema: {
         type: "object",
         properties: {
           pattern: {
             type: "string",
-            description: "Glob 模式，例如 **/*.ts、src/**/*.py。",
+            description: "Glob pattern, e.g. **/*.ts, src/**/*.py.",
           },
           cwd: {
             type: "string",
-            description: "可选，搜索起始目录。",
+            description: "Optional. Search start directory.",
           },
         },
         required: ["pattern"],
@@ -436,7 +436,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "remote_status",
-      description: "获取远程连接综合诊断信息：连接状态、延迟、缓存命中率、操作统计。",
+      description: "Get comprehensive connection diagnostics: status, latency, cache hit rate, operation stats.",
       inputSchema: {
         type: "object",
         properties: {},
@@ -444,17 +444,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "remote_bash",
-      description: "在远程 Linux 主机上执行 bash 命令。含特殊字符（$ ` \\ 等）的命令自动 base64 编码，避免转义问题。",
+      description: "Execute bash command on remote Linux host. Commands with special chars ($ ` \\ etc.) are auto base64 encoded to avoid escaping issues.",
       inputSchema: {
         type: "object",
         properties: {
           command: {
             type: "string",
-            description: "要执行的 bash 命令。含 $ ` \\ ! \" # ; & | 等特殊字符时自动 base64 编码，无需手动处理。",
+            description: "Bash command to execute. Commands with special chars ($ ` \\ ! \" # ; & |) are auto base64 encoded.",
           },
           cwd: {
             type: "string",
-            description: "可选，工作目录。",
+            description: "Optional. Working directory.",
           },
         },
         required: ["command"],
@@ -462,21 +462,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "remote_script",
-      description: "在远程执行多行脚本，先将脚本写入临时文件再执行，彻底避免 bash 转义和编码问题。适合复杂脚本、含变量/模板字符串/中文的场景。",
+      description: "Execute multi-line script on remote host. Script is written to temp file then executed, completely avoiding bash escaping and encoding issues. Ideal for complex scripts with variables/template strings/unicode.",
       inputSchema: {
         type: "object",
         properties: {
           content: {
             type: "string",
-            description: "脚本内容，原样写入远程临时文件执行，不会经过 bash -c 解析。",
+            description: "Script content. Written to remote temp file as-is, not parsed by bash -c.",
           },
           interpreter: {
             type: "string",
-            description: "脚本解释器，默认 bash。支持 bash、sh、python3、node 等。",
+            description: "Script interpreter, default bash. Supports bash, sh, python3, node, etc.",
           },
           cwd: {
             type: "string",
-            description: "可选，工作目录。",
+            description: "Optional. Working directory.",
           },
         },
         required: ["content"],
@@ -484,13 +484,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "remote_batch",
-      description: "批量执行多个操作（read/stat/glob/bash），单次请求最多 20 个，比多次单独调用更高效。",
+      description: "Batch execute multiple operations (read/stat/glob/bash). Max 20 per request, more efficient than multiple individual calls.",
       inputSchema: {
         type: "object",
         properties: {
           operations: {
             type: "array",
-            description: "操作数组，每项含 type（read|stat|glob|bash）及对应参数。",
+            description: "Operations array. Each item contains type (read|stat|glob|bash) and corresponding parameters.",
             items: {
               type: "object",
               properties: {
@@ -509,17 +509,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "remote_exec_async",
-      description: "异步执行长时间运行的 bash 命令，立即返回 taskId，用 remote_task 查询结果。",
+      description: "Async execute long-running bash command. Returns taskId immediately, use remote_task to query results.",
       inputSchema: {
         type: "object",
         properties: {
           command: {
             type: "string",
-            description: "要异步执行的 bash 命令。",
+            description: "Bash command to execute asynchronously.",
           },
           cwd: {
             type: "string",
-            description: "可选，工作目录。",
+            description: "Optional. Working directory.",
           },
         },
         required: ["command"],
@@ -527,13 +527,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "remote_task",
-      description: "查询异步命令的状态和输出，taskId 由 remote_exec_async 返回。",
+      description: "Query async command status and output. taskId is returned by remote_exec_async.",
       inputSchema: {
         type: "object",
         properties: {
           taskId: {
             type: "string",
-            description: "remote_exec_async 返回的任务 ID。",
+            description: "Task ID returned by remote_exec_async.",
           },
         },
         required: ["taskId"],
@@ -541,18 +541,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "remote_config",
-      description: "读取或修改远端守护进程配置（.env），修改后自动热重载，无需重启服务。支持 GET（读取）和 PUT（写入+重载）两种操作。",
+      description: "Read or modify remote daemon config (.env). Auto hot reload after modify, no restart needed. Supports GET (read) and PUT (write+reload).",
       inputSchema: {
         type: "object",
         properties: {
           action: {
             type: "string",
             enum: ["read", "write"],
-            description: "read=读取当前配置，write=写入新配置并热重载。",
+            description: "read=read current config, write=write new config and hot reload.",
           },
           config: {
             type: "string",
-            description: "write 操作时的新 .env 内容（完整替换）。",
+            description: "New .env content for write operation (full replacement).",
           },
         },
         required: ["action"],
@@ -560,45 +560,45 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "remote_setup",
-      description: "引导式服务器连接设置。收集服务器信息，测试连接，保存配置。支持密码和密钥两种认证方式。",
+      description: "Guided server connection setup. Collect server info, test connection, save config. Supports password and key authentication.",
       inputSchema: {
         type: "object",
         properties: {
           host: {
             type: "string",
-            description: "服务器地址（IP 或域名）。",
+            description: "Server address (IP or domain).",
           },
           port: {
             type: "number",
-            description: "SSH 端口，默认 22。",
+            description: "SSH port, default 22.",
           },
           username: {
             type: "string",
-            description: "登录用户名。",
+            description: "Login username.",
           },
           password: {
             type: "string",
-            description: "登录密码（与 privateKey 二选一）。",
+            description: "Login password (either password or privateKey required).",
           },
           privateKey: {
             type: "string",
-            description: "私钥文件路径（与 password 二选一）。",
+            description: "Private key file path (either password or privateKey required).",
           },
           passphrase: {
             type: "string",
-            description: "私钥密码（如果私钥有密码保护）。",
+            description: "Private key passphrase (if key is password-protected).",
           },
           name: {
             type: "string",
-            description: "连接名称，用于后续引用。默认自动生成。",
+            description: "Connection name for future reference. Auto-generated if not provided.",
           },
           description: {
             type: "string",
-            description: "连接描述。",
+            description: "Connection description.",
           },
           testOnly: {
             type: "boolean",
-            description: "仅测试连接，不保存配置。默认 false。",
+            description: "Test connection only, don't save config. Default false.",
           },
         },
         required: ["host", "username"],
@@ -897,7 +897,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         // Daemon mode
-        try { await ensureHealthy("建议先调用 remote_health 检查远端服务是否可达，再执行读取操作。"); } catch (e) { if (isHealthError(e)) return healthCheckError(e.message + "\n\n如确认服务正常，可忽略此提示直接重试。"); throw e; }
+        try { await ensureHealthy("Consider calling remote_health first to check if remote service is reachable before reading."); } catch (e) { if (isHealthError(e)) return healthCheckError(e.message + "\n\nIf you're sure the service is normal, you can ignore this提示 and retry directly."); throw e; }
 
         // Check local ETag cache first
         const cached = getEtagCache(readPath);
@@ -952,7 +952,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         // Daemon mode
-        try { await ensureHealthy("写入操作前必须确认远端服务可达，建议先调用 remote_health 检查。"); } catch (e) { if (isHealthError(e)) return healthCheckError(e.message + "\n\n如确认服务正常，可忽略此提示直接重试。"); throw e; }
+        try { await ensureHealthy("Must confirm remote service is reachable before write operation. Consider calling remote_health first."); } catch (e) { if (isHealthError(e)) return healthCheckError(e.message + "\n\nIf you're sure the service is normal, you can ignore this提示 and retry directly."); throw e; }
         let expectedEtag = typeof args.expectedEtag === "string" ? args.expectedEtag.trim() : "";
 
         if (!expectedEtag) {
@@ -1040,7 +1040,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         // Daemon mode
-        try { await ensureHealthy("建议先调用 remote_health 检查远端服务是否可达，再执行搜索操作。"); } catch (e) { if (isHealthError(e)) return healthCheckError(e.message + "\n\n如确认服务正常，可忽略此提示直接重试。"); throw e; }
+        try { await ensureHealthy("Consider calling remote_health first to check if remote service is reachable before searching."); } catch (e) { if (isHealthError(e)) return healthCheckError(e.message + "\n\nIf you're sure the service is normal, you can ignore this提示 and retry directly."); throw e; }
         const data = await postWithFallback(["/api/fs/glob", "/glob"], {
           pattern,
           cwd,
@@ -1065,7 +1065,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         // Daemon mode
-        try { await ensureHealthy("建议先调用 remote_health 检查远端服务是否可达，再执行远程命令。"); } catch (e) { if (isHealthError(e)) return healthCheckError(e.message + "\n\n如确认服务正常，可忽略此提示直接重试。"); throw e; }
+        try { await ensureHealthy("Consider calling remote_health first to check if remote service is reachable before executing commands."); } catch (e) { if (isHealthError(e)) return healthCheckError(e.message + "\n\nIf you're sure the service is normal, you can ignore this提示 and retry directly."); throw e; }
         // Auto base64 escape for commands containing bash special chars
         const effectiveCommand = needsBase64Escape(command) ? wrapBase64Command(command) : command;
         const data = await postWithFallback(["/api/exec", "/api/cmd/execute", "/bash"], { command: effectiveCommand, cwd });
@@ -1385,8 +1385,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!password && !privateKey) {
           return toTextResult(JSON.stringify({
             success: false,
-            error: "需要提供 password 或 privateKey 之一。",
-            hint: "如果用密码登录，请提供 password 参数。如果用密钥登录，请提供 privateKey 参数（密钥文件路径）。",
+            error: "Either password or privateKey is required.",
+            hint: "For password login, provide the password parameter. For key login, provide the privateKey parameter (path to key file).",
           }, null, 2));
         }
 
@@ -1472,7 +1472,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           if (testOnly) {
             return toTextResult(JSON.stringify({
               success: true,
-              message: "连接测试成功！",
+              message: "Connection test successful!",
               server: result.stdout,
             }, null, 2));
           }
@@ -1568,27 +1568,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
 
           // Build response message
-          let message = '✅ 连接成功！';
+          let message = '✅ Connection successful!';
           if (daemonInfo && !daemonInfo.error) {
             const dashboardUrl = `${daemonInfo.url}/?token=${daemonInfo.authToken}`;
             message = [
-              '✅ 开发环境就绪！',
+              '✅ Development environment ready!',
               '',
-              '**连接信息：**',
-              `- SSH：${username}@${host}:${port}`,
-              `- Daemon：${daemonInfo.url}`,
-              `- 工作区：${daemonInfo.workspaceRoot}`,
+              '**Connection Info:**',
+              `- SSH: ${username}@${host}:${port}`,
+              `- Daemon: ${daemonInfo.url}`,
+              `- Workspace: ${daemonInfo.workspaceRoot}`,
               '',
-              '**📊 查看状态：**',
-              `打开 Dashboard 查看实时状态：${dashboardUrl}`,
-              '（可查看连接状态、客户端列表、命令执行记录等）',
+              '**📊 Monitor Status:**',
+              `Open Dashboard to view real-time status: ${dashboardUrl}`,
+              '(View connection status, client list, command execution logs, etc.)',
               '',
-              '可以开始远程开发了！',
+              'Ready for remote development!',
             ].join('\n');
           } else if (daemonInfo && daemonInfo.error) {
-            message = `⚠️ SSH 连接成功，但 daemon 部署失败：${daemonInfo.error}\n\n仍可通过 SSH 模式开发。`;
+            message = `⚠️ SSH connection succeeded, but daemon deployment failed: ${daemonInfo.error}\n\nYou can still develop via SSH mode.`;
           } else {
-            message = `✅ SSH 连接已保存！\n可以开始远程开发了。`;
+            message = `✅ SSH connection saved!\nReady for remote development.`;
           }
 
           const resultData = {
@@ -1617,8 +1617,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             success: false,
             error: error.message,
             hint: password 
-              ? "请检查密码是否正确，以及服务器是否允许密码登录。"
-              : "请检查密钥路径是否正确，密钥是否有密码保护（如有请提供 passphrase）。",
+              ? "Please check if the password is correct and if the server allows password login."
+              : "Please check if the key path is correct and if the key has a passphrase (if so, provide passphrase).",
           }, null, 2));
         }
       }
