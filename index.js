@@ -1570,21 +1570,47 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // Build response message
           let message = '✅ 连接成功！';
           if (daemonInfo && !daemonInfo.error) {
-            message = `✅ 开发环境就绪！\n- SSH 连接：${username}@${host}:${port}\n- Daemon 服务：${daemonInfo.url}\n- 工作区：${daemonInfo.workspaceRoot}\n\n可以开始远程开发了！`;
+            const dashboardUrl = `${daemonInfo.url}/?token=${daemonInfo.authToken}`;
+            message = [
+              '✅ 开发环境就绪！',
+              '',
+              '**连接信息：**',
+              `- SSH：${username}@${host}:${port}`,
+              `- Daemon：${daemonInfo.url}`,
+              `- 工作区：${daemonInfo.workspaceRoot}`,
+              '',
+              '**📊 查看状态：**',
+              `打开 Dashboard 查看实时状态：${dashboardUrl}`,
+              '（可查看连接状态、客户端列表、命令执行记录等）',
+              '',
+              '可以开始远程开发了！',
+            ].join('\n');
           } else if (daemonInfo && daemonInfo.error) {
             message = `⚠️ SSH 连接成功，但 daemon 部署失败：${daemonInfo.error}\n\n仍可通过 SSH 模式开发。`;
           } else {
             message = `✅ SSH 连接已保存！\n可以开始远程开发了。`;
           }
 
-          return toTextResult(JSON.stringify({
+          const resultData = {
             success: true,
             message: message,
             ssh: { connection: name, host: `${username}@${host}:${port}`, server: result.stdout },
-            daemon: daemonInfo && !daemonInfo.error ? { url: daemonInfo.url, workspaceRoot: daemonInfo.workspaceRoot } : (daemonInfo || null),
             saved: configPath,
             defaultConnection: _currentConnection,
-          }, null, 2));
+          };
+          
+          if (daemonInfo && !daemonInfo.error) {
+            resultData.daemon = {
+              url: daemonInfo.url,
+              dashboardUrl: `${daemonInfo.url}/?token=${daemonInfo.authToken}`,
+              authToken: daemonInfo.authToken,
+              workspaceRoot: daemonInfo.workspaceRoot,
+            };
+          } else if (daemonInfo) {
+            resultData.daemon = daemonInfo;
+          }
+          
+          return toTextResult(JSON.stringify(resultData, null, 2));
         } catch (error) {
           try { testClient.disconnect(); } catch {}
           return toTextResult(JSON.stringify({
