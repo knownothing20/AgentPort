@@ -1,0 +1,21 @@
+# 本地配置（不上传）
+local/
+SYNC.md
+
+# 自动生成
+server/.env
+
+# 依赖
+node_modules/
+
+# 日志
+*.log
+*.tmp
+
+# IDE
+.idea/
+.vscode/
+
+# 系统文件
+.DS_Store
+Thumbs.db
