@@ -8,6 +8,7 @@ import axios from "axios";
 import fs from "fs";
 import path from "path";
 import { SSHClient, SSHConnectionManager } from "./ssh-client.js";
+import logger from "./logger.js";
 
 // Read version from local/mcp-remote-agent.json (single source of truth)
 import { fileURLToPath } from "url";
@@ -608,10 +609,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 }));
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const toolName = request.params.name;
+  const startTime = Date.now();
+  
   try {
     const args = getArguments(request);
+    
+    // Only log errors (not normal calls for cleaner logs)
 
-    switch (request.params.name) {
+    switch (toolName) {
       case "remote_connect": {
         recordOp("remote_connect");
         const connectionName = args.connection;
@@ -1627,6 +1633,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         throw new Error(`Unknown tool: ${request.params.name}`);
     }
   } catch (error) {
+    // Log error
+    logger.error(toolName, "Failed: " + errorMessage(error));
+    
     // Mark unhealthy on network errors so next call prompts health check
     if (isNetworkError(error)) {
       markUnhealthy();
@@ -1641,6 +1650,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       ],
       isError: true,
     };
+  } finally {
+    // Only log errors (not success calls)
   }
 });
 
