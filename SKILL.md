@@ -12,7 +12,7 @@ MCP Server for AI Agent Remote Development
 
 **类比**：VS Code Remote SSH 是给人用的，mcp-remote-agent 是给 AI 用的。
 
-**v2.3.1**
+**v2.5.0**
 
 ---
 
@@ -334,7 +334,7 @@ cp mcp-remote-agent.example.json local/mcp-remote-agent.json
 ```json
 {
   "name": "mcp-remote-agent",
-  "version": "2.3.1",
+  "version": "2.5.0",
   "variables": {
     "remoteUrl": "http://你的服务器IP:3183",
     "authToken": "你的客户端token",
