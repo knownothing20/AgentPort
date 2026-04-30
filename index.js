@@ -1424,6 +1424,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 const files = ['server.js', 'package.json', 'mcp-remote-agent-manager.sh', 'setup-autostart.sh', 'dashboard.html'];
                 
                 await testClient.exec('mkdir -p ~/.mcp-remote-agent/daemon');
+                // Clean up leftover temp files from previous deployments
+                await testClient.exec('rm -f ~/.mcp-remote-agent/daemon/*.clobbered ~/.mcp-remote-agent/daemon/*.tmp ~/.mcp-remote-agent/daemon/*.bak 2>/dev/null; true');
                 
                 for (const file of files) {
                   const localPath = path.join(serverDir, file);
@@ -1437,9 +1439,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 await testClient.exec('cd ~/.mcp-remote-agent/daemon && npm install --production 2>&1');
               }
               
-              // Generate auth token
-              const token = `mcp-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-              const clientId = args.clientId || 'auto-deploy';
+              // Generate secure auth token (auto-generated, no user input needed)
+              const token = `mcp-${host.replace(/\./g, '-')}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 14)}`;
+              const clientId = args.clientId || `client-${username}-${host.replace(/\./g, '-')}`;
               
               // Create .env file
               const envContent = [
