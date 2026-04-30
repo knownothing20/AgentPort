@@ -5,7 +5,7 @@ MCP Server for AI Agent Remote Development
 让 AI Agent 通过 MCP 协议操作远程 Linux 服务器，实现本地开发环境与远程服务器的无缝衔接。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-2.3.1-blue)](https://github.com/your-repo/mcp-remote-agent)
+[![Version](https://img.shields.io/badge/version-2.5.0-blue)](https://github.com/your-repo/mcp-remote-agent)
 
 ---
 
@@ -165,7 +165,7 @@ mcp-remote-agent/
 | `connections.json` | `local/` | 多服务器连接配置（可选，参考 `connections.json.example`） |
 | `.env` | `server/` | 服务端配置（由 `sync.cjs` 自动生成） |
 
-详细配置说明见 [`local/README.md`](./local/README.md)。
+详细配置说明见 [`local/config-guide.md`](./local/config-guide.md)。
 
 ---
 
