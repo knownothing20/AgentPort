@@ -110,6 +110,7 @@ mcp-remote-agent/
 
 | 工具 | 说明 | SSH 模式 | 守护进程模式 |
 |------|------|----------|--------------|
+| `remote_ssh_info` | 扫描本地 SSH 环境（密钥、config、已知主机） | ✅ | ✅ |
 | `remote_setup` | 引导式连接设置（密码/密钥） | ✅ | ❌ |
 | `remote_connect` | 切换远程连接或查看可用连接 | ✅ | ✅ |
 | `remote_health` | 检查当前连接的健康状态 | ✅ | ✅ |
@@ -235,6 +236,29 @@ mcp-remote-agent/
    ```
    remote_connect(connection="daemon-prod")
    ```
+
+---
+
+## remote_ssh_info 本地 SSH 环境扫描（v2.5.0+）
+
+在调用 `remote_setup` 之前，先用 `remote_ssh_info` 了解本地有哪些 SSH 资源可用。
+
+### 返回内容
+
+| 字段 | 说明 |
+|------|------|
+| `privateKeys` | 本地私钥列表（文件名、类型、是否加密） |
+| `publicKeys` | 公钥列表 |
+| `configHosts` | `~/.ssh/config` 中已配置的主机 |
+| `knownHosts` | `known_hosts` 中已连接过的主机 |
+| `savedConnections` | `connections.json` 中已保存的连接 |
+
+### AI 使用规则
+
+**AI 在引导用户进行首次远程连接时，必须先调用 `remote_ssh_info`**，然后：
+1. 如果 `configHosts` 有匹配的主机，直接推荐给用户
+2. 如果 `privateKeys` 有可用密钥，询问用户是否用该密钥连接
+3. 如果 `knownHosts` 有目标 IP，告诉用户"之前已连接过此服务器"
 
 ---
 

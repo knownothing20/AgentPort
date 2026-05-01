@@ -110,6 +110,7 @@ nohup bash mcp-remote-agent-manager.sh >> boot.log 2>&1 &
 
 | 工具 | 功能 |
 |------|------|
+| `remote_ssh_info` | 扫描本地 SSH 环境（密钥、config、已知主机） |
 | `remote_health` | 检查远端服务可达性 |
 | `remote_read` | 读取远程文件（ETag 缓存） |
 | `remote_write` | 写入远程文件（自动清理 CRLF/BOM） |

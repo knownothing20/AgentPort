@@ -112,6 +112,7 @@ After configuration takes effect, restart your AI tool to activate MCP registrat
 
 | Tool | Function |
 |------|----------|
+| `remote_ssh_info` | Scan local SSH environment (keys, config, known hosts) |
 | `remote_health` | Check remote service reachability |
 | `remote_read` | Read remote file (ETag cache) |
 | `remote_write` | Write remote file (auto clean CRLF/BOM) |
