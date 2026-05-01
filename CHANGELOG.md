@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.5.0] - 2026-05
+
+### Added
+- **remote_ssh_info Tool**: Scan local SSH environment (private keys, SSH config hosts, known_hosts, saved connections) — helps users discover available SSH resources before connecting
+- **setup.js CLI Wizard**: Interactive command-line setup (`npm run setup`) that scans local SSH, guides user selection, tests connection, and auto-saves config
+- **ssh-scanner.js Shared Module**: Extracted SSH scanning logic into reusable module, shared by both `index.js` (MCP tools) and `setup.js` (CLI wizard)
+- **Smart Auth Recommendations**: `remote_setup` now auto-scans local SSH when no auth provided, returning smart recommendations (matching config hosts, usable keys) instead of a plain error
+- **formatSSHScanSummary()**: Human-readable summary formatting for SSH scan results
+
+### Changed
+- **remote_setup Smart Scanning**: When called without `password`/`privateKey`, `remote_setup` auto-scans `~/.ssh/` and returns structured recommendations (config matches, usable keys, known_hosts status) instead of generic error
+- **remote_ssh_info Refactored**: Now delegates scanning to `ssh-scanner.js` shared module, reducing code from 170 to 50 lines
+- **index.js**: Removed `os` import (no longer needed), removed inline `scanLocalSSH()` and `formatSSHScanSummary()` functions
+- **SKILL docs**: Updated guided installation flow to reflect `remote_setup` built-in scanning; removed outdated "must call remote_ssh_info first" rule
+- **README**: Added CLI guided setup section (Step 3, recommended) with wizard capabilities overview
+- **sync-to-github.ps1**: File list updated to include `ssh-scanner.js` and `setup.js`
+
+---
+
 ## [2.4.0] - 2026-04
 
 ### Added

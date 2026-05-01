@@ -7,6 +7,25 @@
 
 ---
 
+## [2.5.0] - 2026-05
+
+### 新增
+- **remote_ssh_info 工具**：扫描本地 SSH 环境（私钥、SSH config 主机、known_hosts、已保存连接）——帮助用户在连接前了解可用 SSH 资源
+- **setup.js CLI 引导式安装**：交互式命令行向导（`npm run setup`），自动扫描本地 SSH、引导用户选择、测试连接、自动保存配置
+- **ssh-scanner.js 公共模块**：提取 SSH 扫描逻辑为可复用模块，`index.js`（MCP 工具）和 `setup.js`（CLI 向导）共享使用
+- **智能认证推荐**：`remote_setup` 未提供认证时自动扫描本地 SSH，返回智能推荐（匹配的 config 主机、可用密钥），不再简单报错
+- **formatSSHScanSummary()**：SSH 扫描结果的人类可读摘要格式化
+
+### 变更
+- **remote_setup 智能扫描**：调用时未提供 `password`/`privateKey`，自动扫描 `~/.ssh/` 并返回结构化推荐（config 匹配、可用密钥、known_hosts 状态），取代通用错误提示
+- **remote_ssh_info 重构**：扫描逻辑委托给 `ssh-scanner.js` 公共模块，代码从 170 行精简到 50 行
+- **index.js**：移除 `os` 导入（不再需要），移除内联 `scanLocalSSH()` 和 `formatSSHScanSummary()` 函数
+- **SKILL 文档**：更新引导安装流程，反映 `remote_setup` 内置扫描功能；移除过时的"必须先调用 remote_ssh_info"规则
+- **README**：新增 CLI 引导式配置部分（第 3 步，推荐），说明向导功能
+- **sync-to-github.ps1**：文件列表新增 `ssh-scanner.js` 和 `setup.js`
+
+---
+
 ## [2.4.0] - 2026-04
 
 ### 新增

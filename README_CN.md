@@ -48,7 +48,24 @@ cd mcp-remote-agent
 npm install
 ```
 
-### 3. 配置
+### 3. CLI 引导式配置（推荐）
+
+使用交互式向导自动扫描 SSH 环境，一步步引导配置：
+
+```bash
+npm run setup
+```
+
+该命令会：
+1. 自动扫描本地 SSH 密钥、config 和 known_hosts
+2. 展示扫描结果，让你选择合适的认证方式
+3. 引导输入服务器地址和用户名
+4. 测试 SSH 连接
+5. 自动保存配置到 `local/connections.json`
+
+### 4. 手动配置（备选）
+
+如果不使用引导式向导，可以手动配置：
 
 ```bash
 cp mcp-remote-agent.example.json local/mcp-remote-agent.json
