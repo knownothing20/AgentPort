@@ -50,7 +50,24 @@ cd mcp-remote-agent
 npm install
 ```
 
-### 3. Configure
+### 3. CLI Guided Setup (Recommended)
+
+Use the interactive wizard to scan your SSH environment and guide you through configuration:
+
+```bash
+npm run setup
+```
+
+The wizard will:
+1. Auto-scan your local SSH keys, config, and known_hosts
+2. Display scan results and let you choose an authentication method
+3. Guide you through entering server address and username
+4. Test the SSH connection
+5. Auto-save config to `local/connections.json`
+
+### 4. Manual Configuration (Alternative)
+
+If you prefer not to use the guided wizard:
 
 ```bash
 cp mcp-remote-agent.example.json local/mcp-remote-agent.json
