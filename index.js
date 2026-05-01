@@ -345,6 +345,140 @@ function formatExecOutput(data) {
   return chunks.join("\n\n").trim() || "Command executed successfully with no output.";
 }
 
+/**
+ * Scan local SSH environment: private keys, public keys, SSH config hosts, known_hosts.
+ * Shared by remote_ssh_info and remote_setup.
+ */
+function scanLocalSSH() {
+  const sshDir = path.join(os.homedir(), ".ssh");
+  const result = { privateKeys: [], publicKeys: [], configHosts: [], knownHosts: [] };
+
+  try {
+    if (!fs.existsSync(sshDir)) return result;
+
+    const files = fs.readdirSync(sshDir);
+
+    // 1. Scan private keys
+    for (const f of files) {
+      const fullPath = path.join(sshDir, f);
+      if (/^id_|\.pem$/.test(f) && !f.endsWith('.pub')) {
+        try {
+          const content = fs.readFileSync(fullPath, 'utf-8');
+          let keyType = "unknown";
+          if (/OPENSSH PRIVATE KEY/.test(content)) {
+            const m = content.match(/\b(ed25519|rsa|dsa|ecdsa)\b/i);
+            keyType = m ? m[1].toLowerCase() : "openssh";
+          } else if (/RSA PRIVATE KEY/.test(content)) {
+            keyType = "rsa";
+          } else if (/EC PRIVATE KEY/.test(content)) {
+            keyType = "ecdsa";
+          } else if (/DSA PRIVATE KEY/.test(content)) {
+            keyType = "dsa";
+          }
+          const encrypted = /ENCRYPTED/.test(content);
+          result.privateKeys.push({ path: fullPath, file: f, type: keyType, encrypted });
+        } catch {}
+      }
+      // Public keys
+      if (f.endsWith('.pub')) {
+        try {
+          const content = fs.readFileSync(fullPath, 'utf-8').trim();
+          const parts = content.split(/\s+/);
+          result.publicKeys.push({ path: fullPath, file: f, type: parts[0] || "unknown", comment: parts[2] || "" });
+        } catch {}
+      }
+    }
+
+    // 2. Parse SSH config
+    const configPath = path.join(sshDir, "config");
+    if (fs.existsSync(configPath)) {
+      const lines = fs.readFileSync(configPath, 'utf-8').split('\n');
+      let current = null;
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const hostMatch = trimmed.match(/^Host\s+(.+)$/i);
+        if (hostMatch) {
+          if (current) result.configHosts.push(current);
+          current = { alias: hostMatch[1].trim(), host: "", user: "", port: 22 };
+          continue;
+        }
+        if (current) {
+          const kv = trimmed.match(/^(\S+)\s+(.+)$/);
+          if (kv) {
+            const [, key, val] = kv;
+            const lk = key.toLowerCase();
+            if (lk === 'hostname') current.host = val;
+            else if (lk === 'user') current.user = val;
+            else if (lk === 'port') current.port = parseInt(val) || 22;
+            else if (lk === 'identityfile') current.identityFile = val;
+            else if (lk === 'proxyjump') current.proxyJump = val;
+            else if (lk === 'remoteforward') current.remoteForward = val;
+          }
+        }
+      }
+      if (current) result.configHosts.push(current);
+    }
+
+    // 3. Parse known_hosts
+    const khPath = path.join(sshDir, "known_hosts");
+    if (fs.existsSync(khPath)) {
+      const hosts = new Set();
+      const lines = fs.readFileSync(khPath, 'utf-8').split('\n');
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('|')) continue;
+        const parts = trimmed.split(/\s+/);
+        if (parts.length >= 2) {
+          const h = parts[0].replace(/^\[|\](:\d+)?$/g, '');
+          if (h) hosts.add(h);
+        }
+      }
+      result.knownHosts = [...hosts].sort();
+    }
+  } catch (e) {
+    result.error = e.message;
+  }
+
+  return result;
+}
+
+/**
+ * Generate a human-readable summary from SSH scan result.
+ */
+function formatSSHScanSummary(sshInfo) {
+  const lines = [];
+  if (sshInfo.privateKeys.length) {
+    lines.push(`Private Keys (${sshInfo.privateKeys.length}):`);
+    for (const k of sshInfo.privateKeys) {
+      lines.push(`  - ${k.file} (${k.type}${k.encrypted ? ', encrypted' : ''})`);
+    }
+  } else {
+    lines.push(`Private Keys: None found`);
+  }
+  if (sshInfo.publicKeys.length) {
+    lines.push(`Public Keys (${sshInfo.publicKeys.length}):`);
+    for (const k of sshInfo.publicKeys) {
+      lines.push(`  - ${k.file} (${k.type})${k.comment ? ' # ' + k.comment : ''}`);
+    }
+  }
+  if (sshInfo.configHosts.length) {
+    lines.push(`SSH Config Hosts (${sshInfo.configHosts.length}):`);
+    for (const h of sshInfo.configHosts) {
+      let info = `  - ${h.alias} → ${h.host || '(default)'}:${h.port}`;
+      if (h.user) info += ` user=${h.user}`;
+      if (h.identityFile) info += ` key=${h.identityFile}`;
+      lines.push(info);
+    }
+  } else {
+    lines.push(`SSH Config Hosts: None configured`);
+  }
+  if (sshInfo.knownHosts.length) {
+    lines.push(`Known Hosts (${sshInfo.knownHosts.length}): ${sshInfo.knownHosts.slice(0, 10).join(', ')}${sshInfo.knownHosts.length > 10 ? '...' : ''}`);
+  }
+  return lines.join('\n');
+}
+
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
@@ -1398,11 +1532,95 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const testOnly = args.testOnly === true;
 
         // Validate: need either password or privateKey
+        // If neither provided, auto-scan SSH environment and return smart recommendations
         if (!password && !privateKey) {
+          const sshInfo = scanLocalSSH();
+          const recommendations = [];
+
+          // Check SSH config for host match
+          const configMatches = sshInfo.configHosts.filter(h =>
+            h.host === host || h.alias === host
+          );
+          if (configMatches.length > 0) {
+            for (const m of configMatches) {
+              recommendations.push({
+                type: "config",
+                message: `SSH config 中发现匹配主机 '${m.alias}' → ${m.host || host}:${m.port} user=${m.user || username}`,
+                alias: m.alias,
+                user: m.user,
+                port: m.port,
+                identityFile: m.identityFile,
+              });
+            }
+          }
+
+          // List usable (unencrypted) private keys
+          const usableKeys = sshInfo.privateKeys.filter(k => !k.encrypted);
+          const encryptedKeys = sshInfo.privateKeys.filter(k => k.encrypted);
+          if (usableKeys.length > 0) {
+            for (const k of usableKeys) {
+              recommendations.push({
+                type: "key",
+                message: `发现可用密钥 ${k.file}（${k.type}，未加密）`,
+                file: k.file,
+                path: k.path,
+                keyType: k.type,
+              });
+            }
+          }
+          if (encryptedKeys.length > 0) {
+            for (const k of encryptedKeys) {
+              recommendations.push({
+                type: "key_encrypted",
+                message: `发现加密密钥 ${k.file}（${k.type}，需要密钥密码）`,
+                file: k.file,
+                path: k.path,
+                keyType: k.type,
+              });
+            }
+          }
+
+          // Check known_hosts
+          const knownHostMatch = sshInfo.knownHosts.includes(host);
+
+          // Build human-readable summary
+          const lines = [`## 🔍 SSH 环境扫描结果\n`];
+          lines.push(formatSSHScanSummary(sshInfo));
+          lines.push('');
+
+          if (configMatches.length > 0) {
+            lines.push(`### ✅ 推荐：使用 SSH config 配置`);
+            lines.push(`检测到 config 中已有 ${host} 的配置，可直接连接。`);
+            lines.push('');
+          } else if (usableKeys.length > 0) {
+            lines.push(`### 💡 推荐：使用密钥登录`);
+            for (const k of usableKeys) {
+              lines.push(`  - ${k.file} (${k.type}) → privateKey="${k.path}"`);
+            }
+            lines.push('');
+          } else {
+            lines.push(`### ❌ 未找到可用密钥`);
+            lines.push(`建议选择以下方式之一：`);
+            lines.push(`  1. 使用密码登录（提供 password 参数）`);
+            lines.push(`  2. 使用加密密钥（提供 privateKey + passphrase 参数）`);
+            lines.push('');
+          }
+
+          if (knownHostMatch) {
+            lines.push(`ℹ️ 此主机已在 known_hosts 中，之前连接过。`);
+          }
+
           return toTextResult(JSON.stringify({
             success: false,
-            error: "Either password or privateKey is required.",
-            hint: "For password login, provide the password parameter. For key login, provide the privateKey parameter (path to key file).",
+            needsAuth: true,
+            message: `未提供认证信息，已自动扫描本地 SSH 环境`,
+            host,
+            username,
+            sshInfo,
+            recommendations,
+            knownHostMatch,
+            summary: lines.join('\n'),
+            hint: "请根据以上推荐信息，提供 privateKey 或 password 参数后重新调用 remote_setup",
           }, null, 2));
         }
 
@@ -1643,168 +1861,49 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "remote_ssh_info": {
         recordOp("remote_ssh_info");
-        const sshDir = path.join(os.homedir(), ".ssh");
-        const result = { privateKeys: [], publicKeys: [], configHosts: [], knownHosts: [], savedConnections: [] };
+        const sshInfo = scanLocalSSH();
 
-        try {
-          // 1. Scan private keys
-          if (fs.existsSync(sshDir)) {
-            const files = fs.readdirSync(sshDir);
-            for (const f of files) {
-              const fullPath = path.join(sshDir, f);
-              // Private keys: id_* or *.pem
-              if (/^id_|\.pem$/.test(f) && !f.endsWith('.pub')) {
-                try {
-                  const content = fs.readFileSync(fullPath, 'utf-8');
-                  let keyType = "unknown";
-                  if (/OPENSSH PRIVATE KEY/.test(content)) {
-                    const m = content.match(/\b(ed25519|rsa|dsa|ecdsa)\b/i);
-                    keyType = m ? m[1].toLowerCase() : "openssh";
-                  } else if (/RSA PRIVATE KEY/.test(content)) {
-                    keyType = "rsa";
-                  } else if (/EC PRIVATE KEY/.test(content)) {
-                    keyType = "ecdsa";
-                  } else if (/DSA PRIVATE KEY/.test(content)) {
-                    keyType = "dsa";
-                  }
-                  const encrypted = /ENCRYPTED/.test(content);
-                  result.privateKeys.push({ path: fullPath, file: f, type: keyType, encrypted });
-                } catch {}
+        // Add saved connections
+        const connPath = path.join(__dirname, 'local', 'connections.json');
+        if (fs.existsSync(connPath)) {
+          try {
+            const cfg = JSON.parse(fs.readFileSync(connPath, 'utf-8'));
+            for (const c of cfg.connections || []) {
+              const info = { name: c.name, type: c.type || "daemon" };
+              if (c.type === 'ssh') {
+                info.host = `${c.username}@${c.host}:${c.port || 22}`;
+                if (c.identityFile) info.identityFile = c.identityFile;
+              } else {
+                info.url = c.url;
               }
-              // Public keys: *.pub
-              if (f.endsWith('.pub')) {
-                try {
-                  const content = fs.readFileSync(fullPath, 'utf-8').trim();
-                  const parts = content.split(/\s+/);
-                  result.publicKeys.push({ path: fullPath, file: f, type: parts[0] || "unknown", comment: parts[2] || "" });
-                } catch {}
-              }
+              sshInfo.savedConnections.push(info);
             }
-
-            // 2. Parse SSH config
-            const configPath = path.join(sshDir, "config");
-            if (fs.existsSync(configPath)) {
-              const lines = fs.readFileSync(configPath, 'utf-8').split('\n');
-              let current = null;
-              for (const line of lines) {
-                const trimmed = line.trim();
-                if (!trimmed || trimmed.startsWith('#')) continue;
-                const hostMatch = trimmed.match(/^Host\s+(.+)$/i);
-                if (hostMatch) {
-                  if (current) result.configHosts.push(current);
-                  current = { alias: hostMatch[1].trim(), host: "", user: "", port: 22 };
-                  continue;
-                }
-                if (current) {
-                  const kv = trimmed.match(/^(\S+)\s+(.+)$/);
-                  if (kv) {
-                    const [, key, val] = kv;
-                    const lk = key.toLowerCase();
-                    if (lk === 'hostname') current.host = val;
-                    else if (lk === 'user') current.user = val;
-                    else if (lk === 'port') current.port = parseInt(val) || 22;
-                    else if (lk === 'identityfile') current.identityFile = val;
-                    else if (lk === 'proxyjump') current.proxyJump = val;
-                    else if (lk === 'remoteforward') current.remoteForward = val;
-                  }
-                }
-              }
-              if (current) result.configHosts.push(current);
-            }
-
-            // 3. Parse known_hosts
-            const khPath = path.join(sshDir, "known_hosts");
-            if (fs.existsSync(khPath)) {
-              const hosts = new Set();
-              const lines = fs.readFileSync(khPath, 'utf-8').split('\n');
-              for (const line of lines) {
-                const trimmed = line.trim();
-                if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('|')) continue;
-                const parts = trimmed.split(/\s+/);
-                if (parts.length >= 2) {
-                  // Handle [host]:port format
-                  const h = parts[0].replace(/^\[|\](:\d+)?$/g, '');
-                  if (h) hosts.add(h);
-                }
-              }
-              result.knownHosts = [...hosts].sort();
-            }
-          }
-
-          // 4. Read saved connections
-          const connPath = path.join(__dirname, 'local', 'connections.json');
-          if (fs.existsSync(connPath)) {
-            try {
-              const cfg = JSON.parse(fs.readFileSync(connPath, 'utf-8'));
-              for (const c of cfg.connections || []) {
-                const info = { name: c.name, type: c.type || "daemon" };
-                if (c.type === 'ssh') {
-                  info.host = `${c.username}@${c.host}:${c.port || 22}`;
-                  if (c.identityFile) info.identityFile = c.identityFile;
-                } else {
-                  info.url = c.url;
-                }
-                result.savedConnections.push(info);
-              }
-            } catch {}
-          }
-        } catch (e) {
-          result.error = e.message;
+          } catch {}
+        } else {
+          sshInfo.savedConnections = [];
         }
 
         // Human-readable summary
         const summary = [];
         summary.push(`## Local SSH Environment\n`);
-        if (result.privateKeys.length) {
-          summary.push(`### Private Keys (${result.privateKeys.length})`);
-          for (const k of result.privateKeys) {
-            summary.push(`- ${k.file} (${k.type}${k.encrypted ? ', encrypted' : ''}): ${k.path}`);
-          }
-        } else {
-          summary.push(`### Private Keys: None found`);
-        }
+        summary.push(formatSSHScanSummary(sshInfo));
         summary.push('');
-        if (result.publicKeys.length) {
-          summary.push(`### Public Keys (${result.publicKeys.length})`);
-          for (const k of result.publicKeys) {
-            summary.push(`- ${k.file} (${k.type}) ${k.comment ? '# ' + k.comment : ''}`);
-          }
-        }
-        summary.push('');
-        if (result.configHosts.length) {
-          summary.push(`### SSH Config Hosts (${result.configHosts.length})`);
-          for (const h of result.configHosts) {
-            let info = `${h.alias} → ${h.host || '(default)'}:${h.port}`;
-            if (h.user) info += ` user=${h.user}`;
-            if (h.identityFile) info += ` key=${h.identityFile}`;
-            if (h.proxyJump) info += ` via=${h.proxyJump}`;
-            summary.push(`- ${info}`);
-          }
-        } else {
-          summary.push(`### SSH Config Hosts: None configured`);
-        }
-        summary.push('');
-        if (result.knownHosts.length) {
-          summary.push(`### Known Hosts (${result.knownHosts.length})`);
-          summary.push(`- ${result.knownHosts.join(', ')}`);
-        }
-        summary.push('');
-        if (result.savedConnections.length) {
-          summary.push(`### Saved Connections (${result.savedConnections.length})`);
-          for (const c of result.savedConnections) {
+        if (sshInfo.savedConnections && sshInfo.savedConnections.length) {
+          summary.push(`Saved Connections (${sshInfo.savedConnections.length}):`);
+          for (const c of sshInfo.savedConnections) {
             const detail = c.type === 'ssh' ? c.host : c.url;
-            summary.push(`- ${c.name} [${c.type}] → ${detail}`);
+            summary.push(`  - ${c.name} [${c.type}] → ${detail}`);
           }
         } else {
-          summary.push(`### Saved Connections: None`);
+          summary.push(`Saved Connections: None`);
         }
         summary.push('');
         summary.push('---');
         summary.push(`💡 Use \`remote_setup\` to connect. Pick a host from SSH Config Hosts above, or provide a new IP.`);
         summary.push(`   If a private key is listed, use \`privateKey\` param. Otherwise use \`password\`.`);
 
-        result._summary = summary.join('\n');
-        return toTextResult(JSON.stringify(result, null, 2));
+        sshInfo._summary = summary.join('\n');
+        return toTextResult(JSON.stringify(sshInfo, null, 2));
       }
 
       default:
