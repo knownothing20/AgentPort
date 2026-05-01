@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "node index.js",
+    "setup": "node setup.js",
     "test": "node test.cjs",
     "sync": "node sync.cjs",
     "sync:check": "node sync.cjs --check",
