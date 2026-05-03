@@ -14,6 +14,37 @@ MCP Server for AI Agent Remote Development
 
 **v2.5.0**
 
+## 首次使用快速引导（先过 3 项）
+
+为避免"能看到 skill 但 remote_* 工具不可用"，第一次使用时必须先检查这 3 项：
+
+1. **MCP 注册是否正确**
+   - 目标 AI 软件的 MCP 配置里必须有 `mcp-remote-agent`
+   - `command`/`args` 路径必须是当前机器可执行的绝对路径
+2. **skill 是否安装完整**
+   - `SKILL.md`、`index.js`、`package.json`、`local/mcp-remote-agent.json` 必须存在
+3. **连接信息是否正确**
+   - `connections.json` 中的 `host/port/username/password(privateKey)` 必须可用
+   - daemon 模式下 `url/authToken/clientId` 必须与远端 `.env` 对齐
+
+## AI 开场强制模板（每次新会话先执行）
+
+```text
+[PRECHECK_REQUIRED]
+1) 先执行 remote_connect()
+   - 必须返回连接列表
+   - 必须确认当前连接正确
+2) 再执行 remote_health()
+   - 必须返回健康 JSON
+
+[BLOCK_ON_FAILURE]
+若未返回健康 JSON（例如只返回文档、工具不可见、超时）：
+- 立即停止后续 remote_* 操作
+- 直接提示：当前会话注入失败，请重开会话或重载 MCP 后重试
+```
+
+通过以上预检后，才进入正式读写/执行。
+
 ---
 
 ## 核心原则：mcp-remote-agent.json 是唯一配置入口
@@ -779,6 +810,20 @@ Dashboard 功能：
 - **连续操作间隔 > 5 分钟**时，重新检查健康状态
 - **写入操作前**必须确认连接正常
 - 健康检查失败时，不要继续执行后续操作，直接告知用户
+
+### 会话注入自检（强烈推荐）
+
+为避免"只看到 skill 文档、却无法调用 remote_* 工具"的状态漂移，每次开启新会话时先执行下面 3 步：
+
+1. 调用 `remote_connect()` 查看是否返回连接列表
+2. 立即调用 `remote_health()`
+3. 仅当 `remote_health()` 返回 JSON 健康结果时，再开始远程读写/执行
+
+如果 `remote_health()` 没有返回健康 JSON（例如只返回说明文档、工具不可见、超时），直接判定为注入失败：
+- 不要在当前会话继续硬做
+- 立即重开会话或重载 MCP 配置后再试
+
+推荐首句触发词：`远程连接测试`（先健康检查，再进入正式任务）
 
 ### 操作重试
 
