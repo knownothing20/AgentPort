@@ -163,6 +163,21 @@ mcp-remote-agent/
 
 3. **所有后续操作**会自动使用当前连接，直到再次切换。
 
+### 配置拆分（推荐）
+
+为满足“SSH 本机共享 + Token 客户端私有”，连接配置按两层读取并合并：
+
+1. **共享层（本机共享）**：`C:/Users/<you>/.mcp-remote-agent/connections.shared.json`
+   - 存放非敏感字段（SSH 的 host/port/username/privateKey；daemon 的 name/type/url/description）
+2. **私有层（当前客户端）**：`local/connections.json`
+   - 存放敏感字段（`authToken`、`clientId`、`password`、`passphrase`）
+
+合并优先级：**私有层 > 共享层**（同名连接按字段覆盖）。
+
+可通过环境变量覆盖共享文件路径：
+- `MCP_REMOTE_SHARED_CONNECTIONS_PATH`
+- `NIUMA_SSH_SHARED_CONNECTIONS_PATH`（兼容旧变量名）
+
 ### 工具列表
 
 | 工具 | 说明 | SSH 模式 | 守护进程模式 |
