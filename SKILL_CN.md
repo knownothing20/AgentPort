@@ -45,6 +45,32 @@ MCP Server for AI Agent Remote Development
 
 通过以上预检后，才进入正式读写/执行。
 
+## 关键防误用（必须遵守）
+
+`mcp-remote-agent` 是 **MCP Server**，不是“执行类 skill 命令”。
+
+### 正确认知
+- `remote_connect`、`remote_health`、`remote_read` 等是 **MCP 工具**，不是 skill 名称
+- `mcp-remote-agent` 出现在 skill 列表里，只表示说明文档可见，不等于 `remote_*` 工具已注入
+
+### 严禁行为
+- 禁止把“调用 mcp-remote-agent / 触发词”当成工具调用成功
+- 禁止在 `remote_*` 不可见时反复重试同一触发词
+- 禁止用 `curl` 通了就认定“AI 侧可用”（这只能证明远端服务可达，不能证明 MCP 注入成功）
+
+### 会话内强制判定流程
+1. 先调用 `remote_connect()`
+2. 再调用 `remote_health()`
+3. 若出现任一情况，立即判定为**注入失败**并停止后续 remote_* 操作：
+   - 工具不存在 / 不可见
+   - 返回的是文档文本而不是工具 JSON 结果
+   - 持续超时且无工具层错误对象
+
+### 注入失败时只做 3 件事
+1. 明确告知：当前会话 MCP 注入失败（不是远端服务本身故障）
+2. 引导检查 MCP 注册配置（`mcpServers.mcp-remote-agent` 的 `command/args/env`）
+3. 要求重载 MCP 或完整重启客户端后，在新会话先执行 `remote_connect()` + `remote_health()`
+
 ---
 
 ## 核心原则：mcp-remote-agent.json 是唯一配置入口
