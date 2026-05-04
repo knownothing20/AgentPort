@@ -14,18 +14,39 @@ MCP Server for AI Agent Remote Development
 
 **v2.5.0**
 
-## 首次使用快速引导（先过 3 项）
+## 首次使用快速引导（先过 4 项）
 
-为避免"能看到 skill 但 remote_* 工具不可用"，第一次使用时必须先检查这 3 项：
+为避免"能看到 skill 但 remote_* 工具不可用"，第一次使用时必须先检查这 4 项：
 
 1. **MCP 注册是否正确**
    - 目标 AI 软件的 MCP 配置里必须有 `mcp-remote-agent`
    - `command`/`args` 路径必须是当前机器可执行的绝对路径
 2. **skill 是否安装完整**
    - `SKILL.md`、`index.js`、`package.json`、`local/mcp-remote-agent.json` 必须存在
-3. **连接信息是否正确**
+3. **依赖是否安装完整（关键门槛）**
+   - `node_modules` 必须存在
+   - `ssh2`、`@modelcontextprotocol/sdk`、`axios` 必须可用
+   - 任何依赖缺失都可能导致 MCP 进程启动即崩溃，进而 `remote_*` 工具无法注入
+4. **连接信息是否正确**
    - `connections.json` 中的 `host/port/username/password(privateKey)` 必须可用
    - daemon 模式下 `url/authToken/clientId` 必须与远端 `.env` 对齐
+
+### 失败特征 -> 根因（优先看这个）
+
+| 现象/报错 | 根因 | 处理 |
+|---|---|---|
+| `Cannot find package 'ssh2'` | 客户端依赖未安装或损坏 | 在 skill 目录执行 `npm install`（或 `pnpm install`）后重开会话 |
+| `Yallist is not a constructor` | 本机 npm/tar 运行环境异常 | 先修复 Node/npm（建议重装 Node LTS），再重装依赖 |
+| 只看到 SKILL 文档，看不到 `remote_*` | MCP 进程启动失败或注入失败 | 先修依赖/注册，再重开会话触发重新注入 |
+
+### AI 强制执行顺序（禁止跳步）
+
+1. 先确认依赖：`node_modules` + `ssh2` 可用
+2. 再进入会话并执行 `remote_connect()`
+3. 再执行 `remote_health()`
+4. 只有第 2、3 步都成功，才允许执行其余 `remote_*`
+
+> 不允许先做远程操作再回头补依赖检查。
 
 ## AI 开场强制模板（每次新会话先执行）
 
@@ -44,32 +65,6 @@ MCP Server for AI Agent Remote Development
 ```
 
 通过以上预检后，才进入正式读写/执行。
-
-## 关键防误用（必须遵守）
-
-`mcp-remote-agent` 是 **MCP Server**，不是“执行类 skill 命令”。
-
-### 正确认知
-- `remote_connect`、`remote_health`、`remote_read` 等是 **MCP 工具**，不是 skill 名称
-- `mcp-remote-agent` 出现在 skill 列表里，只表示说明文档可见，不等于 `remote_*` 工具已注入
-
-### 严禁行为
-- 禁止把“调用 mcp-remote-agent / 触发词”当成工具调用成功
-- 禁止在 `remote_*` 不可见时反复重试同一触发词
-- 禁止用 `curl` 通了就认定“AI 侧可用”（这只能证明远端服务可达，不能证明 MCP 注入成功）
-
-### 会话内强制判定流程
-1. 先调用 `remote_connect()`
-2. 再调用 `remote_health()`
-3. 若出现任一情况，立即判定为**注入失败**并停止后续 remote_* 操作：
-   - 工具不存在 / 不可见
-   - 返回的是文档文本而不是工具 JSON 结果
-   - 持续超时且无工具层错误对象
-
-### 注入失败时只做 3 件事
-1. 明确告知：当前会话 MCP 注入失败（不是远端服务本身故障）
-2. 引导检查 MCP 注册配置（`mcpServers.mcp-remote-agent` 的 `command/args/env`）
-3. 要求重载 MCP 或完整重启客户端后，在新会话先执行 `remote_connect()` + `remote_health()`
 
 ---
 
@@ -162,21 +157,6 @@ mcp-remote-agent/
    ```
 
 3. **所有后续操作**会自动使用当前连接，直到再次切换。
-
-### 配置拆分（推荐）
-
-为支持“SSH 本机共享 + Token 客户端私有”，连接配置按两层读取并合并：
-
-1. **共享层（本机共享）**：`C:/Users/<you>/.mcp-remote-agent/connections.shared.json`
-   - 存放非敏感字段（SSH host/port/username/privateKey；daemon 的 name/type/url/description）
-2. **私有层（当前客户端）**：`local/connections.json`
-   - 存放敏感字段（`authToken`、`clientId`、`password`、`passphrase`）
-
-合并优先级：**私有层 > 共享层**（同名连接按字段覆盖）。
-
-可通过环境变量覆盖共享文件路径：
-- `MCP_REMOTE_SHARED_CONNECTIONS_PATH`
-- `NIUMA_SSH_SHARED_CONNECTIONS_PATH`（兼容旧名）
 
 ### 工具列表
 
@@ -547,7 +527,6 @@ cp mcp-remote-agent.example.json local/mcp-remote-agent.json
     "authToken": "你的客户端token",
     "clientId": "你的客户端名称",
     "timeoutMs": "120000",
-    "sharedConnectionsPath": "~/.mcp-remote-agent/connections.shared.json",
     "skillDir": "skill目录的绝对路径",
     "nodePath": "node",
 
@@ -597,8 +576,7 @@ cp mcp-remote-agent.example.json local/mcp-remote-agent.json
         "MCP_REMOTE_URL": "<remoteUrl>",
         "MCP_REMOTE_AUTH_TOKEN": "<authToken>",
         "MCP_REMOTE_CLIENT_ID": "<clientId>",
-        "MCP_REMOTE_TIMEOUT_MS": "<timeoutMs>",
-        "MCP_REMOTE_SHARED_CONNECTIONS_PATH": "<sharedConnectionsPath>"
+        "MCP_REMOTE_TIMEOUT_MS": "<timeoutMs>"
       }
     }
   }
