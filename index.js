@@ -36,30 +36,115 @@ const rawTimeout = Number(process.env.MCP_REMOTE_TIMEOUT_MS || process.env.NIUMA
 const REQUEST_TIMEOUT_MS = Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : 120000;
 
 // --- Dynamic connection management ---
+const PRIVATE_CONNECTIONS_PATH = path.join(__dirname, "local", "connections.json");
+const DEFAULT_SHARED_CONNECTIONS_PATH = (() => {
+  const home = process.env.USERPROFILE || process.env.HOME;
+  if (!home) return PRIVATE_CONNECTIONS_PATH;
+  return path.join(home, ".mcp-remote-agent", "connections.shared.json");
+})();
+const SHARED_CONNECTIONS_PATH = (process.env.MCP_REMOTE_SHARED_CONNECTIONS_PATH || process.env.NIUMA_SSH_SHARED_CONNECTIONS_PATH || DEFAULT_SHARED_CONNECTIONS_PATH).trim();
+
 let _connections = {};
 let _currentConnection = null;
 let _connectionAxios = null;
 let _sshManager = new SSHConnectionManager();
 
-function loadConnections() {
+function createEmptyConnConfig() {
+  return { connections: [], default: "" };
+}
+
+function normalizeConnConfig(config) {
+  const safe = config && typeof config === "object" ? config : {};
+  return {
+    connections: Array.isArray(safe.connections) ? safe.connections.filter((c) => c && c.name) : [],
+    default: typeof safe.default === "string" ? safe.default : "",
+  };
+}
+
+function readConnConfig(filePath, label) {
   try {
-    const configPath = path.join(__dirname, 'local', 'connections.json');
-    if (fs.existsSync(configPath)) {
-      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-      _connections = {};
-      for (const conn of config.connections || []) {
-        _connections[conn.name] = conn;
-        // Register SSH connections
-        if (conn.type === 'ssh') {
-          _sshManager.addConnection(conn.name, conn);
-        }
-      }
-      return config.default || Object.keys(_connections)[0];
-    }
+    if (!fs.existsSync(filePath)) return createEmptyConnConfig();
+    const raw = fs.readFileSync(filePath, "utf-8").replace(/^\uFEFF/, "");
+    return normalizeConnConfig(JSON.parse(raw));
   } catch (e) {
-    console.error('Failed to load connections.json:', e.message);
+    console.error(`Failed to load ${label}:`, e.message);
+    return createEmptyConnConfig();
   }
-  return null;
+}
+
+function ensureParentDir(filePath) {
+  const dir = path.dirname(filePath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+}
+
+function upsertConnection(config, connection) {
+  const safe = normalizeConnConfig(config);
+  const idx = safe.connections.findIndex((c) => c.name === connection.name);
+  if (idx >= 0) {
+    safe.connections[idx] = connection;
+  } else {
+    safe.connections.push(connection);
+  }
+  return safe;
+}
+
+function mergeConnectionConfigs(sharedConfig, privateConfig) {
+  const mergedMap = new Map();
+  for (const conn of sharedConfig.connections || []) {
+    mergedMap.set(conn.name, { ...conn });
+  }
+  for (const conn of privateConfig.connections || []) {
+    const existing = mergedMap.get(conn.name) || {};
+    mergedMap.set(conn.name, { ...existing, ...conn });
+  }
+  const mergedConnections = Array.from(mergedMap.values());
+  const mergedDefault = privateConfig.default || sharedConfig.default || (mergedConnections[0]?.name || "");
+  return { connections: mergedConnections, default: mergedDefault };
+}
+
+function splitConnectionForStorage(connection) {
+  const sharedConn = {};
+  const privateConn = { name: connection.name, type: connection.type || "daemon" };
+
+  for (const [key, value] of Object.entries(connection)) {
+    if (value === undefined) continue;
+    if (["authToken", "clientId", "password", "passphrase"].includes(key)) {
+      privateConn[key] = value;
+      continue;
+    }
+    sharedConn[key] = value;
+  }
+
+  if (!sharedConn.type) sharedConn.type = connection.type || "daemon";
+  if (!sharedConn.name) sharedConn.name = connection.name;
+  return { sharedConn, privateConn };
+}
+
+function persistConnectionConfigs(sharedConfig, privateConfig) {
+  ensureParentDir(SHARED_CONNECTIONS_PATH);
+  ensureParentDir(PRIVATE_CONNECTIONS_PATH);
+  fs.writeFileSync(SHARED_CONNECTIONS_PATH, JSON.stringify(normalizeConnConfig(sharedConfig), null, 2), "utf-8");
+  fs.writeFileSync(PRIVATE_CONNECTIONS_PATH, JSON.stringify(normalizeConnConfig(privateConfig), null, 2), "utf-8");
+}
+
+function loadConnections() {
+  const sharedConfig = readConnConfig(SHARED_CONNECTIONS_PATH, "shared connections");
+  const privateConfig = readConnConfig(PRIVATE_CONNECTIONS_PATH, "private connections");
+  const merged = mergeConnectionConfigs(sharedConfig, privateConfig);
+
+  _connections = {};
+  _sshManager = new SSHConnectionManager();
+
+  for (const conn of merged.connections) {
+    _connections[conn.name] = conn;
+    if (conn.type === "ssh") {
+      _sshManager.addConnection(conn.name, conn);
+    }
+  }
+
+  return merged.default || Object.keys(_connections)[0] || null;
 }
 
 function getAxiosInstance(connectionName) {
@@ -1592,16 +1677,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           if (privateKey) connConfig.privateKey = privateKey;
           if (passphrase) connConfig.passphrase = passphrase;
 
-          // Update connections.json
-          const configPath = path.join(__dirname, 'local', 'connections.json');
-          let config = { connections: [], default: name };
-          try {
-            if (fs.existsSync(configPath)) {
-              config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-            }
-          } catch {}
+          // Split-save connection config: shared file stores non-sensitive fields,
+          // private file stores sensitive fields (token/password/passphrase/clientId).
+          let sharedConfig = readConnConfig(SHARED_CONNECTIONS_PATH, "shared connections");
+          let privateConfig = readConnConfig(PRIVATE_CONNECTIONS_PATH, "private connections");
 
-          // Save daemon connection if deployed (after config is initialized)
+          const { sharedConn: sharedSshConn, privateConn: privateSshConn } = splitConnectionForStorage(connConfig);
+          sharedConfig = upsertConnection(sharedConfig, sharedSshConn);
+          if (Object.keys(privateSshConn).length > 2) {
+            privateConfig = upsertConnection(privateConfig, privateSshConn);
+          }
+
+          // Save daemon connection if deployed (after configs are initialized)
           if (daemonInfo && !daemonInfo.error) {
             const daemonName = `${name}-daemon`;
             const daemonConn = {
@@ -1612,35 +1699,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               authToken: daemonInfo.authToken,
               clientId: daemonInfo.clientId,
             };
-            
-            // Add daemon connection
-            const existingDaemonIdx = config.connections.findIndex(c => c.name === daemonName);
-            if (existingDaemonIdx >= 0) {
-              config.connections[existingDaemonIdx] = daemonConn;
-            } else {
-              config.connections.push(daemonConn);
-            }
-            config.default = daemonName; // Switch to daemon by default
-          }
 
-          // Add or update SSH connection
-          const existingIdx = config.connections.findIndex(c => c.name === name);
-          if (existingIdx >= 0) {
-            config.connections[existingIdx] = connConfig;
+            const { sharedConn: sharedDaemonConn, privateConn: privateDaemonConn } = splitConnectionForStorage(daemonConn);
+            sharedConfig = upsertConnection(sharedConfig, sharedDaemonConn);
+            privateConfig = upsertConnection(privateConfig, privateDaemonConn);
+            sharedConfig.default = daemonName;
+            privateConfig.default = daemonName;
           } else {
-            config.connections.push(connConfig);
-          }
-          // Don't override default if daemon was deployed
-          if (!daemonInfo || daemonInfo.error) {
-            config.default = name;
+            sharedConfig.default = name;
+            privateConfig.default = name;
           }
 
-          // Ensure local directory exists
-          const localDir = path.join(__dirname, 'local');
-          if (!fs.existsSync(localDir)) {
-            fs.mkdirSync(localDir, { recursive: true });
-          }
-          fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
+          persistConnectionConfigs(sharedConfig, privateConfig);
 
           // Register daemon connection in memory if deployed
           if (daemonInfo && !daemonInfo.error) {
@@ -1697,7 +1767,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             success: true,
             message: message,
             ssh: { connection: name, host: `${username}@${host}:${port}`, server: result.stdout },
-            saved: configPath,
+            saved: {
+              shared: SHARED_CONNECTIONS_PATH,
+              private: PRIVATE_CONNECTIONS_PATH,
+            },
             defaultConnection: _currentConnection,
           };
           
@@ -1729,24 +1802,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         recordOp("remote_ssh_info");
         const sshInfo = scanLocalSSH();
 
-        // Add saved connections
-        const connPath = path.join(__dirname, 'local', 'connections.json');
-        if (fs.existsSync(connPath)) {
-          try {
-            const cfg = JSON.parse(fs.readFileSync(connPath, 'utf-8'));
-            for (const c of cfg.connections || []) {
-              const info = { name: c.name, type: c.type || "daemon" };
-              if (c.type === 'ssh') {
-                info.host = `${c.username}@${c.host}:${c.port || 22}`;
-                if (c.identityFile) info.identityFile = c.identityFile;
-              } else {
-                info.url = c.url;
-              }
-              sshInfo.savedConnections.push(info);
-            }
-          } catch {}
-        } else {
-          sshInfo.savedConnections = [];
+        // Add saved connections from merged shared/private config
+        const sharedCfg = readConnConfig(SHARED_CONNECTIONS_PATH, "shared connections");
+        const privateCfg = readConnConfig(PRIVATE_CONNECTIONS_PATH, "private connections");
+        const mergedCfg = mergeConnectionConfigs(sharedCfg, privateCfg);
+        sshInfo.savedConnections = [];
+        for (const c of mergedCfg.connections || []) {
+          const info = { name: c.name, type: c.type || "daemon" };
+          if (c.type === "ssh") {
+            info.host = `${c.username}@${c.host}:${c.port || 22}`;
+            if (c.privateKey) info.privateKey = c.privateKey;
+          } else {
+            info.url = c.url;
+          }
+          sshInfo.savedConnections.push(info);
         }
 
         // Human-readable summary

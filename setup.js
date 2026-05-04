@@ -12,6 +12,14 @@ import { scanLocalSSH, formatSSHScanSummary } from "./ssh-scanner.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+const PRIVATE_CONNECTIONS_PATH = join(__dirname, "local", "connections.json");
+const DEFAULT_SHARED_CONNECTIONS_PATH = (() => {
+  const home = process.env.USERPROFILE || process.env.HOME;
+  if (!home) return PRIVATE_CONNECTIONS_PATH;
+  return join(home, ".mcp-remote-agent", "connections.shared.json");
+})();
+const SHARED_CONNECTIONS_PATH = (process.env.MCP_REMOTE_SHARED_CONNECTIONS_PATH || process.env.NIUMA_SSH_SHARED_CONNECTIONS_PATH || DEFAULT_SHARED_CONNECTIONS_PATH).trim();
+
 // ============================================
 // Helpers
 // ============================================
@@ -220,23 +228,33 @@ async function stepTestConnection(details) {
 function stepSaveConfig(details) {
   console.log(colorize(BOLD + CYAN, "\n━━━ Step 5: 保存配置 ━━━\n"));
 
-  const localDir = join(__dirname, "local");
-  if (!fs.existsSync(localDir)) {
-    fs.mkdirSync(localDir, { recursive: true });
-  }
-
-  // Save connection to connections.json
-  const connPath = join(localDir, "connections.json");
-  let connConfig = { connections: [], default: "" };
-
-  if (fs.existsSync(connPath)) {
+  const readConfig = (filePath) => {
+    if (!fs.existsSync(filePath)) return { connections: [], default: "" };
     try {
-      connConfig = JSON.parse(fs.readFileSync(connPath, "utf-8").replace(/^\uFEFF/, ""));
-    } catch {}
-  }
+      return JSON.parse(fs.readFileSync(filePath, "utf-8").replace(/^\uFEFF/, ""));
+    } catch {
+      return { connections: [], default: "" };
+    }
+  };
+
+  const upsert = (cfg, conn) => {
+    const safe = {
+      connections: Array.isArray(cfg.connections) ? cfg.connections : [],
+      default: typeof cfg.default === "string" ? cfg.default : "",
+    };
+    const idx = safe.connections.findIndex((c) => c.name === conn.name);
+    if (idx >= 0) safe.connections[idx] = conn;
+    else safe.connections.push(conn);
+    return safe;
+  };
+
+  const ensureDir = (filePath) => {
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  };
 
   const connName = `ssh-${details.host.replace(/\./g, "-")}`;
-  const newConn = {
+  const sharedConn = {
     name: connName,
     type: "ssh",
     description: `${details.username}@${details.host}:${details.port}`,
@@ -244,22 +262,35 @@ function stepSaveConfig(details) {
     port: details.port,
     username: details.username,
   };
-  if (details.privateKey) newConn.privateKey = details.privateKey;
+  if (details.privateKey) sharedConn.privateKey = details.privateKey;
 
-  // Update or add connection
-  const existingIdx = connConfig.connections.findIndex((c) => c.name === connName);
-  if (existingIdx >= 0) {
-    connConfig.connections[existingIdx] = newConn;
-  } else {
-    connConfig.connections.push(newConn);
+  const privateConn = {
+    name: connName,
+    type: "ssh",
+  };
+  if (details.password) privateConn.password = details.password;
+  if (details.passphrase) privateConn.passphrase = details.passphrase;
+
+  let sharedConfig = readConfig(SHARED_CONNECTIONS_PATH);
+  let privateConfig = readConfig(PRIVATE_CONNECTIONS_PATH);
+
+  sharedConfig = upsert(sharedConfig, sharedConn);
+  if (details.password || details.passphrase) {
+    privateConfig = upsert(privateConfig, privateConn);
   }
-  connConfig.default = connName;
+  sharedConfig.default = connName;
+  privateConfig.default = connName;
 
-  fs.writeFileSync(connPath, JSON.stringify(connConfig, null, 2) + "\n", "utf-8");
-  console.log(colorize(GREEN, `  ✅ 连接配置已保存: ${connPath}`));
+  ensureDir(SHARED_CONNECTIONS_PATH);
+  ensureDir(PRIVATE_CONNECTIONS_PATH);
+  fs.writeFileSync(SHARED_CONNECTIONS_PATH, JSON.stringify(sharedConfig, null, 2) + "\n", "utf-8");
+  fs.writeFileSync(PRIVATE_CONNECTIONS_PATH, JSON.stringify(privateConfig, null, 2) + "\n", "utf-8");
+
+  console.log(colorize(GREEN, `  ✅ 共享 SSH 配置已保存: ${SHARED_CONNECTIONS_PATH}`));
+  console.log(colorize(GREEN, `  ✅ 客户端私有配置已保存: ${PRIVATE_CONNECTIONS_PATH}`));
   console.log(colorize(DIM, `     连接名: ${connName}`));
 
-  return { connName, connPath };
+  return { connName, sharedPath: SHARED_CONNECTIONS_PATH, privatePath: PRIVATE_CONNECTIONS_PATH };
 }
 
 // ============================================
