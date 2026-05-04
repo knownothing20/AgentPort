@@ -133,6 +133,7 @@ function main() {
   log("sync", `Client:  ${vars.clientId}`);
   log("sync", `Remote:  ${vars.remoteUrl}`);
   log("sync", `MCP:     ${vars.mcpConfigPath}`);
+  log("sync", `Shared:  ${vars.sharedConnectionsPath || "(default ~/.mcp-remote-agent/connections.shared.json)"}`);
   log("sync", `Server:  ${vars.serverDaemonDir}`);
 
   let changes = 0;

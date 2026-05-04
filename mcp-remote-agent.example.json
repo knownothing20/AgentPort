@@ -9,6 +9,7 @@
     "authToken": "YOUR_CLIENT_TOKEN",
     "clientId": "YOUR_CLIENT_NAME",
     "timeoutMs": "120000",
+    "sharedConnectionsPath": "~/.mcp-remote-agent/connections.shared.json",
     "skillDir": "ABSOLUTE_PATH_TO_SKILL_DIR",
     "nodePath": "node",
 
@@ -35,7 +36,8 @@
         "MCP_REMOTE_URL": "${remoteUrl}",
         "MCP_REMOTE_AUTH_TOKEN": "${authToken}",
         "MCP_REMOTE_CLIENT_ID": "${clientId}",
-        "MCP_REMOTE_TIMEOUT_MS": "${timeoutMs}"
+        "MCP_REMOTE_TIMEOUT_MS": "${timeoutMs}",
+        "MCP_REMOTE_SHARED_CONNECTIONS_PATH": "${sharedConnectionsPath}"
       }
     }
   }
