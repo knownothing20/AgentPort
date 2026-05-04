@@ -557,6 +557,7 @@ cp mcp-remote-agent.example.json local/mcp-remote-agent.json
     "authToken": "你的客户端token",
     "clientId": "你的客户端名称",
     "timeoutMs": "120000",
+    "sharedConnectionsPath": "~/.mcp-remote-agent/connections.shared.json",
     "skillDir": "skill目录的绝对路径",
     "nodePath": "node",
 
@@ -606,7 +607,8 @@ cp mcp-remote-agent.example.json local/mcp-remote-agent.json
         "MCP_REMOTE_URL": "<remoteUrl>",
         "MCP_REMOTE_AUTH_TOKEN": "<authToken>",
         "MCP_REMOTE_CLIENT_ID": "<clientId>",
-        "MCP_REMOTE_TIMEOUT_MS": "<timeoutMs>"
+        "MCP_REMOTE_TIMEOUT_MS": "<timeoutMs>",
+        "MCP_REMOTE_SHARED_CONNECTIONS_PATH": "<sharedConnectionsPath>"
       }
     }
   }
