@@ -1277,7 +1277,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }
 
             // Format results
-            const lines = [`Batch completed: ${results.length} operations`];
+            const lines = [
+              `[Runtime] mode=${_runtimeMode.mode}, source=${_runtimeMode.source}`,
+              `Batch completed: ${results.length} operations`
+            ];
             for (const r of results) {
               if (r.status === 200) {
                 if (r.type === "read") {
@@ -1314,7 +1317,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             return toTextResult(`Batch error: ${data?.error || "Unknown error"}`);
           }
           // Format results
-          const lines = [`Batch completed: ${data.results.length} operations`];
+          const lines = [
+            `[Runtime] mode=${_runtimeMode.mode}, source=${_runtimeMode.source}`,
+            `Batch completed: ${data.results.length} operations`
+          ];
           for (const r of data.results) {
             if (r.status === 200) {
               if (r.type === "read") {
@@ -1348,10 +1354,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         
         // SSH mode - not supported
         if (isSSHConnection()) {
-          return toTextResult(JSON.stringify({
+          return toTextResult(JSON.stringify(withRuntimeMeta({
             error: "Async execution is not supported in SSH mode",
             message: "SSH connections do not support async execution. Use remote_bash for synchronous execution, or switch to daemon mode for async support.",
-          }, null, 2));
+          }), null, 2));
         }
 
         // Daemon mode
@@ -1379,10 +1385,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         
         // SSH mode - not supported
         if (isSSHConnection()) {
-          return toTextResult(JSON.stringify({
+          return toTextResult(JSON.stringify(withRuntimeMeta({
             error: "Task query is not supported in SSH mode",
             message: "SSH connections do not support task queries. Use remote_bash for synchronous execution, or switch to daemon mode for task support.",
-          }, null, 2));
+          }), null, 2));
         }
 
         // Daemon mode
@@ -1421,10 +1427,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         
         // SSH mode - not supported
         if (isSSHConnection()) {
-          return toTextResult(JSON.stringify({
+          return toTextResult(JSON.stringify(withRuntimeMeta({
             error: "Config management is not supported in SSH mode",
             message: "SSH connections do not support config management. Switch to daemon mode for config support.",
-          }, null, 2));
+          }), null, 2));
         }
 
         // Daemon mode
@@ -1435,7 +1441,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const data = response.data;
             if (data.success) {
               return toTextResult(
-                `Config (${data.envPath}):\n${data.config}\n\nRuntime:\n${JSON.stringify(data.runtime, null, 2)}`
+                `[Runtime] mode=${_runtimeMode.mode}, source=${_runtimeMode.source}\nConfig (${data.envPath}):\n${data.config}\n\nRuntime:\n${JSON.stringify(data.runtime, null, 2)}`
               );
             }
             return toTextResult(`Config read failed: ${data.error || "Unknown error"}`);
@@ -1452,7 +1458,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const data = response.data;
             if (data.success) {
               return toTextResult(
-                `✅ Config updated and reloaded!\nClients: ${data.clients?.join(", ")}\nWorkspace: ${data.workspaceRoot}`
+                `[Runtime] mode=${_runtimeMode.mode}, source=${_runtimeMode.source}\n✅ Config updated and reloaded!\nClients: ${data.clients?.join(", ")}\nWorkspace: ${data.workspaceRoot}`
               );
             }
             return toTextResult(`Config write failed: ${data.error || "Unknown error"}`);
@@ -1556,7 +1562,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             lines.push(`ℹ️ 此主机已在 known_hosts 中，之前连接过。`);
           }
 
-          return toTextResult(JSON.stringify({
+          return toTextResult(JSON.stringify(withRuntimeMeta({
             success: false,
             needsAuth: true,
             message: `未提供认证信息，已自动扫描本地 SSH 环境`,
@@ -1567,7 +1573,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             knownHostMatch,
             summary: lines.join('\n'),
             hint: "请根据以上推荐信息，提供 privateKey 或 password 参数后重新调用 remote_setup",
-          }, null, 2));
+          }), null, 2));
         }
 
         // Build SSH config
@@ -1652,11 +1658,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           testClient.disconnect();
 
           if (testOnly) {
-            return toTextResult(JSON.stringify({
+            return toTextResult(JSON.stringify(withRuntimeMeta({
               success: true,
               message: "Connection test successful!",
               server: result.stdout,
-            }, null, 2));
+            }), null, 2));
           }
 
           // Save SSH connection config
@@ -1773,13 +1779,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             message = `✅ SSH connection saved!\nReady for remote development.`;
           }
 
-          const resultData = {
+          const resultData = withRuntimeMeta({
             success: true,
             message: message,
             ssh: { connection: name, host: `${username}@${host}:${port}`, server: result.stdout },
             saved: configPath,
             defaultConnection: _currentConnection,
-          };
+          });
           
           if (daemonInfo && !daemonInfo.error) {
             resultData.daemon = {
@@ -1795,13 +1801,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           return toTextResult(JSON.stringify(resultData, null, 2));
         } catch (error) {
           try { testClient.disconnect(); } catch {}
-          return toTextResult(JSON.stringify({
+          return toTextResult(JSON.stringify(withRuntimeMeta({
             success: false,
             error: error.message,
             hint: password 
               ? "Please check if the password is correct and if the server allows password login."
               : "Please check if the key path is correct and if the key has a passphrase (if so, provide passphrase).",
-          }, null, 2));
+          }), null, 2));
         }
       }
 
@@ -1849,7 +1855,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         summary.push(`   If a private key is listed, use \`privateKey\` param. Otherwise use \`password\`.`);
 
         sshInfo._summary = summary.join('\n');
-        return toTextResult(JSON.stringify(sshInfo, null, 2));
+        return toTextResult(JSON.stringify(withRuntimeMeta(sshInfo), null, 2));
       }
 
       default:
