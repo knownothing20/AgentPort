@@ -35,116 +35,86 @@ const CLIENT_ID = (process.env.MCP_REMOTE_CLIENT_ID || process.env.NIUMA_SSH_CLI
 const rawTimeout = Number(process.env.MCP_REMOTE_TIMEOUT_MS || process.env.NIUMA_SSH_TIMEOUT_MS || 120000);
 const REQUEST_TIMEOUT_MS = Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : 120000;
 
-// --- Dynamic connection management ---
-const PRIVATE_CONNECTIONS_PATH = path.join(__dirname, "local", "connections.json");
-const DEFAULT_SHARED_CONNECTIONS_PATH = (() => {
-  const home = process.env.USERPROFILE || process.env.HOME;
-  if (!home) return PRIVATE_CONNECTIONS_PATH;
-  return path.join(home, ".mcp-remote-agent", "connections.shared.json");
-})();
-const SHARED_CONNECTIONS_PATH = (process.env.MCP_REMOTE_SHARED_CONNECTIONS_PATH || process.env.NIUMA_SSH_SHARED_CONNECTIONS_PATH || DEFAULT_SHARED_CONNECTIONS_PATH).trim();
+// --- Runtime mode (for compatibility signaling) ---
+const RUNTIME_MODE_PATH = path.join(__dirname, "local", "runtime-mode.json");
+const ALLOWED_RUNTIME_MODES = new Set(["auto", "native-mcp", "executable-skill"]);
 
+function loadRuntimeMode() {
+  try {
+    if (!fs.existsSync(RUNTIME_MODE_PATH)) return { mode: "auto", source: "default" };
+    const raw = fs.readFileSync(RUNTIME_MODE_PATH, "utf-8").replace(/^\uFEFF/, "");
+    const data = JSON.parse(raw);
+    const mode = ALLOWED_RUNTIME_MODES.has(data?.mode) ? data.mode : "auto";
+    return {
+      mode,
+      requestedMode: data?.requestedMode || mode,
+      detectedMode: data?.detectedMode || "unknown",
+      lastProbeAt: data?.lastProbeAt || null,
+      source: "runtime-mode.json",
+    };
+  } catch {
+    return { mode: "auto", source: "default" };
+  }
+}
+
+function resolveRuntimeMode() {
+  const fromFile = loadRuntimeMode();
+  const envMode = String(process.env.MCP_REMOTE_RUNTIME_MODE || process.env.NIUMA_SSH_RUNTIME_MODE || "").trim();
+  if (envMode && ALLOWED_RUNTIME_MODES.has(envMode)) {
+    return {
+      ...fromFile,
+      mode: envMode,
+      source: "env",
+    };
+  }
+  return fromFile;
+}
+
+function withRuntimeMeta(obj = {}) {
+  return {
+    ...obj,
+    runtimeMode: _runtimeMode.mode,
+    modeSource: _runtimeMode.source,
+  };
+}
+
+function runtimeModeHint() {
+  if (_runtimeMode.mode === "native-mcp") {
+    return "建议先运行 node test.cjs --probe --mode=native-mcp 检查注入链路。";
+  }
+  if (_runtimeMode.mode === "executable-skill") {
+    return "建议先运行 node test.cjs --probe --mode=executable-skill 检查技能直连链路。";
+  }
+  return "建议先运行 node test.cjs --probe --mode=auto 检查自动模式探测结果。";
+}
+
+const _runtimeMode = resolveRuntimeMode();
+
+// --- Dynamic connection management ---
 let _connections = {};
 let _currentConnection = null;
 let _connectionAxios = null;
 let _sshManager = new SSHConnectionManager();
 
-function createEmptyConnConfig() {
-  return { connections: [], default: "" };
-}
-
-function normalizeConnConfig(config) {
-  const safe = config && typeof config === "object" ? config : {};
-  return {
-    connections: Array.isArray(safe.connections) ? safe.connections.filter((c) => c && c.name) : [],
-    default: typeof safe.default === "string" ? safe.default : "",
-  };
-}
-
-function readConnConfig(filePath, label) {
-  try {
-    if (!fs.existsSync(filePath)) return createEmptyConnConfig();
-    const raw = fs.readFileSync(filePath, "utf-8").replace(/^\uFEFF/, "");
-    return normalizeConnConfig(JSON.parse(raw));
-  } catch (e) {
-    console.error(`Failed to load ${label}:`, e.message);
-    return createEmptyConnConfig();
-  }
-}
-
-function ensureParentDir(filePath) {
-  const dir = path.dirname(filePath);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-}
-
-function upsertConnection(config, connection) {
-  const safe = normalizeConnConfig(config);
-  const idx = safe.connections.findIndex((c) => c.name === connection.name);
-  if (idx >= 0) {
-    safe.connections[idx] = connection;
-  } else {
-    safe.connections.push(connection);
-  }
-  return safe;
-}
-
-function mergeConnectionConfigs(sharedConfig, privateConfig) {
-  const mergedMap = new Map();
-  for (const conn of sharedConfig.connections || []) {
-    mergedMap.set(conn.name, { ...conn });
-  }
-  for (const conn of privateConfig.connections || []) {
-    const existing = mergedMap.get(conn.name) || {};
-    mergedMap.set(conn.name, { ...existing, ...conn });
-  }
-  const mergedConnections = Array.from(mergedMap.values());
-  const mergedDefault = privateConfig.default || sharedConfig.default || (mergedConnections[0]?.name || "");
-  return { connections: mergedConnections, default: mergedDefault };
-}
-
-function splitConnectionForStorage(connection) {
-  const sharedConn = {};
-  const privateConn = { name: connection.name, type: connection.type || "daemon" };
-
-  for (const [key, value] of Object.entries(connection)) {
-    if (value === undefined) continue;
-    if (["authToken", "clientId", "password", "passphrase"].includes(key)) {
-      privateConn[key] = value;
-      continue;
-    }
-    sharedConn[key] = value;
-  }
-
-  if (!sharedConn.type) sharedConn.type = connection.type || "daemon";
-  if (!sharedConn.name) sharedConn.name = connection.name;
-  return { sharedConn, privateConn };
-}
-
-function persistConnectionConfigs(sharedConfig, privateConfig) {
-  ensureParentDir(SHARED_CONNECTIONS_PATH);
-  ensureParentDir(PRIVATE_CONNECTIONS_PATH);
-  fs.writeFileSync(SHARED_CONNECTIONS_PATH, JSON.stringify(normalizeConnConfig(sharedConfig), null, 2), "utf-8");
-  fs.writeFileSync(PRIVATE_CONNECTIONS_PATH, JSON.stringify(normalizeConnConfig(privateConfig), null, 2), "utf-8");
-}
-
 function loadConnections() {
-  const sharedConfig = readConnConfig(SHARED_CONNECTIONS_PATH, "shared connections");
-  const privateConfig = readConnConfig(PRIVATE_CONNECTIONS_PATH, "private connections");
-  const merged = mergeConnectionConfigs(sharedConfig, privateConfig);
-
-  _connections = {};
-  _sshManager = new SSHConnectionManager();
-
-  for (const conn of merged.connections) {
-    _connections[conn.name] = conn;
-    if (conn.type === "ssh") {
-      _sshManager.addConnection(conn.name, conn);
+  try {
+    const configPath = path.join(__dirname, 'local', 'connections.json');
+    if (fs.existsSync(configPath)) {
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      _connections = {};
+      for (const conn of config.connections || []) {
+        _connections[conn.name] = conn;
+        // Register SSH connections
+        if (conn.type === 'ssh') {
+          _sshManager.addConnection(conn.name, conn);
+        }
+      }
+      return config.default || Object.keys(_connections)[0];
     }
+  } catch (e) {
+    console.error('Failed to load connections.json:', e.message);
   }
-
-  return merged.default || Object.keys(_connections)[0] || null;
+  return null;
 }
 
 function getAxiosInstance(connectionName) {
@@ -289,8 +259,9 @@ function sanitizeContent(content) {
 
 // --- Health check error result ---
 function healthCheckError(message) {
+  const text = `${message}\n\n[Runtime] mode=${_runtimeMode.mode}, source=${_runtimeMode.source}. ${runtimeModeHint()}`;
   return {
-    content: [{ type: "text", text: message }],
+    content: [{ type: "text", text }],
     isError: true,
   };
 }
@@ -760,7 +731,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               type: 'ssh',
               host: conn.host,
               port: conn.port || 22,
-              username: conn.username
+              username: conn.username,
+              runtimeMode: _runtimeMode.mode,
+              modeSource: _runtimeMode.source,
             }));
           } catch (error) {
             return toTextResult(JSON.stringify({
@@ -775,7 +748,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             success: true,
             current: connectionName,
             type: 'daemon',
-            url: conn.url
+            url: conn.url,
+            runtimeMode: _runtimeMode.mode,
+            modeSource: _runtimeMode.source,
           }));
         }
       }
@@ -797,6 +772,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   host: _connections[_currentConnection]?.host,
                   port: _connections[_currentConnection]?.port || 22,
                   username: _connections[_currentConnection]?.username,
+                  runtimeMode: _runtimeMode.mode,
+                  modeSource: _runtimeMode.source,
                 }, null, 2)
               );
             } else {
@@ -811,7 +788,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   host: _connections[_currentConnection]?.host,
                   port: _connections[_currentConnection]?.port || 22,
                   username: _connections[_currentConnection]?.username,
-                  message: 'Connected successfully'
+                  message: 'Connected successfully',
+                  runtimeMode: _runtimeMode.mode,
+                  modeSource: _runtimeMode.source,
                 }, null, 2)
               );
             }
@@ -847,6 +826,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   timeoutMs: REQUEST_TIMEOUT_MS,
                   healthCacheTTL: HEALTH_CACHE_TTL_MS,
                   cacheValidUntil: new Date(_lastHealthTime + HEALTH_CACHE_TTL_MS).toISOString(),
+                  runtimeMode: _runtimeMode.mode,
+                  modeSource: _runtimeMode.source,
                   remoteInfo: healthResp.data || null,
                 },
                 null,
@@ -872,6 +853,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               timeoutMs: REQUEST_TIMEOUT_MS,
               healthCacheTTL: HEALTH_CACHE_TTL_MS,
               cacheValidUntil: new Date(_lastHealthTime + HEALTH_CACHE_TTL_MS).toISOString(),
+              runtimeMode: _runtimeMode.mode,
+              modeSource: _runtimeMode.source,
               remoteInfo: null,
             },
             null,
@@ -901,6 +884,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 username: conn.username,
                 connected: sshClient.isConnected(),
                 connectionName: _currentConnection || 'default',
+              },
+              runtime: {
+                mode: _runtimeMode.mode,
+                source: _runtimeMode.source,
+                requestedMode: _runtimeMode.requestedMode || _runtimeMode.mode,
+                detectedMode: _runtimeMode.detectedMode || 'unknown',
               },
               localCache: {
                 healthCacheValid: isHealthCacheValid(),
@@ -958,6 +947,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               latencyMs,
               authEnabled: Boolean(AUTH_TOKEN),
               clientId: CLIENT_ID || null,
+            },
+            runtime: {
+              mode: _runtimeMode.mode,
+              source: _runtimeMode.source,
+              requestedMode: _runtimeMode.requestedMode || _runtimeMode.mode,
+              detectedMode: _runtimeMode.detectedMode || 'unknown',
             },
             remote: remoteInfo || "unreachable",
             localCache: {
@@ -1677,18 +1672,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           if (privateKey) connConfig.privateKey = privateKey;
           if (passphrase) connConfig.passphrase = passphrase;
 
-          // Split-save connection config: shared file stores non-sensitive fields,
-          // private file stores sensitive fields (token/password/passphrase/clientId).
-          let sharedConfig = readConnConfig(SHARED_CONNECTIONS_PATH, "shared connections");
-          let privateConfig = readConnConfig(PRIVATE_CONNECTIONS_PATH, "private connections");
+          // Update connections.json
+          const configPath = path.join(__dirname, 'local', 'connections.json');
+          let config = { connections: [], default: name };
+          try {
+            if (fs.existsSync(configPath)) {
+              config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+            }
+          } catch {}
 
-          const { sharedConn: sharedSshConn, privateConn: privateSshConn } = splitConnectionForStorage(connConfig);
-          sharedConfig = upsertConnection(sharedConfig, sharedSshConn);
-          if (Object.keys(privateSshConn).length > 2) {
-            privateConfig = upsertConnection(privateConfig, privateSshConn);
-          }
-
-          // Save daemon connection if deployed (after configs are initialized)
+          // Save daemon connection if deployed (after config is initialized)
           if (daemonInfo && !daemonInfo.error) {
             const daemonName = `${name}-daemon`;
             const daemonConn = {
@@ -1699,18 +1692,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               authToken: daemonInfo.authToken,
               clientId: daemonInfo.clientId,
             };
-
-            const { sharedConn: sharedDaemonConn, privateConn: privateDaemonConn } = splitConnectionForStorage(daemonConn);
-            sharedConfig = upsertConnection(sharedConfig, sharedDaemonConn);
-            privateConfig = upsertConnection(privateConfig, privateDaemonConn);
-            sharedConfig.default = daemonName;
-            privateConfig.default = daemonName;
-          } else {
-            sharedConfig.default = name;
-            privateConfig.default = name;
+            
+            // Add daemon connection
+            const existingDaemonIdx = config.connections.findIndex(c => c.name === daemonName);
+            if (existingDaemonIdx >= 0) {
+              config.connections[existingDaemonIdx] = daemonConn;
+            } else {
+              config.connections.push(daemonConn);
+            }
+            config.default = daemonName; // Switch to daemon by default
           }
 
-          persistConnectionConfigs(sharedConfig, privateConfig);
+          // Add or update SSH connection
+          const existingIdx = config.connections.findIndex(c => c.name === name);
+          if (existingIdx >= 0) {
+            config.connections[existingIdx] = connConfig;
+          } else {
+            config.connections.push(connConfig);
+          }
+          // Don't override default if daemon was deployed
+          if (!daemonInfo || daemonInfo.error) {
+            config.default = name;
+          }
+
+          // Ensure local directory exists
+          const localDir = path.join(__dirname, 'local');
+          if (!fs.existsSync(localDir)) {
+            fs.mkdirSync(localDir, { recursive: true });
+          }
+          fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
 
           // Register daemon connection in memory if deployed
           if (daemonInfo && !daemonInfo.error) {
@@ -1767,10 +1777,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             success: true,
             message: message,
             ssh: { connection: name, host: `${username}@${host}:${port}`, server: result.stdout },
-            saved: {
-              shared: SHARED_CONNECTIONS_PATH,
-              private: PRIVATE_CONNECTIONS_PATH,
-            },
+            saved: configPath,
             defaultConnection: _currentConnection,
           };
           
@@ -1802,20 +1809,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         recordOp("remote_ssh_info");
         const sshInfo = scanLocalSSH();
 
-        // Add saved connections from merged shared/private config
-        const sharedCfg = readConnConfig(SHARED_CONNECTIONS_PATH, "shared connections");
-        const privateCfg = readConnConfig(PRIVATE_CONNECTIONS_PATH, "private connections");
-        const mergedCfg = mergeConnectionConfigs(sharedCfg, privateCfg);
-        sshInfo.savedConnections = [];
-        for (const c of mergedCfg.connections || []) {
-          const info = { name: c.name, type: c.type || "daemon" };
-          if (c.type === "ssh") {
-            info.host = `${c.username}@${c.host}:${c.port || 22}`;
-            if (c.privateKey) info.privateKey = c.privateKey;
-          } else {
-            info.url = c.url;
-          }
-          sshInfo.savedConnections.push(info);
+        // Add saved connections
+        const connPath = path.join(__dirname, 'local', 'connections.json');
+        if (fs.existsSync(connPath)) {
+          try {
+            const cfg = JSON.parse(fs.readFileSync(connPath, 'utf-8'));
+            for (const c of cfg.connections || []) {
+              const info = { name: c.name, type: c.type || "daemon" };
+              if (c.type === 'ssh') {
+                info.host = `${c.username}@${c.host}:${c.port || 22}`;
+                if (c.identityFile) info.identityFile = c.identityFile;
+              } else {
+                info.url = c.url;
+              }
+              sshInfo.savedConnections.push(info);
+            }
+          } catch {}
+        } else {
+          sshInfo.savedConnections = [];
         }
 
         // Human-readable summary
@@ -1893,7 +1904,7 @@ async function main() {
     : (_currentConnection ? _connections[_currentConnection]?.url : REMOTE_URL);
   
   console.error(
-    `MCP Remote Agent v${PKG_VERSION} running on stdio (name=${PKG_NAME}, type=${connType}, remote=${connInfo}, auth=${AUTH_TOKEN ? "on" : "off"}, timeout=${REQUEST_TIMEOUT_MS}ms)`
+    `MCP Remote Agent v${PKG_VERSION} running on stdio (name=${PKG_NAME}, type=${connType}, remote=${connInfo}, auth=${AUTH_TOKEN ? "on" : "off"}, timeout=${REQUEST_TIMEOUT_MS}ms, runtimeMode=${_runtimeMode.mode}, modeSource=${_runtimeMode.source})`
   );
 }
 

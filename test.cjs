@@ -4,9 +4,11 @@
  *
  * Usage:
  *   cd <skillDir>
- *   node test.cjs                # Full test (local + remote)
- *   node test.cjs --local-only   # Local checks only
- *   node test.cjs --verbose      # Show detailed output
+ *   node test.cjs                            # Full test (local + remote)
+ *   node test.cjs --local-only               # Local checks only
+ *   node test.cjs --preflight --mode=auto    # 环境/依赖/连通预检
+ *   node test.cjs --probe --mode=auto        # 模式探测（native-mcp / executable-skill）
+ *   node test.cjs --verbose                  # Show detailed output
  *
  * Exit codes: 0=pass, 1=fail, 2=fatal
  */
@@ -19,6 +21,12 @@ const https = require("https");
 const args = process.argv.slice(2);
 const LOCAL_ONLY = args.includes("--local-only");
 const VERBOSE = args.includes("--verbose");
+const PREFLIGHT_ONLY = args.includes("--preflight");
+const PROBE_ONLY = args.includes("--probe");
+const MODE_ARG = args.find((a) => a.startsWith("--mode="));
+const MODE_RAW = MODE_ARG ? MODE_ARG.slice("--mode=".length).trim() : "";
+const ALLOWED_MODES = new Set(["auto", "native-mcp", "executable-skill"]);
+const MODE_CLI = MODE_RAW && ALLOWED_MODES.has(MODE_RAW) ? MODE_RAW : (MODE_RAW ? "auto" : "");
 
 const C = { reset: "\x1b[0m", green: "\x1b[32m", red: "\x1b[31m", yellow: "\x1b[33m", cyan: "\x1b[36m", dim: "\x1b[2m", bold: "\x1b[1m" };
 const results = { pass: 0, fail: 0, skip: 0 };
@@ -30,6 +38,193 @@ function skip(name, reason) { results.skip++; console.log(`  ${C.yellow}⊘${C.r
 function section(title) { console.log(`\n${C.bold}${C.cyan}${title}${C.reset}\n${C.dim}${"─".repeat(50)}${C.reset}`); }
 
 const SKILL_DIR = __dirname;
+const LOCAL_DIR = path.join(SKILL_DIR, "local");
+const MAIN_CONFIG_PATH = path.join(LOCAL_DIR, "mcp-remote-agent.json");
+const RUNTIME_MODE_PATH = path.join(LOCAL_DIR, "runtime-mode.json");
+
+function readJsonSafe(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    const raw = fs.readFileSync(filePath, "utf-8").replace(/^\uFEFF/, "");
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function writeJsonPretty(filePath, data) {
+  const dir = path.dirname(filePath);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2) + "\n", "utf-8");
+}
+
+function loadRuntimeMode() {
+  const d = readJsonSafe(RUNTIME_MODE_PATH);
+  if (!d || typeof d !== "object") return null;
+  return d;
+}
+
+function normalizeMode(v) {
+  return ALLOWED_MODES.has(v) ? v : "auto";
+}
+
+function resolveRequestedMode(runtimeModeObj) {
+  if (MODE_CLI) return MODE_CLI;
+  const runtimeMode = runtimeModeObj?.mode;
+  if (typeof runtimeMode === "string" && ALLOWED_MODES.has(runtimeMode)) return runtimeMode;
+  return "auto";
+}
+
+function decideDetectedMode(requestedMode, nativeReady, executableReady) {
+  if (requestedMode === "native-mcp") return nativeReady ? "native-mcp" : "unknown";
+  if (requestedMode === "executable-skill") return executableReady ? "executable-skill" : "unknown";
+  return nativeReady ? "native-mcp" : (executableReady ? "executable-skill" : "unknown");
+}
+
+function detectMode(config, runtimeModeObj) {
+  const vars = config?.variables || {};
+  const mcpServerName = vars.mcpServerName || config?.name || "mcp-remote-agent";
+  const mcpConfigPath = vars.mcpConfigPath || "";
+  const requestedMode = resolveRequestedMode(runtimeModeObj);
+
+  const native = { ready: false, blockers: [], evidence: {} };
+  const executable = { ready: false, blockers: [], evidence: {} };
+
+  // native-mcp readiness
+  if (!mcpConfigPath) {
+    native.blockers.push("mcpConfigPath 未配置");
+  } else if (!fs.existsSync(mcpConfigPath)) {
+    native.blockers.push(`MCP 配置文件不存在: ${mcpConfigPath}`);
+  } else {
+    const mcpCfg = readJsonSafe(mcpConfigPath);
+    const serverCfg = mcpCfg?.mcpServers?.[mcpServerName];
+    if (!serverCfg) {
+      native.blockers.push(`mcpServers.${mcpServerName} 缺失`);
+    } else {
+      native.evidence.command = serverCfg.command || null;
+      native.evidence.args = serverCfg.args || null;
+      native.evidence.envKeys = Object.keys(serverCfg.env || {});
+      if (!serverCfg.command) native.blockers.push("MCP server command 缺失");
+      if (!Array.isArray(serverCfg.args) || serverCfg.args.length === 0) native.blockers.push("MCP server args 缺失");
+      const hasIndexArg = Array.isArray(serverCfg.args) && serverCfg.args.some((a) => String(a).includes("index.js"));
+      if (!hasIndexArg) native.blockers.push("MCP args 未指向 index.js");
+      native.ready = native.blockers.length === 0;
+    }
+  }
+
+  // executable-skill readiness
+  const nm = path.join(SKILL_DIR, "node_modules");
+  const depList = ["ssh2", "@modelcontextprotocol/sdk", "axios"];
+  if (!fs.existsSync(path.join(SKILL_DIR, "index.js"))) executable.blockers.push("index.js 缺失");
+  if (!fs.existsSync(nm)) executable.blockers.push("node_modules 缺失");
+  for (const dep of depList) {
+    if (!fs.existsSync(path.join(nm, dep))) executable.blockers.push(`依赖缺失: ${dep}`);
+  }
+  executable.evidence.nodeModules = fs.existsSync(nm);
+  executable.ready = executable.blockers.length === 0;
+
+  const detectedMode = decideDetectedMode(requestedMode, native.ready, executable.ready);
+
+  const blockers = [];
+  if (detectedMode === "unknown") blockers.push(...native.blockers, ...executable.blockers);
+
+  const fallbackUsed = requestedMode === "auto" && detectedMode === "executable-skill" && !native.ready;
+  const fallbackReason = fallbackUsed ? `native-mcp 不可用，自动降级到 executable-skill：${native.blockers.join("; ") || "未知原因"}` : null;
+
+  return {
+    requestedMode,
+    detectedMode,
+    fallbackUsed,
+    fallbackReason,
+    capabilities: {
+      nativeMcpReady: native.ready,
+      executableSkillReady: executable.ready,
+      canAutoFallback: native.ready || executable.ready,
+    },
+    blockers,
+    evidence: {
+      mcpConfigPath: mcpConfigPath || null,
+      mcpServerName,
+      native,
+      executable,
+    },
+  };
+}
+
+async function runPreflight(config) {
+  const checks = [];
+  const push = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail: detail || "" });
+
+  push("file: SKILL.md", fs.existsSync(path.join(SKILL_DIR, "SKILL.md")));
+  push("file: index.js", fs.existsSync(path.join(SKILL_DIR, "index.js")));
+  push("file: package.json", fs.existsSync(path.join(SKILL_DIR, "package.json")));
+  push("file: local/mcp-remote-agent.json", fs.existsSync(MAIN_CONFIG_PATH));
+
+  const nm = path.join(SKILL_DIR, "node_modules");
+  push("dep: node_modules", fs.existsSync(nm));
+  for (const dep of ["ssh2", "@modelcontextprotocol/sdk", "axios"]) {
+    push(`dep: ${dep}`, fs.existsSync(path.join(nm, dep)));
+  }
+
+  const runtime = getRemoteRuntimeEnv(config);
+  const remoteUrl = runtime.remoteUrl;
+  const authToken = runtime.authToken;
+  push("config: REMOTE_URL", Boolean(remoteUrl));
+  push("config: AUTH_TOKEN", Boolean(authToken));
+
+  let remoteReachable = false;
+  if (remoteUrl) {
+    try {
+      const r = await api(remoteUrl, "/healthz", authToken);
+      remoteReachable = r.status === 200;
+      push("remote: /healthz reachable", remoteReachable, `HTTP ${r.status}`);
+    } catch (e) {
+      push("remote: /healthz reachable", false, e.message);
+    }
+  } else {
+    push("remote: /healthz reachable", false, "REMOTE_URL 未配置");
+  }
+
+  const failCount = checks.filter((c) => !c.ok).length;
+  return {
+    status: failCount === 0 ? "pass" : "fail",
+    failCount,
+    total: checks.length,
+    checks,
+  };
+}
+
+function saveRuntimeModeResult(modeResult) {
+  const effectiveMode = modeResult.detectedMode === "unknown"
+    ? normalizeMode(modeResult.requestedMode || "auto")
+    : normalizeMode(modeResult.detectedMode);
+  const payload = {
+    mode: effectiveMode,
+    requestedMode: modeResult.requestedMode,
+    detectedMode: modeResult.detectedMode,
+    lastProbeAt: new Date().toISOString(),
+    probeResult: {
+      capabilities: modeResult.capabilities,
+      blockers: modeResult.blockers,
+    },
+  };
+  writeJsonPretty(RUNTIME_MODE_PATH, payload);
+  return payload;
+}
+
+function resolveTemplateValue(v, vars) {
+  if (typeof v !== "string") return v;
+  return v.replace(/\$\{(\w+)\}/g, (_, key) => (vars && key in vars ? String(vars[key]) : ""));
+}
+
+function getRemoteRuntimeEnv(config) {
+  const env = config?.mcp?.server?.env || {};
+  const vars = config?.variables || {};
+  return {
+    remoteUrl: resolveTemplateValue(env.MCP_REMOTE_URL || env.NIUMA_SSH_REMOTE_URL || "", vars),
+    authToken: resolveTemplateValue(env.MCP_REMOTE_AUTH_TOKEN || env.NIUMA_SSH_AUTH_TOKEN || "", vars),
+  };
+}
 
 // ─── HTTP helper ─────────────────────────────────────────────────────
 function httpRequest(url, options = {}) {
@@ -123,6 +318,30 @@ async function localTests() {
   return config;
 }
 
+function runModeRegressionScenarios(config) {
+  section("Phase 1b: Mode Strategy Regression (模式策略回归)");
+
+  const forcedNative = detectMode(config, { mode: "native-mcp" });
+  if (forcedNative.capabilities.nativeMcpReady) {
+    pass("forced native-mcp: available");
+  } else if (forcedNative.detectedMode === "unknown" && forcedNative.evidence?.native?.blockers?.length > 0) {
+    pass("forced native-mcp: diagnosable failure", forcedNative.evidence.native.blockers.join("; "));
+  } else {
+    fail("forced native-mcp: invalid failure mapping");
+  }
+
+  const autoMode = detectMode(config, { mode: "auto" });
+  if (!autoMode.capabilities.nativeMcpReady && autoMode.capabilities.executableSkillReady) {
+    if (autoMode.detectedMode === "executable-skill" && autoMode.fallbackUsed && autoMode.fallbackReason) {
+      pass("auto fallback: native -> executable", autoMode.fallbackReason);
+    } else {
+      fail("auto fallback: missing fallback metadata");
+    }
+  } else {
+    skip("auto fallback scenario", "当前环境不满足 native 不可用且 executable 可用");
+  }
+}
+
 // ─── Phase 2: Remote ─────────────────────────────────────────────────
 async function remoteTests(remoteUrl, authToken) {
   section("Phase 2: Remote Connection (远程连接)");
@@ -151,27 +370,43 @@ async function remoteTests(remoteUrl, authToken) {
       : fail("remote_stat: unexpected", VERBOSE ? JSON.stringify(d).slice(0, 150) : undefined);
   } catch (e) { fail(`remote_stat: ${e.message}`); }
 
-  // glob — server returns {success, files:[...]}
+  // Create deterministic markdown file for glob/read checks
+  const rf = ".mcp-remote-agent-read-test.md";
+  const rc = `# mcp-remote-agent read test\nts: ${new Date().toISOString()}\n`;
   try {
-    const r = await api(remoteUrl, "/api/fs/glob", authToken, { pattern: "*.md" });
+    const wr = await api(remoteUrl, "/api/fs/write", authToken, { path: rf, content: rc });
+    if (wr.status === 200) {
+      pass("remote_read/glob: fixture created", rf);
+    } else {
+      fail("remote_read/glob: fixture create failed", `HTTP ${wr.status}`);
+    }
+  } catch (e) {
+    fail(`remote_read/glob: fixture create failed`, e.message);
+  }
+
+  // glob — server returns {success, files:[...]} or {entries:[...]}
+  try {
+    const r = await api(remoteUrl, "/api/fs/glob", authToken, { pattern: ".mcp-remote-agent-*.md" });
     const d = JSON.parse(r.body);
-    const files = d.files || d.entries || (Array.isArray(d) ? d : null);
-    r.status === 200 && Array.isArray(files) && files.length > 0
+    const files = d.files || d.entries || (Array.isArray(d) ? d : []);
+    const okGlob = r.status === 200 && Array.isArray(files) && files.some((f) => String(f).includes(rf));
+    okGlob
       ? pass("remote_glob: OK", `${files.length} files`)
-      : fail("remote_glob: unexpected", VERBOSE ? JSON.stringify(d).slice(0, 150) : undefined);
+      : fail("remote_glob: unexpected", VERBOSE ? JSON.stringify(d).slice(0, 200) : undefined);
   } catch (e) { fail(`remote_glob: ${e.message}`); }
 
-  // read + ETag
+  // read + ETag (read deterministic fixture)
   try {
-    const r = await api(remoteUrl, "/api/fs/read", authToken, { path: "README.md" });
+    const r = await api(remoteUrl, "/api/fs/read", authToken, { path: rf });
     if (r.status === 200) {
       const d = JSON.parse(r.body);
-      typeof d.content === "string" && d.content.length > 0
+      typeof d.content === "string" && d.content.includes("mcp-remote-agent read test")
         ? pass("remote_read: content", `${(d.content.length / 1024).toFixed(1)}KB`)
-        : fail("remote_read: no content");
+        : fail("remote_read: no/invalid content");
       d.etag ? pass("remote_read: ETag", d.etag.slice(0, 16) + "...") : fail("remote_read: no ETag");
-    } else if (r.status === 404) { skip("remote_read: README.md", "not found"); }
-    else { fail(`remote_read: HTTP ${r.status}`); }
+    } else {
+      fail(`remote_read: HTTP ${r.status}`);
+    }
   } catch (e) { fail(`remote_read: ${e.message}`); }
 
   // write + verify + cleanup
@@ -185,7 +420,7 @@ async function remoteTests(remoteUrl, authToken) {
       if (rr.status === 200) {
         JSON.parse(rr.body).content === tc ? pass("remote_write: read-back match") : fail("remote_write: content mismatch");
       }
-      await api(remoteUrl, "/api/exec", authToken, { command: `rm -f ${tf}` });
+      await api(remoteUrl, "/api/exec", authToken, { command: `rm -f ${tf} .mcp-remote-agent-read-test.md` });
       pass("remote_write: cleaned up");
     } else { fail(`remote_write: HTTP ${wr.status}`); }
   } catch (e) { fail(`remote_write: ${e.message}`); }
@@ -355,22 +590,54 @@ async function remoteTests(remoteUrl, authToken) {
 
 // ─── Main ────────────────────────────────────────────────────────────
 async function main() {
-  // Read name & version from local/mcp-remote-agent.json
   let pkgName = "mcp-remote-agent", pkgVersion = "?";
+  let config = null;
   try {
-    const cfg = JSON.parse(fs.readFileSync(path.join(SKILL_DIR, "local", "mcp-remote-agent.json"), "utf-8").replace(/^\uFEFF/, ""));
-    pkgName = cfg.name || pkgName;
-    pkgVersion = cfg.version || pkgVersion;
+    config = readJsonSafe(MAIN_CONFIG_PATH);
+    if (config) {
+      pkgName = config.name || pkgName;
+      pkgVersion = config.version || pkgVersion;
+    }
   } catch (_) {}
+  
+  const rm = loadRuntimeMode();
+  const probeResult = detectMode(config, rm);
+  const runtimeMode = probeResult.requestedMode;
+
   console.log(`\n${C.bold}${pkgName} Test Suite v${pkgVersion}${C.reset}`);
-  console.log(`${C.dim}${new Date().toISOString()} | ${LOCAL_ONLY ? "Local-only" : "Full test"}${C.reset}`);
+  let runModeStr = LOCAL_ONLY ? "Local-only" : "Full test";
+  if (PREFLIGHT_ONLY) runModeStr = "Preflight checks";
+  if (PROBE_ONLY) runModeStr = "Probe capabilities";
+  console.log(`${C.dim}${new Date().toISOString()} | ${runModeStr} | mode=${runtimeMode}${C.reset}`);
 
-  const config = await localTests();
+  if (PROBE_ONLY) {
+    section("Capability Probe (能力探测)");
+    const pr = saveRuntimeModeResult(probeResult);
+    console.log(JSON.stringify(pr, null, 2));
+    process.exit(probeResult.detectedMode === "unknown" ? 1 : 0);
+  }
 
-  if (!LOCAL_ONLY && config) {
-    const env = config.mcp?.server?.env || {};
-    const remoteUrl = env.MCP_REMOTE_URL || env.NIUMA_SSH_REMOTE_URL;
-    const authToken = env.MCP_REMOTE_AUTH_TOKEN || env.NIUMA_SSH_AUTH_TOKEN;
+  if (PREFLIGHT_ONLY) {
+    section("Preflight Checks (预检)");
+    const pr = await runPreflight(config);
+    for (const c of pr.checks) {
+      if (c.ok) pass(c.name, c.detail);
+      else fail(c.name, c.detail);
+    }
+    console.log(`\nPreflight ${pr.status.toUpperCase()} (${pr.failCount} failed)`);
+    process.exit(pr.status === "pass" ? 0 : 1);
+  }
+
+  // Fallback to existing full test logic
+  const oldConfig = await localTests();
+  if (oldConfig) {
+    runModeRegressionScenarios(oldConfig);
+  }
+
+  if (!LOCAL_ONLY && oldConfig) {
+    const runtime = getRemoteRuntimeEnv(oldConfig);
+    const remoteUrl = runtime.remoteUrl;
+    const authToken = runtime.authToken;
     if (remoteUrl) {
       await remoteTests(remoteUrl, authToken);
     } else {
