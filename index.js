@@ -1082,10 +1082,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           try {
             const sshClient = getSSHClient();
             const stats = await sshClient.stat(statPath);
-            return toTextResult(JSON.stringify({
+            return toTextResult(JSON.stringify(withRuntimeMeta({
               path: statPath,
               ...stats,
-            }, null, 2));
+            }), null, 2));
           } catch (error) {
             return toTextResult(`Stat error: ${error.message}`);
           }
@@ -1102,14 +1102,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           if (data?.success && data.results?.length > 0) {
             const r = data.results[0];
             if (r.status === 200) {
-              return toTextResult(JSON.stringify({
+              return toTextResult(JSON.stringify(withRuntimeMeta({
                 path: statPath,
                 size: r.size,
                 mtime: r.mtime,
                 isFile: r.isFile,
                 // Normalize: server may return isDir or isDirectory
                 isDirectory: r.isDirectory !== undefined ? r.isDirectory : (r.isDir !== undefined ? r.isDir : !r.isFile),
-              }, null, 2));
+              }), null, 2));
             }
             return toTextResult(`Stat failed: ${r.error || "Unknown error"}`);
           }
@@ -1363,12 +1363,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         try {
           const response = await getCurrentAxios().post("/api/exec/async", { command: effectiveCommand, cwd });
           const data = response.data;
-          return toTextResult(JSON.stringify({
+          return toTextResult(JSON.stringify(withRuntimeMeta({
             taskId: data.taskId,
             status: data.status,
             createdAt: data.createdAt,
             message: `Task ${data.taskId} started. Use remote_task with this taskId to check progress.`,
-          }, null, 2));
+          }), null, 2));
         } catch (error) {
           return toTextResult(`Async exec error: ${errorMessage(error)}`);
         }
@@ -1391,11 +1391,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         try {
           const response = await getCurrentAxios().get(`/api/task/${taskId}`);
           const data = response.data;
-          const result = {
+          const result = withRuntimeMeta({
             taskId: data.id,
             status: data.status,
             command: data.command,
-          };
+          });
           if (data.status === "completed" || data.status === "error") {
             result.exitCode = data.exitCode;
             result.stdout = data.stdout;
