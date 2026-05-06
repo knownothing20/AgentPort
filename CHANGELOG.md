@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **CLI fallback adapter**: added `cli.js` for AI tools that cannot inject native MCP tools but can run Bash/terminal commands
+- **Agent install and usage guide**: added `AGENT_GUIDE.md` with the recommended priority order: native MCP first, CLI fallback second, HTTP/manual fallbacks only when needed
+- **Package CLI entrypoints**: added `npm run cli`, `npm run doctor`, and a `mcp-remote-agent` bin entry
+
 ### Fixed
 - **Node 22+ SSH compatibility**: `ssh-client.js` now restores the legacy `util.isDate` helper before loading `ssh2`, fixing `remote_read`, `remote_write`, and daemon auto-deploy flows that were failing with `isDate is not a function`
 - **Connection switching reload**: `remote_connect` now refreshes `local/connections.json` before listing or switching connections, allowing newly added SSH/daemon targets to appear without changing chat sessions

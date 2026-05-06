@@ -6,11 +6,16 @@
   "type": "module",
   "scripts": {
     "start": "node index.js",
+    "cli": "node cli.js",
+    "doctor": "node cli.js doctor",
     "setup": "node setup.js",
     "test": "node test.cjs",
     "sync": "node sync.cjs",
     "sync:check": "node sync.cjs --check",
     "sync:dry": "node sync.cjs --dry-run"
+  },
+  "bin": {
+    "mcp-remote-agent": "./cli.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
