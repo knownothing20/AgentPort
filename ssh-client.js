@@ -5,12 +5,19 @@
  * Also supports ssh.exe fallback for key-based auth (leverages OS SSH agent).
  */
 
-import { Client } from 'ssh2';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { createRequire } from 'module';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+
+const require = createRequire(import.meta.url);
+const nodeUtil = require('util');
+if (typeof nodeUtil.isDate !== 'function' && typeof nodeUtil.types?.isDate === 'function') {
+  nodeUtil.isDate = nodeUtil.types.isDate;
+}
+const { Client } = await import('ssh2');
 
 const execFileAsync = promisify(execFile);
 const IS_WINDOWS = os.platform() === 'win32';
@@ -35,6 +42,7 @@ export class SSHClient {
     this.sftp = null;
     this.connected = false;
     this.connectionPromise = null;
+    this.remoteHome = null;
   }
 
   /**
@@ -127,6 +135,7 @@ export class SSHClient {
     this.sftp = null;
     this.connected = false;
     this.connectionPromise = null;
+    this.remoteHome = null;
   }
 
   /**
@@ -134,6 +143,35 @@ export class SSHClient {
    */
   isConnected() {
     return this.connected && this.client && this.sftp;
+  }
+
+  async getRemoteHome() {
+    await this.connect();
+    if (this.remoteHome) return this.remoteHome;
+
+    const result = await this.exec('printf %s "$HOME"');
+    this.remoteHome = result.stdout.trim() || `/home/${this.config.username || 'root'}`;
+    return this.remoteHome;
+  }
+
+  async resolveRemotePath(remotePath) {
+    if (typeof remotePath !== 'string') return remotePath;
+    if (remotePath === '~') return this.getRemoteHome();
+    if (remotePath.startsWith('~/')) {
+      const home = await this.getRemoteHome();
+      return path.posix.join(home, remotePath.slice(2));
+    }
+    return remotePath;
+  }
+
+  normalizeUnixTimestamp(value) {
+    if (value instanceof Date) {
+      return Math.floor(value.getTime() / 1000);
+    }
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value > 1e12 ? Math.floor(value / 1000) : Math.floor(value);
+    }
+    return null;
   }
 
   /**
@@ -178,9 +216,10 @@ export class SSHClient {
    */
   async readFile(remotePath) {
     await this.connect();
+    const resolvedPath = await this.resolveRemotePath(remotePath);
 
     return new Promise((resolve, reject) => {
-      this.sftp.readFile(remotePath, 'utf-8', (err, data) => {
+      this.sftp.readFile(resolvedPath, 'utf-8', (err, data) => {
         if (err) {
           reject(new Error(`读取文件失败: ${err.message}`));
           return;
@@ -195,11 +234,12 @@ export class SSHClient {
    */
   async writeFile(remotePath, content) {
     await this.connect();
+    const resolvedPath = await this.resolveRemotePath(remotePath);
 
     return new Promise((resolve, reject) => {
-      const dir = path.posix.dirname(remotePath);
+      const dir = path.posix.dirname(resolvedPath);
       this.exec(`mkdir -p ${JSON.stringify(dir)}`).then(() => {
-        this.sftp.writeFile(remotePath, content, 'utf-8', (err) => {
+        this.sftp.writeFile(resolvedPath, content, 'utf-8', (err) => {
           if (err) {
             reject(new Error(`写入文件失败: ${err.message}`));
             return;
@@ -215,16 +255,17 @@ export class SSHClient {
    */
   async stat(remotePath) {
     await this.connect();
+    const resolvedPath = await this.resolveRemotePath(remotePath);
 
     return new Promise((resolve, reject) => {
-      this.sftp.stat(remotePath, (err, stats) => {
+      this.sftp.stat(resolvedPath, (err, stats) => {
         if (err) {
           reject(new Error(`获取文件信息失败: ${err.message}`));
           return;
         }
         resolve({
           size: stats.size,
-          mtime: Math.floor(stats.mtime / 1000),
+          mtime: this.normalizeUnixTimestamp(stats.mtime),
           isFile: stats.isFile(),
           isDirectory: stats.isDirectory(),
         });
@@ -270,21 +311,24 @@ export class SSHClient {
    * Create directory
    */
   async mkdir(remotePath) {
-    await this.exec(`mkdir -p ${JSON.stringify(remotePath)}`);
+    const resolvedPath = await this.resolveRemotePath(remotePath);
+    await this.exec(`mkdir -p ${JSON.stringify(resolvedPath)}`);
   }
 
   /**
    * Remove file
    */
   async rm(remotePath) {
-    await this.exec(`rm -f ${JSON.stringify(remotePath)}`);
+    const resolvedPath = await this.resolveRemotePath(remotePath);
+    await this.exec(`rm -f ${JSON.stringify(resolvedPath)}`);
   }
 
   /**
    * Remove directory
    */
   async rmdir(remotePath) {
-    await this.exec(`rm -rf ${JSON.stringify(remotePath)}`);
+    const resolvedPath = await this.resolveRemotePath(remotePath);
+    await this.exec(`rm -rf ${JSON.stringify(resolvedPath)}`);
   }
 }
 

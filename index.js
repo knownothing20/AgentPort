@@ -100,7 +100,8 @@ function loadConnections() {
   try {
     const configPath = path.join(__dirname, 'local', 'connections.json');
     if (fs.existsSync(configPath)) {
-      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      const configText = fs.readFileSync(configPath, 'utf-8').replace(/^\uFEFF/, '');
+      const config = JSON.parse(configText);
       _connections = {};
       for (const conn of config.connections || []) {
         _connections[conn.name] = conn;
@@ -688,10 +689,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         recordOp("remote_connect");
         const connectionName = args.connection;
         
-        // Load connections if not loaded
-        if (Object.keys(_connections).length === 0) {
-          loadConnections();
-        }
+        // Refresh connection metadata so newly added local/connections.json entries
+        // are available without waiting for a new desktop session.
+        loadConnections();
         
         // If no connection specified, return available connections
         if (!connectionName) {
