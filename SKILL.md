@@ -14,6 +14,33 @@ MCP Server for AI Agent Remote Development
 
 **v2.5.0**
 
+## Agent runtime selection priority
+
+Use this order in every AI desktop tool:
+
+1. **Native MCP first**: if `remote_*` tools are visible in the current session,
+   use `remote_connect()` -> `remote_health()` -> normal `remote_*` operations.
+2. **CLI fallback second**: if native MCP tools are not visible but Bash/terminal
+   is available, use `node <skill-dir>/cli.js ...`.
+3. **Daemon before SSH inside the CLI**: for long-term coding, prefer daemon
+   connections; use SSH only when daemon is unavailable or for quick fallback.
+4. **HTTP/manual last**: only use direct HTTP/curl or manual commands when the
+   AI tool cannot use native MCP or the CLI.
+
+Quick CLI fallback commands:
+
+```bash
+node cli.js doctor
+node cli.js list
+node cli.js connect <connection-name>
+node cli.js health
+node cli.js read /path/to/file
+node cli.js write /path/to/file --content "..."
+node cli.js bash "pwd && ls -la" --cwd /path/to/workspace
+```
+
+For full installation and agent bootstrap guidance, read `AGENT_GUIDE.md`.
+
 ## 首次使用快速引导（先过 4 项）
 
 为避免"能看到 skill 但 remote_* 工具不可用"，第一次使用时必须先检查这 4 项：
