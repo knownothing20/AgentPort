@@ -1,5 +1,6 @@
 # 本地配置（不上传）
 local/
+connections.json
 SYNC.md
 sync-to-github.ps1
 
