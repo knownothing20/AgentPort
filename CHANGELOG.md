@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Development Record
+
+## [2026-05-06 23:24] feat | operator: Codex | task: cli-fallback-adapter | scope: agent compatibility
+- **Summary**: Added a general fallback path for AI tools that cannot inject native MCP tools, while keeping native MCP as the highest-priority integration mode.
+- **Impact Files**: `cli.js`, `AGENT_GUIDE.md`, `SKILL.md`, `README.md`, `README_CN.md`, `package.json`, `package-lock.json`, `sync-to-github.ps1`, `CHANGELOG.md`
+- **Change Details**:
+  1. Added `cli.js` so agents with Bash/terminal access can run `doctor`, `list`, `connect`, `health`, `read`, `write`, `stat`, `glob`, `bash`, `script`, and `batch` without native MCP injection.
+  2. Added `AGENT_GUIDE.md` with the agent-side install, probe, and usage workflow: native MCP first, CLI fallback second, daemon before SSH, HTTP/manual last.
+  3. Updated `SKILL.md` and README files so future agents know how to choose the correct integration path automatically instead of hard-coding one AI desktop app.
+  4. Added package entrypoints `npm run cli`, `npm run doctor`, and `bin.mcp-remote-agent`.
+  5. Updated the sync whitelist so public repository sync includes the CLI, agent guide, and lockfile while excluding real local connection/token files.
+- **Risk**: CLI fallback shares the same local `connections.json` source as the MCP server, so each target AI app still needs a valid local config. Daemon mode remains preferred for long-running coding; SSH lacks async/config-management features.
+- **Verification**: Ran syntax checks, `node cli.js doctor`, daemon `health/read/bash/write`, SSH `bash`, privacy scans, repository sync, pre-commit privacy hook, and pushed commit `cb2c557`.
+
 ### Added
 - **CLI fallback adapter**: added `cli.js` for AI tools that cannot inject native MCP tools but can run Bash/terminal commands
 - **Agent install and usage guide**: added `AGENT_GUIDE.md` with the recommended priority order: native MCP first, CLI fallback second, HTTP/manual fallbacks only when needed

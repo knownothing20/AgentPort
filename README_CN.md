@@ -1,11 +1,34 @@
 # mcp-remote-agent
 
+## Agent 接入优先级
+
+`mcp-remote-agent` 同时支持原生 MCP 和 CLI fallback。给不同 AI 软件接入时，不要写死某一个软件名，而是按能力自动选择：
+
+1. **优先原生 MCP**：如果当前会话能看到 `remote_*` 工具，直接使用 `remote_connect()` -> `remote_health()` -> 其他 `remote_*` 操作。
+2. **其次 CLI fallback**：如果看不到 `remote_*`，但 AI 软件能运行 Bash/终端命令，使用 `node cli.js ...`。
+3. **CLI 内部 daemon 优先、SSH 兜底**：长期编程开发优先 daemon，daemon 不可用时再切 SSH。
+4. **HTTP/人工兜底最后使用**：只有 MCP 和 CLI 都不可用时，才考虑直接 REST/curl 或输出人工命令。
+
+CLI fallback 示例：
+
+```bash
+node cli.js doctor
+node cli.js list
+node cli.js connect <connection-name>
+node cli.js health
+node cli.js read /path/to/workspace/AGENTS.md
+node cli.js bash "pwd && ls -la" --cwd /path/to/workspace
+node cli.js write /path/to/workspace/tmp.txt --content "hello"
+```
+
+完整 Agent 安装、检测和使用流程见 [AGENT_GUIDE.md](./AGENT_GUIDE.md)。
+
 MCP Server for AI Agent Remote Development
 
 让 AI Agent 通过 MCP 协议操作远程 Linux 服务器，实现本地开发环境与远程服务器的无缝衔接。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-2.5.0-blue)](https://github.com/your-repo/mcp-remote-agent)
+[![Version](https://img.shields.io/badge/version-2.5.0-blue)](https://github.com/knownothing20/mcp-remote-agent)
 
 ---
 
