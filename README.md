@@ -35,6 +35,39 @@ Enable AI Agents (like WorkBuddy, Claude Desktop, Cursor) to directly read/write
 
 ---
 
+## Agent Integration Priority
+
+`mcp-remote-agent` now supports both native MCP usage and a CLI fallback for AI
+tools that cannot inject custom MCP servers.
+
+Use this priority order:
+
+1. **Native MCP first**: if `remote_*` tools are visible, use
+   `remote_connect()` -> `remote_health()` -> normal `remote_*` operations.
+2. **CLI fallback second**: if the AI tool cannot load custom MCP tools but can
+   run Bash/terminal commands, use `node cli.js ...`.
+3. **Daemon before SSH**: for long-term coding, prefer daemon connections; use
+   SSH as fallback when the daemon is unavailable.
+4. **HTTP/manual last**: only use direct REST calls or manual commands when MCP
+   and CLI are both unavailable.
+
+CLI fallback examples:
+
+```bash
+node cli.js doctor
+node cli.js list
+node cli.js connect <connection-name>
+node cli.js health
+node cli.js read /path/to/workspace/AGENTS.md
+node cli.js bash "pwd && ls -la" --cwd /path/to/workspace
+node cli.js write /path/to/workspace/tmp.txt --content "hello"
+```
+
+See [AGENT_GUIDE.md](./AGENT_GUIDE.md) for the full install and agent bootstrap
+workflow.
+
+---
+
 ## Quick Start
 
 ### 1. Clone the repository
@@ -112,6 +145,18 @@ nohup bash mcp-remote-agent-manager.sh >> boot.log 2>&1 &
 
 After configuration takes effect, restart your AI tool to activate MCP registration.
 
+### 7. Verify fallback mode
+
+If your AI tool does not expose native `remote_*` MCP tools, verify the CLI
+fallback:
+
+```bash
+npm run doctor
+node cli.js health
+```
+
+At least one configured connection should report `"ok": true`.
+
 ---
 
 ## Supported AI Tools
@@ -122,6 +167,7 @@ After configuration takes effect, restart your AI tool to activate MCP registrat
 | Claude Desktop | `C:\Users\<user>\AppData\Roaming\Claude\claude_desktop_config.json` | `~/.config/Claude/claude_desktop_config.json` |
 | Cursor | `<project>\.cursor\mcp.json` | `<project>/.cursor/mcp.json` |
 | Windsurf | `C:\Users\<user>\.codeium\windsurf\mcp_config.json` | `~/.codeium/windsurf/mcp_config.json` |
+| Tools without custom MCP | Use `node cli.js ...` through Bash/terminal | Use `node cli.js ...` through Bash/terminal |
 
 ---
 
