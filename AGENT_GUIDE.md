@@ -33,6 +33,10 @@ node cli.js doctor
 
 Expected result: at least one connection reports `"ok": true`.
 
+If the target AI tool supports native MCP registration, also create
+`local/mcp-remote-agent.json` from `mcp-remote-agent.example.json`, set
+`skillDir` and `mcpConfigPath`, then run `node sync.cjs`.
+
 ## Native MCP Usage
 
 When the AI session exposes native MCP tools, run this sequence before remote
