@@ -1,0 +1,14 @@
+{
+  "mode": "auto",
+  "requestedMode": "auto",
+  "detectedMode": "unknown",
+  "lastProbeAt": null,
+  "probeResult": {
+    "capabilities": {
+      "nativeMcpReady": false,
+      "executableSkillReady": false,
+      "canAutoFallback": true
+    },
+    "blockers": []
+  }
+}

@@ -1,16 +1,23 @@
-# 本地配置（不上传）
-local/
+# Local runtime config (never commit real secrets)
+local/mcp-remote-agent.json
+local/connections.json
+local/cli-state.json
+local/runtime-mode.json
+local/*.backup
+local/*.bak*
+local/logs/
+local/server/
 connections.json
 SYNC.md
 sync-to-github.ps1
 
-# 自动生成
+# Generated
 server/.env
 
-# 依赖
+# Dependencies
 node_modules/
 
-# 日志
+# Logs
 *.log
 *.tmp
 
@@ -18,6 +25,6 @@ node_modules/
 .idea/
 .vscode/
 
-# 系统文件
+# System files
 .DS_Store
 Thumbs.db

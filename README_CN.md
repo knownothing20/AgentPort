@@ -25,6 +25,18 @@ node cli.js write /path/to/workspace/tmp.txt --content "hello"
 
 MCP Server for AI Agent Remote Development
 
+新电脑或其他 AI 软件安装迁移请先看 [INSTALL_OTHER_MACHINE.md](./INSTALL_OTHER_MACHINE.md)。简版流程：
+
+```bash
+git clone https://github.com/knownothing20/mcp-remote-agent.git
+cd mcp-remote-agent
+npm install
+cp local/connections.json.example local/connections.json
+npm run doctor
+```
+
+然后通过安全方式复制旧电脑的 `local/connections.json`、按需复制 `local/mcp-remote-agent.json` 和 SSH 私钥，并按新电脑用户名修正私钥绝对路径。
+
 让 AI Agent 通过 MCP 协议操作远程 Linux 服务器，实现本地开发环境与远程服务器的无缝衔接。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
