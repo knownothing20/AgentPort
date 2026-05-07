@@ -25,7 +25,7 @@ node cli.js write /path/to/workspace/tmp.txt --content "hello"
 
 MCP Server for AI Agent Remote Development
 
-新电脑或其他 AI 软件安装迁移请先看 [INSTALL_OTHER_MACHINE.md](./INSTALL_OTHER_MACHINE.md)。简版流程：
+新电脑或其他 AI 软件安装迁移请先看 [INSTALL_OTHER_MACHINE.md](./INSTALL_OTHER_MACHINE.md)。如果目标软件支持 **原生 MCP / native MCP**，优先走 MCP；如果不支持 MCP 但能执行 Bash/终端命令，就走 `cli.js` fallback。简版流程：
 
 ```bash
 git clone https://github.com/knownothing20/mcp-remote-agent.git

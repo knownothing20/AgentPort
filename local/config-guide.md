@@ -80,6 +80,17 @@ If you are migrating from another computer, copy your private
 `local/connections.json` and `local/mcp-remote-agent.json` through a secure
 channel, then update local paths such as SSH private key locations.
 
+If the target AI tool supports native MCP, configure `local/mcp-remote-agent.json`
+and run `node sync.cjs`. If it does not support native MCP but can run
+Bash/terminal commands, use `node cli.js ...` as the CLI fallback.
+
+After editing or copying config, verify it:
+
+```bash
+npm run doctor
+node cli.js health
+```
+
 ## Security Notes
 
 - **Never commit** real files such as `local/connections.json`,

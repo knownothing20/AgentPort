@@ -39,7 +39,7 @@ home directory.
 
 ## MCP-Capable AI Tools
 
-For tools that support custom MCP servers:
+For tools that support custom MCP servers, use native MCP first:
 
 1. Place this repo in the tool's skill/plugin directory.
 2. Copy or create `local/mcp-remote-agent.json`.
@@ -60,7 +60,8 @@ remote_health()
 
 ## AI Tools Without MCP
 
-For tools that do not support custom MCP but can run Bash/terminal commands:
+For tools that do not support custom MCP but can run Bash/terminal commands,
+use the CLI fallback:
 
 ```bash
 node cli.js doctor

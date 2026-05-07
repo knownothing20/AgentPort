@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1. Changed `.gitignore` to ignore only real local runtime secrets/state instead of hiding the entire `local/` directory from Git.
   2. Added an install/migration guide describing what to clone, what to copy privately, which SSH key paths must be adjusted, and which files must not be copied.
   3. Added `local/runtime-mode.json.example` and clarified local config docs so example files can be shipped safely.
-  4. Updated README files with a short "install on another computer" path.
+  4. Updated README files with a short "install on another computer" path and explicit native MCP vs CLI fallback guidance.
 - **Risk**: Users must still move real tokens and SSH private keys through a private channel. Absolute Windows key paths may need manual edits after migration.
 - **Verification**: Fresh-clone install test identified the missing `local/` examples; follow-up verification should clone again after this documentation/config packaging fix is pushed.
 
