@@ -11,6 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Development Record
 
+## [2026-05-07 00:00] docs | operator: Codex | task: other-machine-install | scope: install/migration
+- **Summary**: Fixed the fresh GitHub install path so new machines receive safe `local/` examples and clear migration instructions without exposing private tokens.
+- **Impact Files**: `.gitignore`, `INSTALL_OTHER_MACHINE.md`, `local/README.md`, `local/config-guide.md`, `local/runtime-mode.json.example`, `README.md`, `README_CN.md`, `CHANGELOG.md`
+- **Change Details**:
+  1. Changed `.gitignore` to ignore only real local runtime secrets/state instead of hiding the entire `local/` directory from Git.
+  2. Added an install/migration guide describing what to clone, what to copy privately, which SSH key paths must be adjusted, and which files must not be copied.
+  3. Added `local/runtime-mode.json.example` and clarified local config docs so example files can be shipped safely.
+  4. Updated README files with a short "install on another computer" path.
+- **Risk**: Users must still move real tokens and SSH private keys through a private channel. Absolute Windows key paths may need manual edits after migration.
+- **Verification**: Fresh-clone install test identified the missing `local/` examples; follow-up verification should clone again after this documentation/config packaging fix is pushed.
+
 ## [2026-05-06 23:24] feat | operator: Codex | task: cli-fallback-adapter | scope: agent compatibility
 - **Summary**: Added a general fallback path for AI tools that cannot inject native MCP tools, while keeping native MCP as the highest-priority integration mode.
 - **Impact Files**: `cli.js`, `AGENT_GUIDE.md`, `SKILL.md`, `README.md`, `README_CN.md`, `package.json`, `package-lock.json`, `sync-to-github.ps1`, `CHANGELOG.md`

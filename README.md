@@ -83,6 +83,25 @@ cd mcp-remote-agent
 npm install
 ```
 
+### 2.1 Install on another computer
+
+For a new computer or another AI desktop tool, see
+[INSTALL_OTHER_MACHINE.md](./INSTALL_OTHER_MACHINE.md).
+
+Short version:
+
+```bash
+git clone https://github.com/knownothing20/mcp-remote-agent.git
+cd mcp-remote-agent
+npm install
+cp local/connections.json.example local/connections.json
+npm run doctor
+```
+
+Then copy your private `local/connections.json`, optional
+`local/mcp-remote-agent.json`, and SSH keys from the old computer through a
+secure channel. Update any absolute key paths for the new machine.
+
 ### 3. CLI Guided Setup (Recommended)
 
 Use the interactive wizard to scan your SSH environment and guide you through configuration:
