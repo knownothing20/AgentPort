@@ -106,7 +106,7 @@ For full installation and agent bootstrap guidance, read `AGENT_GUIDE.md`.
 |----|------|------|
 | **客户端** | `remoteUrl`、`authToken`、`clientId`、`timeoutMs`、`skillDir`、`nodePath` | 本地 MCP 连接远端守护进程的配置 |
 | **MCP 注册** | `mcpConfigPath`、`mcpServerName` | 目标 AI 工具的 MCP 配置文件路径和服务名 |
-| **服务端** | `serverPort`、`serverBindHost`、`serverWorkspaceRoot`、`serverEnableDashboard`、`serverExecTimeoutMs`、`serverExecMaxConcurrency`、`serverDaemonDir`、`serverAuditLogPath`、`serverAuthTokens`、`serverAdminTokens` | 远程守护进程的运行配置 |
+| **服务端** | `serverPort`、`serverBindHost`、`serverWorkspaceRoot`、`serverEnableDashboard`、`serverExecTimeoutMs`、`serverExecMaxConcurrency`、`serverExecQueueTimeoutMs`、`serverDaemonDir`、`serverAuditLogPath`、`serverAuthTokens`、`serverAdminTokens` | 远程守护进程的运行配置 |
 
 `sync.cjs` 自动把这些变量同步到：
 
@@ -565,7 +565,8 @@ cp mcp-remote-agent.example.json local/mcp-remote-agent.json
     "serverWorkspaceRoot": "/home/你的用户名/你的工作区",
     "serverEnableDashboard": "true",
     "serverExecTimeoutMs": "120000",
-    "serverExecMaxConcurrency": "2",
+    "serverExecMaxConcurrency": "4",
+    "serverExecQueueTimeoutMs": "15000",
     "serverDaemonDir": "/home/你的用户名/.mcp-remote-agent/daemon",
     "serverAuditLogPath": "/home/你的用户名/.mcp-remote-agent/daemon/audit.log",
     "serverAuthTokens": "client1=token1,client2=token2",
@@ -793,7 +794,8 @@ node test.cjs --local-only
 | `WORKSPACE_ROOT` | `serverWorkspaceRoot` | 工作区根目录，限制文件读写范围 | — |
 | `ENABLE_DASHBOARD` | `serverEnableDashboard` | 是否开启网页控制台 | `true` |
 | `EXEC_TIMEOUT_MS` | `serverExecTimeoutMs` | 命令执行超时（毫秒） | `120000` |
-| `EXEC_MAX_CONCURRENCY` | `serverExecMaxConcurrency` | 最大并发执行数 | `2` |
+| `EXEC_MAX_CONCURRENCY` | `serverExecMaxConcurrency` | 最大并发执行数 | `4` |
+| `EXEC_QUEUE_TIMEOUT_MS` | `serverExecQueueTimeoutMs` | 执行槽排队超时，超时返回明确 429 与 exec 状态 | `15000` |
 | `AUDIT_LOG_PATH` | `serverAuditLogPath` | 审计日志路径 | daemon 目录下 |
 | `AUTH_TOKENS` | `serverAuthTokens` | API 客户端鉴权，格式 `clientId=token,clientId=token` | — |
 | `ADMIN_TOKENS` | `serverAdminTokens` | Dashboard 鉴权，格式 `token1,token2` | — |

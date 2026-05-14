@@ -1,5 +1,13 @@
 # Changelog
 
+## [2026-05-14] fix | Execution backpressure template sync
+
+### Changed
+- Synced the local daemon template with execution queue backpressure: `EXEC_QUEUE_TIMEOUT_MS`, hot-reloadable execution runtime settings, explicit 429 payloads, and batch bash slot accounting.
+- Updated local generated config defaults to `EXEC_MAX_CONCURRENCY=4` and `EXEC_QUEUE_TIMEOUT_MS=15000`.
+- Improved client error messages so HTTP 429 responses include remote `exec` state.
+
+---
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),

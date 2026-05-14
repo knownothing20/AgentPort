@@ -370,7 +370,9 @@ function errorMessage(error) {
   const status = error?.response?.status;
   const remoteMessage = error?.response?.data?.error || error?.response?.data?.message;
   const base = remoteMessage || error?.message || "Unknown error";
-  return status ? `${base} (HTTP ${status})` : base;
+  const exec = error?.response?.data?.exec;
+  const execHint = exec ? ` exec=${JSON.stringify(exec)}` : "";
+  return status ? `${base} (HTTP ${status})${execHint}` : base;
 }
 
 function toTextResult(text) {

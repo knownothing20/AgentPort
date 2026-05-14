@@ -29,8 +29,21 @@ const PORT = Number(process.env.PORT || 3183);
 const HOST = process.env.BIND_HOST || '0.0.0.0';
 let WORKSPACE_ROOT = process.env.WORKSPACE_ROOT || '/home/user/workspace';
 const ENABLE_DASHBOARD = /^true$/i.test(String(process.env.ENABLE_DASHBOARD || 'false'));
-const EXEC_TIMEOUT_MS = Number(process.env.EXEC_TIMEOUT_MS || 120000);
-const EXEC_MAX_CONCURRENCY = Math.max(1, Number(process.env.EXEC_MAX_CONCURRENCY || 2));
+function parseRuntimeInt(value, fallback, min = 1) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < min) return fallback;
+  return parsed;
+}
+
+function loadRuntimeConfig() {
+  return {
+    execTimeoutMs: parseRuntimeInt(process.env.EXEC_TIMEOUT_MS, 120000, 1000),
+    execMaxConcurrency: parseRuntimeInt(process.env.EXEC_MAX_CONCURRENCY, 2, 1),
+    execQueueTimeoutMs: parseRuntimeInt(process.env.EXEC_QUEUE_TIMEOUT_MS, 15000, 0),
+  };
+}
+
+let runtimeConfig = loadRuntimeConfig();
 const AUDIT_LOG_PATH = process.env.AUDIT_LOG_PATH || path.join(__dirname, 'audit.log');
 
 // 命令执行限制配置 (v2.3.1)
@@ -119,9 +132,10 @@ async function reloadConfig() {
   }
   // Update mutable runtime config
   WORKSPACE_ROOT = process.env.WORKSPACE_ROOT || WORKSPACE_ROOT;
+  runtimeConfig = loadRuntimeConfig();
   rebuildTokenMaps();
-  await audit({ type: 'config.reload', clients: Object.keys(clientTokenMap) });
-  return { clients: Object.keys(clientTokenMap), workspaceRoot: WORKSPACE_ROOT };
+  await audit({ type: 'config.reload', clients: Object.keys(clientTokenMap), exec: getExecStats() });
+  return { clients: Object.keys(clientTokenMap), workspaceRoot: WORKSPACE_ROOT, exec: getExecStats() };
 }
 
 
@@ -201,19 +215,67 @@ async function withFileLock(key, fn) {
   }
 }
 
+function getExecStats() {
+  return {
+    running: runningExec,
+    max: runtimeConfig.execMaxConcurrency,
+    queued: execWaiters.length,
+    timeoutMs: runtimeConfig.execTimeoutMs,
+    queueTimeoutMs: runtimeConfig.execQueueTimeoutMs,
+  };
+}
+
+function execQueueError() {
+  const error = new Error('Too many concurrent exec operations');
+  error.statusCode = 429;
+  error.details = getExecStats();
+  return error;
+}
+
+function execErrorPayload(error) {
+  const payload = { error: error.message || 'Execution failed' };
+  if (error.details) payload.exec = error.details;
+  return payload;
+}
+
 async function acquireExecSlot() {
-  if (runningExec < EXEC_MAX_CONCURRENCY) {
+  if (runningExec < runtimeConfig.execMaxConcurrency) {
     runningExec += 1;
     return;
   }
-  await new Promise((resolve) => execWaiters.push(resolve));
-  runningExec += 1;
+
+  const timeoutMs = runtimeConfig.execQueueTimeoutMs;
+  if (timeoutMs <= 0) throw execQueueError();
+
+  await new Promise((resolve, reject) => {
+    const waiter = { resolved: false, timer: null, resolve: null };
+    waiter.resolve = () => {
+      if (waiter.resolved) return;
+      waiter.resolved = true;
+      if (waiter.timer) clearTimeout(waiter.timer);
+      runningExec += 1;
+      resolve();
+    };
+    waiter.timer = setTimeout(() => {
+      if (waiter.resolved) return;
+      waiter.resolved = true;
+      const index = execWaiters.indexOf(waiter);
+      if (index >= 0) execWaiters.splice(index, 1);
+      reject(execQueueError());
+    }, timeoutMs);
+    execWaiters.push(waiter);
+  });
 }
 
 function releaseExecSlot() {
   runningExec = Math.max(0, runningExec - 1);
-  const next = execWaiters.shift();
-  if (next) next();
+  while (runningExec < runtimeConfig.execMaxConcurrency && execWaiters.length > 0) {
+    const next = execWaiters.shift();
+    if (next && !next.resolved) {
+      next.resolve();
+      break;
+    }
+  }
 }
 
 async function audit(event) {
@@ -257,7 +319,7 @@ app.get('/healthz', async (_req, res) => {
     time: nowIso(),
     workspaceRoot: WORKSPACE_ROOT,
     authClients: Object.keys(clientTokenMap),
-    exec: { running: runningExec, max: EXEC_MAX_CONCURRENCY },
+    exec: getExecStats(),
   });
 });
 
@@ -383,26 +445,29 @@ app.post(bashRoutes, authApi, async (req, res) => {
     }
   }
 
+  let execSlotAcquired = false;
   try {
     await acquireExecSlot();
+    execSlotAcquired = true;
     const cwd = typeof req.body.cwd === 'string' && req.body.cwd.trim() ? safePath(req.body.cwd) : WORKSPACE_ROOT;
     const { stdout, stderr } = await execAsync(command, {
       cwd,
-      timeout: EXEC_TIMEOUT_MS,
+      timeout: runtimeConfig.execTimeoutMs,
       maxBuffer: 10 * 1024 * 1024,
     });
     await audit({ type: 'exec', clientId: req.mcpClientId, command: command.slice(0, 300), cwd, ms: Date.now() - start, ok: true });
     return res.json({ success: true, stdout, stderr, code: 0 });
   } catch (error) {
-    await audit({ type: 'exec', clientId: req.mcpClientId, command: command.slice(0, 300), ms: Date.now() - start, ok: false, error: error.message });
-    return res.status(500).json({
-      error: error.message,
+    await audit({ type: 'exec', clientId: req.mcpClientId, command: command.slice(0, 300), ms: Date.now() - start, ok: false, error: error.message, exec: error.details });
+    const statusCode = Number(error.statusCode) || 500;
+    return res.status(statusCode).json({
+      ...execErrorPayload(error),
       stdout: error.stdout,
       stderr: error.stderr,
       code: typeof error.code === 'number' ? error.code : null,
     });
   } finally {
-    releaseExecSlot();
+    if (execSlotAcquired) releaseExecSlot();
   }
 });
 
@@ -449,18 +514,26 @@ app.post('/api/batch', authApi, async (req, res) => {
         });
         results.push({ type: 'glob', pattern: op.pattern, status: 200, entries, ms: Date.now() - opStart });
       } else if (op.type === 'bash') {
-        const cwd = op.cwd ? safePath(op.cwd) : WORKSPACE_ROOT;
-        const { stdout, stderr } = await execAsync(op.command, {
-          cwd, timeout: EXEC_TIMEOUT_MS, maxBuffer: 10 * 1024 * 1024,
-        });
-        results.push({ type: 'bash', command: op.command, status: 200, stdout, stderr, code: 0, ms: Date.now() - opStart });
+        let execSlotAcquired = false;
+        try {
+          await acquireExecSlot();
+          execSlotAcquired = true;
+          const cwd = op.cwd ? safePath(op.cwd) : WORKSPACE_ROOT;
+          const { stdout, stderr } = await execAsync(op.command, {
+            cwd, timeout: runtimeConfig.execTimeoutMs, maxBuffer: 10 * 1024 * 1024,
+          });
+          results.push({ type: 'bash', command: op.command, status: 200, stdout, stderr, code: 0, ms: Date.now() - opStart });
+        } finally {
+          if (execSlotAcquired) releaseExecSlot();
+        }
       } else {
         results.push({ type: op.type, status: 400, error: 'Unknown operation type', ms: Date.now() - opStart });
       }
     } catch (error) {
+      const statusCode = Number(error.statusCode) || 500;
       results.push({
-        type: op.type, path: op.path, status: 500,
-        error: error.message,
+        type: op.type, path: op.path, status: statusCode,
+        error: error.message, exec: error.details,
         stdout: error.stdout, stderr: error.stderr,
         code: typeof error.code === 'number' ? error.code : null,
         ms: Date.now() - opStart,
@@ -480,20 +553,22 @@ app.post('/api/exec/async', authApi, async (req, res) => {
   const command = typeof req.body.command === 'string' ? req.body.command : '';
   if (!command.trim()) return res.status(400).json({ error: 'command is required' });
 
+  let cwd;
   try {
+    cwd = typeof req.body.cwd === 'string' && req.body.cwd.trim() ? safePath(req.body.cwd) : WORKSPACE_ROOT;
     await acquireExecSlot();
   } catch (e) {
-    return res.status(429).json({ error: 'Too many concurrent exec operations', running: runningExec, max: EXEC_MAX_CONCURRENCY });
+    const statusCode = Number(e.statusCode) || 500;
+    return res.status(statusCode).json(execErrorPayload(e));
   }
 
   const taskId = 'task-' + (++taskIdCounter);
-  const cwd = typeof req.body.cwd === 'string' && req.body.cwd.trim() ? safePath(req.body.cwd) : WORKSPACE_ROOT;
   const createdAt = Date.now();
 
   asyncTasks.set(taskId, { id: taskId, command, cwd, status: 'running', stdout: '', stderr: '', exitCode: null, createdAt, finishedAt: null });
 
   // Execute in background
-  execAsync(command, { cwd, timeout: EXEC_TIMEOUT_MS, maxBuffer: 10 * 1024 * 1024 })
+  execAsync(command, { cwd, timeout: runtimeConfig.execTimeoutMs, maxBuffer: 10 * 1024 * 1024 })
     .then(({ stdout, stderr }) => {
       const task = asyncTasks.get(taskId);
       if (task) {
@@ -558,7 +633,8 @@ app.post("/api/exec/script", authApi, async (req, res) => {
   try {
     await acquireExecSlot();
   } catch (e) {
-    return res.status(429).json({ error: "Too many concurrent exec operations", running: runningExec, max: EXEC_MAX_CONCURRENCY });
+    const statusCode = Number(e.statusCode) || 500;
+    return res.status(statusCode).json(execErrorPayload(e));
   }
 
   const tmpFile = path.join(os.tmpdir(), "mcp-remote-agent-script-" + Date.now() + ".sh");
@@ -571,7 +647,7 @@ app.post("/api/exec/script", authApi, async (req, res) => {
     // Execute the script
     const { stdout, stderr } = await execAsync(interpreter + " " + tmpFile, {
       cwd,
-      timeout: EXEC_TIMEOUT_MS,
+      timeout: runtimeConfig.execTimeoutMs,
       maxBuffer: 10 * 1024 * 1024,
     });
 
@@ -579,8 +655,10 @@ app.post("/api/exec/script", authApi, async (req, res) => {
     return res.json({ success: true, stdout, stderr, code: 0, ms: Date.now() - scriptStart });
   } catch (error) {
     await audit({ type: "exec.script", clientId: req.mcpClientId, interpreter, ms: Date.now() - scriptStart, ok: false });
-    return res.json({
+    const statusCode = Number(error.statusCode) || 200;
+    return res.status(statusCode).json({
       success: false,
+      ...execErrorPayload(error),
       stdout: error.stdout || "",
       stderr: error.stderr || error.message || "",
       code: typeof error.code === "number" ? error.code : 1,
@@ -621,7 +699,7 @@ app.get('/api/stats', authAdmin, async (req, res) => {
   for (const id of Object.keys(byClient)) {
     if (!allClients[id]) allClients[id] = { count: byClient[id], lastSeen: clientLast[id] };
   }
-  res.json({total: filtered, errors, avgMs: filtered ? totalMs/filtered : 0, byType: typeStats, byClient: allClients, execTimeout: EXEC_TIMEOUT_MS, days});
+  res.json({total: filtered, errors, avgMs: filtered ? totalMs/filtered : 0, byType: typeStats, byClient: allClients, execTimeout: runtimeConfig.execTimeoutMs, days});
 });
 
 app.get('/api/errors', authAdmin, async (req, res) => {
@@ -704,8 +782,10 @@ app.get('/api/config', authAdmin, async (req, res) => {
         workspaceRoot: WORKSPACE_ROOT,
         clients: Object.keys(clientTokenMap),
         port: PORT,
-        execMaxConcurrency: EXEC_MAX_CONCURRENCY,
-        execTimeoutMs: EXEC_TIMEOUT_MS,
+        execMaxConcurrency: runtimeConfig.execMaxConcurrency,
+        execTimeoutMs: runtimeConfig.execTimeoutMs,
+        execQueueTimeoutMs: runtimeConfig.execQueueTimeoutMs,
+        exec: getExecStats(),
       }
     });
   } catch (error) {

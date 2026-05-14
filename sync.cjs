@@ -99,6 +99,7 @@ function generateServerEnv(vars) {
     ["ENABLE_DASHBOARD", "serverEnableDashboard"],
     ["EXEC_TIMEOUT_MS", "serverExecTimeoutMs"],
     ["EXEC_MAX_CONCURRENCY", "serverExecMaxConcurrency"],
+    ["EXEC_QUEUE_TIMEOUT_MS", "serverExecQueueTimeoutMs"],
     ["AUDIT_LOG_PATH", "serverAuditLogPath"],
     ["AUTH_TOKENS", "serverAuthTokens"],
     ["ADMIN_TOKENS", "serverAdminTokens"],

@@ -29,6 +29,7 @@ Enable AI Agents (like WorkBuddy, Claude Desktop, Cursor) to directly read/write
 | Batch Operations | `remote_batch` up to 20 operations per request |
 | Async Execution | `remote_exec_async` + `remote_task` for long-running tasks |
 | Config Hot Reload | `remote_config` modify remote config without restart |
+| Execution Backpressure | Queue timeout returns clear 429 with exec running/max/queued state |
 | Dynamic Connections | Switch between multiple servers without restarting MCP |
 | Health Check | Automatic remote service status detection |
 | Encoding Handling | Auto base64 encode special chars, clean CRLF/BOM |
