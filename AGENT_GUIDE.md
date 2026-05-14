@@ -54,6 +54,7 @@ remote_read(path="/path/to/file")
 remote_write(path="/path/to/file", content="...")
 remote_bash(command="pwd && ls -la", cwd="/path")
 remote_glob(pattern="**/*.js", cwd="/path")
+remote_grep(pattern="video-analysis", cwd="/path", include=["**/*.ts", "**/*.py"])
 ```
 
 Do not fall back to CLI when native MCP tools are working.
@@ -75,6 +76,7 @@ Use the actual skill path for the current AI tool. Examples:
 node cli.js read /path/to/workspace/AGENTS.md
 node cli.js bash "pwd && ls -la" --cwd /path/to/workspace
 node cli.js glob "**/*.js" --cwd /path/to/workspace
+node cli.js grep "video-analysis" --cwd /path/to/workspace --include "*.ts,*.py"
 node cli.js write /path/to/workspace/tmp.txt --content "hello"
 node cli.js write /path/to/workspace/tmp.txt --file local-file.txt
 ```

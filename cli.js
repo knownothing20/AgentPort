@@ -110,6 +110,55 @@ function sanitizeContent(content) {
   return String(content).replace(/\r\n/g, "\n").replace(/^\uFEFF/, "");
 }
 
+function listArg(value, fallback) {
+  if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean);
+  if (typeof value === "string" && value.trim()) {
+    return value.split(",").map((item) => item.trim()).filter(Boolean);
+  }
+  return fallback;
+}
+
+function positiveInt(value, fallback, min = 1, max = 5000) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(Math.max(parsed, min), max);
+}
+
+function buildSshGrepCommand(args) {
+  const pattern = args.pattern || args._[1];
+  const include = listArg(args.include, ["*"]);
+  const excludeDirs = listArg(args.excludeDirs || args["exclude-dir"], [
+    "node_modules", ".git", "dist", "build", ".next", ".nuxt", ".cache", ".venv", "venv", "__pycache__",
+  ]);
+  const maxResults = positiveInt(args.maxResults || args["max-results"], 200, 1, 5000);
+  const flags = ["-RIn", "--binary-files=without-match"];
+  if (!args.caseSensitive && !args["case-sensitive"]) flags.push("-i");
+  if (!args.regex) flags.push("-F");
+  for (const item of include) flags.push(`--include=${JSON.stringify(item)}`);
+  for (const dir of excludeDirs) flags.push(`--exclude-dir=${JSON.stringify(dir)}`);
+  const command = `grep ${flags.join(" ")} -- ${JSON.stringify(pattern)} . 2>/dev/null | head -n ${maxResults} || true`;
+  return {
+    command: args.cwd ? `cd ${JSON.stringify(args.cwd)} && ${command}` : command,
+    maxResults,
+  };
+}
+
+function parseGrepOutput(stdout) {
+  return String(stdout || "")
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => {
+      const first = line.indexOf(":");
+      const second = first >= 0 ? line.indexOf(":", first + 1) : -1;
+      if (first < 0 || second < 0) return { path: line, line: null, text: "" };
+      return {
+        path: line.slice(0, first).replace(/^\.\//, ""),
+        line: Number.parseInt(line.slice(first + 1, second), 10) || null,
+        text: line.slice(second + 1),
+      };
+    });
+}
+
 function daemonClient(conn) {
   return axios.create({
     baseURL: conn.url,
@@ -333,6 +382,40 @@ async function commandGlob(args) {
   });
 }
 
+async function commandGrep(args) {
+  const pattern = args._[1] || args.pattern;
+  if (!pattern) throw new Error("Usage: node cli.js grep <pattern> [--cwd path] [--include \"*.js,*.ts\"] [--regex] [--case-sensitive]");
+  await withConnection(args, async ({ type, http, ssh }) => {
+    if (type === "ssh") {
+      const { command, maxResults } = buildSshGrepCommand({ ...args, pattern });
+      const result = await ssh.exec(command);
+      const matches = parseGrepOutput(result.stdout);
+      printJson({
+        success: true,
+        engine: "grep",
+        pattern,
+        cwd: args.cwd || ".",
+        maxResults,
+        matches,
+        truncated: matches.length >= maxResults,
+        stderr: result.stderr || undefined,
+      });
+      return;
+    }
+    const data = await postWithFallback(http, ["/api/fs/grep", "/grep"], {
+      pattern,
+      cwd: args.cwd,
+      include: listArg(args.include, undefined),
+      excludeDirs: listArg(args.excludeDirs || args["exclude-dir"], undefined),
+      maxResults: args.maxResults || args["max-results"],
+      maxFileBytes: args.maxFileBytes || args["max-file-bytes"],
+      caseSensitive: Boolean(args.caseSensitive || args["case-sensitive"]),
+      regex: Boolean(args.regex),
+    });
+    printJson(data);
+  });
+}
+
 async function commandBash(args) {
   const command = args._.slice(1).join(" ") || args.command;
   if (!command) throw new Error("Usage: node cli.js bash <command> [--cwd path]");
@@ -385,6 +468,12 @@ async function commandBatch(args) {
           results.push({ ...op, status: 200 });
         } else if (op.type === "stat") results.push({ ...op, status: 200, ...(await ssh.stat(op.path)) });
         else if (op.type === "glob") results.push({ ...op, status: 200, entries: await ssh.glob(op.pattern, op.cwd) });
+        else if (op.type === "grep") {
+          const { command, maxResults } = buildSshGrepCommand(op);
+          const result = await ssh.exec(command);
+          const matches = parseGrepOutput(result.stdout);
+          results.push({ ...op, status: 200, engine: "grep", matches, truncated: matches.length >= maxResults });
+        }
         else if (op.type === "bash") results.push({ ...op, status: 200, ...(await ssh.exec(op.command, { cwd: op.cwd })) });
         else results.push({ ...op, status: 400, error: "Unsupported SSH batch operation" });
       }
@@ -413,6 +502,7 @@ Commands:
   node cli.js write <remote-path> --file local.txt
   node cli.js stat <remote-path>
   node cli.js glob "**/*.js" [--cwd /path]
+  node cli.js grep "text" [--cwd /path] [--include "*.js,*.ts"]
   node cli.js bash "pwd && ls -la" [--cwd /path]
   node cli.js script local-script.sh [--interpreter bash]
   node cli.js batch batch.json
@@ -452,6 +542,9 @@ async function main() {
       break;
     case "glob":
       await commandGlob(args);
+      break;
+    case "grep":
+      await commandGrep(args);
       break;
     case "bash":
       await commandBash(args);

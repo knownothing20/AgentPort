@@ -64,7 +64,8 @@ Use the highest available integration level:
 | Connection switching | `remote_connect` |
 | Health check | `remote_health` |
 | File read/write/stat | `remote_read`, `remote_write`, `remote_stat` |
-| Search | `remote_glob` |
+| Path search | `remote_glob` |
+| Content search | `remote_grep` |
 | Command execution | `remote_bash`, `remote_script` |
 | Batch operations | `remote_batch` |
 | Async execution | `remote_exec_async`, `remote_task` |
