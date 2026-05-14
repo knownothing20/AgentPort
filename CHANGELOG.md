@@ -1,5 +1,12 @@
 # Changelog
 
+## [2026-05-14] fix | Keep MCP stdio transport alive on unexpected errors
+
+### Changed
+- Added top-level `unhandledRejection` and `uncaughtException` logging in the local MCP server so unexpected async errors are recorded instead of silently closing the stdio transport.
+
+---
+
 ## [2026-05-14] docs | Whitepaper and README refresh
 
 ### Changed

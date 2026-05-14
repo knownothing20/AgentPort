@@ -11,6 +11,18 @@ import { SSHClient, SSHConnectionManager } from "./ssh-client.js";
 import { scanLocalSSH, formatSSHScanSummary } from "./ssh-scanner.js";
 import logger from "./logger.js";
 
+process.on("unhandledRejection", (reason) => {
+  const message = reason instanceof Error ? reason.stack || reason.message : String(reason);
+  logger.error("process", "Unhandled rejection", message);
+  console.error("[mcp-remote-agent] unhandled rejection:", message);
+});
+
+process.on("uncaughtException", (error) => {
+  const message = error instanceof Error ? error.stack || error.message : String(error);
+  logger.error("process", "Uncaught exception", message);
+  console.error("[mcp-remote-agent] uncaught exception:", message);
+});
+
 // Read version from local/mcp-remote-agent.json (single source of truth)
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
