@@ -7,7 +7,7 @@ Enable AI Agents to operate remote Linux servers through MCP protocol, seamlessl
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-2.5.0-blue)](https://github.com/knownothing20/mcp-remote-agent)
 
-[中文文档](./README_CN.md)
+[中文文档](./README_CN.md) | [Whitepaper](./WHITEPAPER.md)
 
 ---
 
@@ -16,6 +16,29 @@ Enable AI Agents to operate remote Linux servers through MCP protocol, seamlessl
 Enable AI Agents (like WorkBuddy, Claude Desktop, Cursor) to directly read/write remote Linux server files and execute commands via MCP, seamlessly connecting local development with remote servers.
 
 **Analogy**: VS Code Remote SSH is for humans; mcp-remote-agent is for AI.
+
+---
+
+## Architecture Overview
+
+`mcp-remote-agent` is split into a local agent client and a remote Linux daemon:
+
+```text
+AI desktop tool
+  -> native MCP tools or CLI fallback
+  -> local mcp-remote-agent client
+  -> remote daemon HTTP API or SSH fallback
+  -> remote Linux workspace
+```
+
+The local side registers MCP tools, reads private connection config, provides
+the CLI fallback, and turns daemon errors into agent-readable messages. The
+remote daemon performs token auth, safe path checks, file operations, command
+execution, audit logging, health checks, Dashboard responses, and hot config
+reload.
+
+For the design rationale, deployment model, security boundaries, and current
+operational defaults, see [WHITEPAPER.md](./WHITEPAPER.md).
 
 ---
 
@@ -66,6 +89,38 @@ node cli.js write /path/to/workspace/tmp.txt --content "hello"
 
 See [AGENT_GUIDE.md](./AGENT_GUIDE.md) for the full install and agent bootstrap
 workflow.
+
+---
+
+## Execution Backpressure
+
+The remote daemon protects itself with an execution slot queue:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `EXEC_TIMEOUT_MS` | `120000` | Timeout for a running command |
+| `EXEC_MAX_CONCURRENCY` | `4` | Maximum commands running at the same time |
+| `EXEC_QUEUE_TIMEOUT_MS` | `15000` | Maximum time a request waits for an execution slot |
+
+When all execution slots are busy, new command requests wait in a queue. If the
+queue wait exceeds `EXEC_QUEUE_TIMEOUT_MS`, the daemon returns HTTP `429` with
+the current `exec` state:
+
+```json
+{
+  "error": "Too many concurrent exec operations",
+  "exec": {
+    "running": 4,
+    "max": 4,
+    "queued": 1,
+    "timeoutMs": 120000,
+    "queueTimeoutMs": 15000
+  }
+}
+```
+
+`remote_health` also reports this `exec` state, which helps distinguish service
+disconnects from an overloaded execution queue.
 
 ---
 
@@ -135,6 +190,8 @@ Key variables:
 | `mcpConfigPath` | Path to the target AI tool's MCP config file |
 | `remoteUrl` | Remote daemon address |
 | `authToken` | Client authentication token |
+| `serverExecMaxConcurrency` | Remote daemon command concurrency limit, default `4` |
+| `serverExecQueueTimeoutMs` | Queue wait timeout before HTTP `429`, default `15000` |
 
 ### 4. Sync configuration
 
@@ -217,30 +274,31 @@ For detailed usage, see [SKILL.md](./SKILL.md)
 
 ```
 mcp-remote-agent/
-├── SKILL.md                        # Complete documentation
-├── README.md                       # This file (English)
-├── README_CN.md                    # Chinese documentation
-├── index.js                        # MCP server main program
-├── package.json                    # Client dependencies
-├── mcp-remote-agent.example.json   # Config template
-├── sync.cjs                        # Variable sync script
-├── test.cjs                        # Test script
-├── .gitignore                      # Git ignore config
-├── LICENSE                         # MIT License
-├── CHANGELOG.md                    # Version changelog
-├── local/                          # Local config directory
-│   ├── config-guide.md             # Configuration guide
-│   ├── mcp-remote-agent.json       # Main config (copy from example)
-│   ├── connections.json.example    # Multi-server config example
-│   └── server/
-│       └── .env                    # Server config (auto-generated)
-└── server/
-    ├── server.js                   # Daemon process
-    ├── mcp-remote-agent-manager.sh # Process guardian script
-    ├── setup-autostart.sh          # Autostart config script
-    ├── dashboard.html              # Web Dashboard UI
-    ├── .env.example                # Server config template
-    └── package.json                # Server dependencies
+|-- WHITEPAPER.md                    # Architecture and operations whitepaper
+|-- SKILL.md                         # Complete agent documentation
+|-- README.md                        # This file (English)
+|-- README_CN.md                     # Chinese documentation
+|-- AGENT_GUIDE.md                   # Agent install and usage guide
+|-- index.js                         # MCP server main program
+|-- cli.js                           # CLI fallback for tools without native MCP
+|-- package.json                     # Client dependencies
+|-- mcp-remote-agent.example.json    # Public config template
+|-- sync.cjs                         # Variable sync script
+|-- test.cjs                         # Test script
+|-- LICENSE                          # MIT License
+|-- CHANGELOG.md                     # Version changelog
+|-- local/                           # Local private config directory
+|   |-- config-guide.md              # Configuration guide
+|   |-- connections.json.example     # Multi-server config example
+|   `-- server/
+|       `-- .env                     # Server config generated by sync.cjs
+`-- server/
+    |-- server.js                    # Remote daemon process
+    |-- mcp-remote-agent-manager.sh  # Process guardian script
+    |-- setup-autostart.sh           # Autostart config script
+    |-- dashboard.html               # Web Dashboard UI
+    |-- .env.example                 # Server config template
+    `-- package.json                 # Server dependencies
 ```
 
 ## Configuration Files
