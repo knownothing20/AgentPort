@@ -1,5 +1,13 @@
 # Changelog
 
+## [2026-05-14] docs | Whitepaper and README refresh
+
+### Changed
+- Added `WHITEPAPER.md` covering architecture, integration priority, config sync, execution backpressure, safety boundaries, deployment, and compatibility.
+- Expanded `README.md` with architecture overview, execution backpressure behavior, updated config variables, and a clean ASCII directory tree.
+
+---
+
 ## [2026-05-14] fix | Execution backpressure template sync
 
 ### Changed
