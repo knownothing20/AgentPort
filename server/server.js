@@ -348,7 +348,134 @@ app.post('/update-workspace', authAdmin, async (req, res) => {
 const readRoutes = ['/read', '/api/fs/read'];
 const writeRoutes = ['/write', '/api/fs/write'];
 const globRoutes = ['/glob', '/api/fs/glob'];
+const grepRoutes = ['/grep', '/api/fs/grep'];
 const bashRoutes = ['/bash', '/api/exec', '/api/cmd/execute'];
+
+const DEFAULT_GREP_EXCLUDE_DIRS = [
+  'node_modules', '.git', 'dist', 'build', '.next', '.nuxt',
+  '.cache', '.venv', 'venv', '__pycache__',
+];
+
+function toStringArray(value, fallback) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item).trim()).filter(Boolean);
+  }
+  if (typeof value === 'string' && value.trim()) return [value.trim()];
+  return fallback;
+}
+
+function clampInt(value, fallback, min, max) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(Math.max(parsed, min), max);
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function buildGrepMatcher(pattern, useRegex, caseSensitive) {
+  if (!useRegex) {
+    const needle = caseSensitive ? pattern : pattern.toLowerCase();
+    return (line) => (caseSensitive ? line : line.toLowerCase()).includes(needle);
+  }
+  const flags = caseSensitive ? '' : 'i';
+  const regex = new RegExp(pattern, flags);
+  return (line) => regex.test(line);
+}
+
+async function grepWorkspace(options) {
+  const pattern = typeof options.pattern === 'string' ? options.pattern : '';
+  if (!pattern) {
+    const error = new Error('pattern is required');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const cwd = typeof options.cwd === 'string' && options.cwd.trim() ? safePath(options.cwd) : WORKSPACE_ROOT;
+  const include = toStringArray(options.include, ['**/*']);
+  const userExclude = toStringArray(options.exclude, []);
+  const excludeDirs = toStringArray(options.excludeDirs, DEFAULT_GREP_EXCLUDE_DIRS);
+  const maxResults = clampInt(options.maxResults, 200, 1, 5000);
+  const maxFileBytes = clampInt(options.maxFileBytes, 1024 * 1024, 1024, 10 * 1024 * 1024);
+  const caseSensitive = Boolean(options.caseSensitive);
+  const useRegex = Boolean(options.regex);
+  const matcher = buildGrepMatcher(pattern, useRegex, caseSensitive);
+  const ignore = [
+    ...excludeDirs.map((dir) => `**/${dir.replace(/^\/+|\/+$/g, '')}/**`),
+    ...userExclude,
+  ];
+
+  const files = await fg.glob(include, {
+    cwd,
+    dot: true,
+    absolute: true,
+    onlyFiles: true,
+    ignore,
+  });
+
+  const matches = [];
+  let scannedFiles = 0;
+  let skippedFiles = 0;
+  let truncated = false;
+
+  for (const file of files) {
+    if (matches.length >= maxResults) {
+      truncated = true;
+      break;
+    }
+    try {
+      if (!isPathUnderRoot(file, WORKSPACE_ROOT)) {
+        skippedFiles += 1;
+        continue;
+      }
+      const stat = await fs.stat(file);
+      if (!stat.isFile() || stat.size > maxFileBytes) {
+        skippedFiles += 1;
+        continue;
+      }
+      const content = await fs.readFile(file, 'utf-8');
+      if (content.includes('\u0000')) {
+        skippedFiles += 1;
+        continue;
+      }
+      scannedFiles += 1;
+      const lines = content.split(/\r?\n/);
+      for (let i = 0; i < lines.length; i += 1) {
+        if (matcher(lines[i])) {
+          matches.push({
+            path: path.relative(WORKSPACE_ROOT, file).replace(/\\/g, '/'),
+            line: i + 1,
+            text: lines[i],
+          });
+          if (matches.length >= maxResults) {
+            truncated = true;
+            break;
+          }
+        }
+      }
+    } catch (_) {
+      skippedFiles += 1;
+    }
+  }
+
+  return {
+    success: true,
+    engine: 'node',
+    pattern,
+    cwd: path.relative(WORKSPACE_ROOT, cwd).replace(/\\/g, '/') || '.',
+    include,
+    excludeDirs,
+    maxResults,
+    maxFileBytes,
+    caseSensitive,
+    regex: useRegex,
+    matches,
+    truncated,
+    scannedFiles,
+    skippedFiles,
+  };
+}
 
 app.post(readRoutes, authApi, async (req, res) => {
   const start = Date.now();
@@ -426,6 +553,35 @@ app.post(globRoutes, authApi, async (req, res) => {
   } catch (error) {
     await audit({ type: 'fs.glob', clientId: req.mcpClientId, pattern: req.body.pattern, ms: Date.now() - start, ok: false, error: error.message });
     return res.status(500).json({ error: error.message });
+  }
+});
+
+app.post(grepRoutes, authApi, async (req, res) => {
+  const start = Date.now();
+  try {
+    const result = await grepWorkspace(req.body || {});
+    await audit({
+      type: 'fs.grep',
+      clientId: req.mcpClientId,
+      pattern: result.pattern,
+      cwd: result.cwd,
+      ms: Date.now() - start,
+      ok: true,
+      count: result.matches.length,
+      truncated: result.truncated,
+    });
+    return res.json(result);
+  } catch (error) {
+    await audit({
+      type: 'fs.grep',
+      clientId: req.mcpClientId,
+      pattern: req.body && req.body.pattern,
+      ms: Date.now() - start,
+      ok: false,
+      error: error.message,
+    });
+    const statusCode = Number(error.statusCode) || 500;
+    return res.status(statusCode).json({ error: error.message });
   }
 });
 
@@ -513,6 +669,9 @@ app.post('/api/batch', authApi, async (req, res) => {
           ignore: ['**/node_modules/**', '**/.git/**'],
         });
         results.push({ type: 'glob', pattern: op.pattern, status: 200, entries, ms: Date.now() - opStart });
+      } else if (op.type === 'grep') {
+        const result = await grepWorkspace(op);
+        results.push({ type: 'grep', pattern: op.pattern, status: 200, ...result, ms: Date.now() - opStart });
       } else if (op.type === 'bash') {
         let execSlotAcquired = false;
         try {

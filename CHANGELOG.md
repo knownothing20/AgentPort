@@ -1,5 +1,14 @@
 # Changelog
 
+## [2026-05-14] feat | Built-in remote content search
+
+### Added
+- Added `remote_grep` for structured remote content search without requiring `rg` on the remote host.
+- Added daemon routes `/api/fs/grep` and `/grep`, using Node.js search inside `WORKSPACE_ROOT` with include patterns, excluded directories, result limits, literal/regex mode, and case sensitivity.
+- Added CLI fallback `node cli.js grep` and batch `grep` support.
+
+---
+
 ## [2026-05-14] fix | Keep MCP stdio transport alive on unexpected errors
 
 ### Changed

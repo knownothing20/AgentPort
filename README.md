@@ -47,7 +47,7 @@ operational defaults, see [WHITEPAPER.md](./WHITEPAPER.md).
 | Feature | Description |
 |---------|-------------|
 | Remote File R/W | `remote_read` / `remote_write` / `remote_stat` |
-| Remote Search | `remote_glob` search files by glob pattern |
+| Remote Search | `remote_glob` search file paths, `remote_grep` search file contents |
 | Command Execution | `remote_bash` for simple commands, `remote_script` for multi-line scripts |
 | Batch Operations | `remote_batch` up to 20 operations per request |
 | Async Execution | `remote_exec_async` + `remote_task` for long-running tasks |
@@ -258,6 +258,7 @@ At least one configured connection should report `"ok": true`.
 | `remote_write` | Write remote file (auto clean CRLF/BOM) |
 | `remote_stat` | Get file metadata |
 | `remote_glob` | Search by glob pattern |
+| `remote_grep` | Search remote file contents |
 | `remote_bash` | Execute remote command |
 | `remote_script` | Execute multi-line script |
 | `remote_batch` | Batch operations |

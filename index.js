@@ -405,6 +405,50 @@ function normalizeGlobEntries(data) {
   return [];
 }
 
+function normalizeStringArray(value) {
+  if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean);
+  if (typeof value === "string" && value.trim()) return [value.trim()];
+  return undefined;
+}
+
+function clampPositiveInt(value, fallback, min, max) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(Math.max(parsed, min), max);
+}
+
+function buildSshGrepCommand(args) {
+  const pattern = requireNonEmptyString(args, "pattern");
+  const include = normalizeStringArray(args.include) || ["*"];
+  const excludeDirs = normalizeStringArray(args.excludeDirs) || [
+    "node_modules", ".git", "dist", "build", ".next", ".nuxt", ".cache", ".venv", "venv", "__pycache__",
+  ];
+  const maxResults = clampPositiveInt(args.maxResults, 200, 1, 5000);
+  const flags = ["-RIn", "--binary-files=without-match"];
+  if (!args.caseSensitive) flags.push("-i");
+  if (!args.regex) flags.push("-F");
+  for (const item of include) flags.push(`--include=${JSON.stringify(item)}`);
+  for (const dir of excludeDirs) flags.push(`--exclude-dir=${JSON.stringify(dir)}`);
+  const command = `grep ${flags.join(" ")} -- ${JSON.stringify(pattern)} . 2>/dev/null | head -n ${maxResults} || true`;
+  return args.cwd ? `cd ${JSON.stringify(args.cwd)} && ${command}` : command;
+}
+
+function parseSshGrepOutput(stdout) {
+  return String(stdout || "")
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => {
+      const first = line.indexOf(":");
+      const second = first >= 0 ? line.indexOf(":", first + 1) : -1;
+      if (first < 0 || second < 0) return { path: line, line: null, text: "" };
+      return {
+        path: line.slice(0, first).replace(/^\.\//, ""),
+        line: Number.parseInt(line.slice(first + 1, second), 10) || null,
+        text: line.slice(second + 1),
+      };
+    });
+}
+
 function formatExecOutput(data) {
   const chunks = [];
   if (data?.stdout) chunks.push(`STDOUT:\n${data.stdout}`);
@@ -508,6 +552,50 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: "remote_grep",
+      description: "Search remote workspace file contents. Daemon mode uses built-in Node search; SSH fallback uses grep/find-compatible shell search.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          pattern: {
+            type: "string",
+            description: "Text or regex pattern to search for.",
+          },
+          cwd: {
+            type: "string",
+            description: "Optional. Search start directory.",
+          },
+          include: {
+            type: "array",
+            items: { type: "string" },
+            description: "Optional glob include patterns, e.g. ['**/*.ts', '**/*.py']. Default: ['**/*'].",
+          },
+          excludeDirs: {
+            type: "array",
+            items: { type: "string" },
+            description: "Optional directory names to exclude. Defaults include node_modules, .git, dist, build, .next, .cache.",
+          },
+          maxResults: {
+            type: "integer",
+            description: "Optional maximum matches to return. Default 200, max 5000.",
+          },
+          maxFileBytes: {
+            type: "integer",
+            description: "Optional daemon-mode per-file size limit. Default 1048576.",
+          },
+          caseSensitive: {
+            type: "boolean",
+            description: "Optional. Default false.",
+          },
+          regex: {
+            type: "boolean",
+            description: "Optional. Treat pattern as regex. Default false for literal search.",
+          },
+        },
+        required: ["pattern"],
+      },
+    },
+    {
       name: "remote_status",
       description: "Get comprehensive connection diagnostics: status, latency, cache hit rate, operation stats.",
       inputSchema: {
@@ -563,11 +651,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {
           operations: {
             type: "array",
-            description: "Operations array. Each item contains type (read|stat|glob|bash) and corresponding parameters.",
+            description: "Operations array. Each item contains type (read|stat|glob|grep|bash) and corresponding parameters.",
             items: {
               type: "object",
               properties: {
-                type: { type: "string", enum: ["read", "stat", "glob", "bash"] },
+                type: { type: "string", enum: ["read", "stat", "glob", "grep", "bash"] },
                 path: { type: "string" },
                 pattern: { type: "string" },
                 cwd: { type: "string" },
@@ -1158,6 +1246,48 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return toTextResult(JSON.stringify(normalizeGlobEntries(data), null, 2));
       }
 
+      case "remote_grep": {
+        recordOp("remote_grep");
+        requireNonEmptyString(args, "pattern");
+
+        // SSH mode
+        if (isSSHConnection()) {
+          try {
+            const sshClient = getSSHClient();
+            const maxResults = clampPositiveInt(args.maxResults, 200, 1, 5000);
+            const result = await sshClient.exec(buildSshGrepCommand({ ...args, maxResults }));
+            const matches = parseSshGrepOutput(result.stdout);
+            return toTextResult(JSON.stringify(withRuntimeMeta({
+              success: true,
+              engine: "grep",
+              pattern: args.pattern,
+              cwd: args.cwd || ".",
+              maxResults,
+              matches,
+              truncated: matches.length >= maxResults,
+              stderr: result.stderr || undefined,
+            }), null, 2));
+          } catch (error) {
+            return toTextResult(`Grep error: ${error.message}`);
+          }
+        }
+
+        // Daemon mode
+        try { await ensureHealthy("Consider calling remote_health first to check if remote service is reachable before content search."); } catch (e) { if (isHealthError(e)) return healthCheckError(e.message + "\n\nIf you're sure the service is normal, you can ignore this鎻愮ず and retry directly."); throw e; }
+        const data = await postWithFallback(["/api/fs/grep", "/grep"], {
+          pattern: args.pattern,
+          cwd: typeof args.cwd === "string" ? args.cwd : undefined,
+          include: normalizeStringArray(args.include),
+          excludeDirs: normalizeStringArray(args.excludeDirs),
+          exclude: normalizeStringArray(args.exclude),
+          maxResults: args.maxResults,
+          maxFileBytes: args.maxFileBytes,
+          caseSensitive: Boolean(args.caseSensitive),
+          regex: Boolean(args.regex),
+        });
+        return toTextResult(JSON.stringify(withRuntimeMeta(data), null, 2));
+      }
+
       case "remote_bash": {
         recordOp("remote_bash");
         const command = requireNonEmptyString(args, "command");
@@ -1279,6 +1409,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 } else if (op.type === "glob") {
                   const files = await sshClient.glob(op.pattern, op.cwd);
                   results.push({ type: "glob", pattern: op.pattern, status: 200, entries: files });
+                } else if (op.type === "grep") {
+                  const maxResults = clampPositiveInt(op.maxResults, 200, 1, 5000);
+                  const result = await sshClient.exec(buildSshGrepCommand({ ...op, maxResults }));
+                  results.push({
+                    type: "grep",
+                    pattern: op.pattern,
+                    status: 200,
+                    engine: "grep",
+                    matches: parseSshGrepOutput(result.stdout),
+                    truncated: parseSshGrepOutput(result.stdout).length >= maxResults,
+                    stderr: result.stderr || undefined,
+                  });
                 } else if (op.type === "bash") {
                   const result = await sshClient.exec(op.command, { cwd: op.cwd });
                   results.push({ type: "bash", command: op.command, status: 200, ...result });
@@ -1306,6 +1448,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 } else if (r.type === "glob") {
                   lines.push(`\n--- GLOB ${r.pattern} ---`);
                   lines.push(JSON.stringify(r.entries, null, 2));
+                } else if (r.type === "grep") {
+                  lines.push(`\n--- GREP ${r.pattern} ---`);
+                  lines.push(JSON.stringify(r.matches, null, 2));
                 } else if (r.type === "bash") {
                   lines.push(`\n--- BASH ${r.command} ---`);
                   if (r.stdout) lines.push(r.stdout);
@@ -1347,6 +1492,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               } else if (r.type === "glob") {
                 lines.push(`\n--- GLOB ${r.pattern} (${r.ms}ms) ---`);
                 lines.push(JSON.stringify(r.entries, null, 2));
+              } else if (r.type === "grep") {
+                lines.push(`\n--- GREP ${r.pattern} (${r.ms}ms) ---`);
+                lines.push(JSON.stringify(r.matches, null, 2));
+                if (r.truncated) lines.push("TRUNCATED: true");
               } else if (r.type === "bash") {
                 lines.push(`\n--- BASH ${r.command} (${r.ms}ms) ---`);
                 if (r.stdout) lines.push(r.stdout);

@@ -196,7 +196,8 @@ mcp-remote-agent/
 | `remote_read` | 读取远程文件 | ✅ | ✅ |
 | `remote_write` | 写入远程文件 | ✅ | ✅ |
 | `remote_stat` | 获取文件元信息 | ✅ | ✅ |
-| `remote_glob` | 搜索远程文件 | ✅ | ✅ |
+| `remote_glob` | 搜索远程文件路径 | ✅ | ✅ |
+| `remote_grep` | 搜索远程文件内容 | ✅ | ✅ |
 | `remote_status` | 获取连接诊断信息 | ✅ | ✅ |
 | `remote_bash` | 执行远程命令 | ✅ | ✅ |
 | `remote_script` | 执行远程脚本 | ✅ | ✅ |
@@ -695,7 +696,8 @@ node test.cjs --local-only
 | `remote_read` | 读取远程文件（ETag 缓存，304 条件读不重传） | v1.0 |
 | `remote_write` | 写入远程文件（自动 CRLF→LF、去 BOM、`expectedEtag` 乐观锁） | v2.1 |
 | `remote_stat` | 获取远程文件元信息（大小、修改时间、类型） | v2.1 |
-| `remote_glob` | 按 glob 规则搜索远程文件 | v1.0 |
+| `remote_glob` | 按 glob 规则搜索远程文件路径 | v1.0 |
+| `remote_grep` | 搜索远程文件内容；daemon 内置 Node 搜索，SSH fallback 使用 grep | v2.5 |
 | `remote_bash` | 执行远程命令（含特殊字符自动 base64 编码，避免转义问题） | v2.1 |
 | `remote_script` | 执行多行脚本（写入临时文件再执行，彻底避免 bash 转义/编码问题） | v2.1 |
 | `remote_status` | 综合诊断：连接状态、延迟、缓存命中率、操作统计 | v1.2 |
@@ -723,6 +725,16 @@ node test.cjs --local-only
 **remote_glob**
 - `pattern` (必填): glob 模式，如 `**/*.ts`、`src/**/*.py`
 - `cwd` (可选): 搜索起始目录
+
+**remote_grep**
+- `pattern` (必填): 要搜索的文本或正则
+- `cwd` (可选): 搜索起始目录
+- `include` (可选): 文件 glob 列表，如 `["**/*.ts", "**/*.py"]`
+- `excludeDirs` (可选): 排除目录名列表，默认排除 `node_modules`、`.git`、`dist`、`build`、`.next`、`.cache`
+- `maxResults` (可选): 最大返回条数，默认 `200`
+- `maxFileBytes` (可选): daemon 模式单文件大小上限，默认 `1048576`
+- `caseSensitive` (可选): 是否大小写敏感，默认 `false`
+- `regex` (可选): 是否按正则解释 `pattern`，默认 `false`，即字面量搜索
 
 **remote_bash**
 - `command` (必填): 要执行的 bash 命令（含 `$` `` ` `` `\` `!` `"` `#` `;` `&` `|` 等特殊字符时自动 base64 编码，无需手动处理）
@@ -878,7 +890,8 @@ Dashboard 功能：
 | 查看远程文件 | `remote_health` → `remote_read` |
 | 编辑远程文件 | `remote_health` → `remote_read` → 修改 → `remote_write` |
 | 执行远程命令 | `remote_health` → `remote_bash`（简单命令）或 `remote_script`（多行脚本） |
-| 搜索远程代码 | `remote_health` → `remote_glob` |
+| 搜索远程文件路径 | `remote_health` → `remote_glob` |
+| 搜索远程文件内容 | `remote_health` → `remote_grep` |
 | 查看文件信息 | `remote_health` → `remote_stat` |
 | 批量读多个文件 | `remote_health` → `remote_batch` |
 | 长耗时任务 | `remote_health` → `remote_exec_async` → `remote_task` 轮询 |
