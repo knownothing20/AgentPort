@@ -46,6 +46,10 @@ const AUTH_TOKEN = (process.env.MCP_REMOTE_AUTH_TOKEN || process.env.NIUMA_SSH_A
 const CLIENT_ID = (process.env.MCP_REMOTE_CLIENT_ID || process.env.NIUMA_SSH_CLIENT_ID || "").trim();
 const rawTimeout = Number(process.env.MCP_REMOTE_TIMEOUT_MS || process.env.NIUMA_SSH_TIMEOUT_MS || 120000);
 const REQUEST_TIMEOUT_MS = Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : 120000;
+const rawSlowCallMs = Number(process.env.MCP_REMOTE_SLOW_CALL_MS || 30000);
+const SLOW_CALL_MS = Number.isFinite(rawSlowCallMs) && rawSlowCallMs > 0 ? rawSlowCallMs : 30000;
+const LOG_TOOL_START = !/^(0|false|no)$/i.test(String(process.env.MCP_REMOTE_LOG_TOOL_START || "1"));
+const LOG_TOOL_SUCCESS = /^(1|true|yes)$/i.test(String(process.env.MCP_REMOTE_LOG_TOOL_SUCCESS || ""));
 
 // --- Runtime mode (for compatibility signaling) ---
 const RUNTIME_MODE_PATH = path.join(__dirname, "local", "runtime-mode.json");
@@ -101,6 +105,121 @@ function runtimeModeHint() {
 }
 
 const _runtimeMode = resolveRuntimeMode();
+
+let _toolCallSeq = 0;
+let _loggedBeforeExit = false;
+
+function currentConnectionSummary() {
+  const conn = _currentConnection ? _connections[_currentConnection] : null;
+  if (!conn) {
+    return {
+      name: _currentConnection || null,
+      type: "daemon",
+      target: REMOTE_URL,
+    };
+  }
+  if (conn.type === "ssh") {
+    return {
+      name: _currentConnection,
+      type: "ssh",
+      target: `${conn.username || "unknown"}@${conn.host}:${conn.port || 22}`,
+    };
+  }
+  return {
+    name: _currentConnection,
+    type: conn.type || "daemon",
+    target: conn.url,
+  };
+}
+
+function logProcessEvent(level, message, data = {}) {
+  const payload = {
+    pid: process.pid,
+    ppid: process.ppid,
+    ...data,
+  };
+  logger[level]("process", message, payload);
+}
+
+function boolFlag(value) {
+  return value ? true : undefined;
+}
+
+function summarizeArgs(toolName, args = {}) {
+  const summary = {};
+  const safeKeys = [
+    "path",
+    "cwd",
+    "pattern",
+    "connection",
+    "action",
+    "taskId",
+    "host",
+    "port",
+    "username",
+    "interpreter",
+    "caseSensitive",
+    "regex",
+    "maxResults",
+  ];
+  for (const key of safeKeys) {
+    if (args[key] !== undefined) summary[key] = args[key];
+  }
+  if (typeof args.command === "string") summary.commandBytes = Buffer.byteLength(args.command);
+  if (typeof args.content === "string") summary.contentBytes = Buffer.byteLength(args.content);
+  if (typeof args.config === "string") summary.configBytes = Buffer.byteLength(args.config);
+  if (typeof args.password === "string") summary.hasPassword = boolFlag(args.password);
+  if (typeof args.privateKey === "string") summary.hasPrivateKey = boolFlag(args.privateKey);
+  if (typeof args.passphrase === "string") summary.hasPassphrase = boolFlag(args.passphrase);
+  if (Array.isArray(args.operations)) summary.operations = args.operations.map((op) => op?.type || "unknown");
+  if (Array.isArray(args.include)) summary.includeCount = args.include.length;
+  if (Array.isArray(args.excludeDirs)) summary.excludeDirsCount = args.excludeDirs.length;
+  if (!Object.keys(summary).length) summary.argKeys = Object.keys(args);
+  summary.tool = toolName;
+  return summary;
+}
+
+function isLikelyTimeoutError(error) {
+  const message = errorMessage(error).toLowerCase();
+  return error?.code === "ECONNABORTED" || error?.code === "ETIMEDOUT" || message.includes("timeout");
+}
+
+function timeoutHint(durationMs, error) {
+  if (durationMs >= REQUEST_TIMEOUT_MS - 1000 || isLikelyTimeoutError(error)) {
+    return "Request reached the local MCP timeout. For long commands, use remote_exec_async and poll remote_task; if stdio closes, restart stale Codex MCP child sessions.";
+  }
+  if (durationMs >= SLOW_CALL_MS) {
+    return "Slow remote call. Check remote daemon load, network latency, and queued exec count with remote_status.";
+  }
+  return undefined;
+}
+
+process.on("warning", (warning) => {
+  logProcessEvent("warn", "Process warning", {
+    name: warning.name,
+    message: warning.message,
+    stack: warning.stack,
+  });
+});
+
+process.on("beforeExit", (code) => {
+  if (_loggedBeforeExit) return;
+  _loggedBeforeExit = true;
+  logProcessEvent("warn", "Process beforeExit", { code });
+});
+
+process.on("exit", (code) => {
+  logProcessEvent(code === 0 ? "info" : "error", "Process exit", { code });
+});
+
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  try {
+    process.on(signal, () => {
+      logProcessEvent("warn", `Received ${signal}`, { signal });
+      process.exit(0);
+    });
+  } catch {}
+}
 
 // --- Dynamic connection management ---
 let _connections = {};
@@ -780,11 +899,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const toolName = request.params.name;
   const startTime = Date.now();
+  const callId = ++_toolCallSeq;
+  let args = {};
+  let caughtError = null;
   
   try {
-    const args = getArguments(request);
+    args = getArguments(request);
     
-    // Only log errors (not normal calls for cleaner logs)
+    if (LOG_TOOL_START) {
+      logger.info(toolName, `Start call #${callId}`, {
+        callId,
+        connection: currentConnectionSummary(),
+        args: summarizeArgs(toolName, args),
+      });
+    }
 
     switch (toolName) {
       case "remote_connect": {
@@ -2025,8 +2153,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         throw new Error(`Unknown tool: ${request.params.name}`);
     }
   } catch (error) {
-    // Log error
-    logger.error(toolName, "Failed: " + errorMessage(error));
+    caughtError = error;
     
     // Mark unhealthy on network errors so next call prompts health check
     if (isNetworkError(error)) {
@@ -2043,11 +2170,50 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       isError: true,
     };
   } finally {
-    // Only log errors (not success calls)
+    const durationMs = Date.now() - startTime;
+    const payload = {
+      callId,
+      durationMs,
+      connection: currentConnectionSummary(),
+      args: summarizeArgs(toolName, args),
+    };
+
+    if (caughtError) {
+      logger.error(toolName, `Failed call #${callId}: ${errorMessage(caughtError)}`, {
+        ...payload,
+        errorCode: caughtError?.code,
+        error: errorMessage(caughtError),
+        hint: timeoutHint(durationMs, caughtError),
+      });
+    } else if (durationMs >= SLOW_CALL_MS) {
+      logger.warn(toolName, `Slow call #${callId}`, {
+        ...payload,
+        hint: timeoutHint(durationMs),
+      });
+    } else if (LOG_TOOL_SUCCESS) {
+      logger.info(toolName, `Completed call #${callId}`, payload);
+    }
   }
 });
 
 async function main() {
+  logProcessEvent("info", "Process start", {
+    node: process.version,
+    platform: process.platform,
+    arch: process.arch,
+    cwd: process.cwd(),
+    argv: process.argv.slice(0, 2),
+    packageName: PKG_NAME,
+    packageVersion: PKG_VERSION,
+    timeoutMs: REQUEST_TIMEOUT_MS,
+    slowCallMs: SLOW_CALL_MS,
+    runtimeMode: _runtimeMode.mode,
+    modeSource: _runtimeMode.source,
+    defaultRemote: REMOTE_URL,
+    authEnabled: Boolean(AUTH_TOKEN),
+    clientId: CLIENT_ID || null,
+  });
+
   // Initialize connection manager
   const defaultConn = loadConnections();
   if (defaultConn && _connections[defaultConn]) {
@@ -2065,6 +2231,39 @@ async function main() {
   }
   
   const transport = new StdioServerTransport();
+  const previousOnClose = transport.onclose;
+  const previousOnError = transport.onerror;
+  transport.onclose = () => {
+    logProcessEvent("warn", "Stdio transport closed", {
+      connection: currentConnectionSummary(),
+    });
+    if (typeof previousOnClose === "function") previousOnClose();
+  };
+  transport.onerror = (error) => {
+    logProcessEvent("error", "Stdio transport error", {
+      error: error instanceof Error ? error.stack || error.message : String(error),
+      connection: currentConnectionSummary(),
+    });
+    if (typeof previousOnError === "function") previousOnError(error);
+  };
+  process.stdin.on("end", () => {
+    logProcessEvent("warn", "stdin end", { connection: currentConnectionSummary() });
+  });
+  process.stdin.on("close", () => {
+    logProcessEvent("warn", "stdin close", { connection: currentConnectionSummary() });
+  });
+  process.stdin.on("error", (error) => {
+    logProcessEvent("error", "stdin error", {
+      error: error instanceof Error ? error.stack || error.message : String(error),
+      connection: currentConnectionSummary(),
+    });
+  });
+  process.stdout.on("error", (error) => {
+    logProcessEvent("error", "stdout error", {
+      error: error instanceof Error ? error.stack || error.message : String(error),
+      connection: currentConnectionSummary(),
+    });
+  });
   await server.connect(transport);
   
   const connType = _currentConnection ? (_connections[_currentConnection]?.type || 'daemon') : 'daemon';
