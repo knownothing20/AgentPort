@@ -1,5 +1,14 @@
 # Changelog
 
+## [2026-05-15] fix | MCP transport lifecycle diagnostics
+
+### Changed
+- Added local MCP process lifecycle logs for startup, exit, stdio close/error, stdin close/end/error, stdout errors, warnings, and termination signals.
+- Added sanitized per-tool call diagnostics with call ids, duration, active connection, slow-call warnings, and timeout-specific hints.
+- Added `MCP_REMOTE_SLOW_CALL_MS`, `MCP_REMOTE_LOG_TOOL_START`, and `MCP_REMOTE_LOG_TOOL_SUCCESS` controls for tuning local diagnostic verbosity.
+
+---
+
 ## [2026-05-14] feat | Built-in remote content search
 
 ### Added
