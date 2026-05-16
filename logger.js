@@ -14,6 +14,11 @@ const __dirname = path.dirname(__filename);
 
 const LOG_DIR = path.join(__dirname, "local", "logs");
 const MAX_DAYS = 7;
+const DEFAULT_DATA_MAX_BYTES = 4000;
+const rawDataMaxBytes = Number(process.env.MCP_REMOTE_LOG_DATA_MAX_BYTES || DEFAULT_DATA_MAX_BYTES);
+const DATA_MAX_BYTES = Number.isFinite(rawDataMaxBytes) && rawDataMaxBytes > 200
+  ? rawDataMaxBytes
+  : DEFAULT_DATA_MAX_BYTES;
 
 // Ensure log directory exists
 function ensureLogDir() {
@@ -50,6 +55,26 @@ function cleanupOldLogs() {
   }
 }
 
+function safeStringify(value) {
+  if (typeof value === "string") return value;
+  const seen = new WeakSet();
+  return JSON.stringify(value, (key, item) => {
+    if (item instanceof Error) {
+      return {
+        name: item.name,
+        message: item.message,
+        code: item.code,
+        stack: item.stack,
+      };
+    }
+    if (typeof item === "object" && item !== null) {
+      if (seen.has(item)) return "[Circular]";
+      seen.add(item);
+    }
+    return item;
+  });
+}
+
 // Write log entry
 function write(level, tool, message, data = null) {
   try {
@@ -61,9 +86,9 @@ function write(level, tool, message, data = null) {
 
     if (data) {
       // Truncate long data for readability
-      const dataStr = typeof data === "string" ? data : JSON.stringify(data);
-      if (dataStr.length > 500) {
-        logLine += `\n  Data: ${dataStr.slice(0, 500)}... (truncated)`;
+      const dataStr = safeStringify(data);
+      if (dataStr.length > DATA_MAX_BYTES) {
+        logLine += `\n  Data: ${dataStr.slice(0, DATA_MAX_BYTES)}... (truncated ${dataStr.length - DATA_MAX_BYTES} chars)`;
       } else {
         logLine += `\n  Data: ${dataStr}`;
       }
