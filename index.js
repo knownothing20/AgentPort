@@ -108,6 +108,42 @@ const _runtimeMode = resolveRuntimeMode();
 
 let _toolCallSeq = 0;
 let _loggedBeforeExit = false;
+const PROCESS_STARTED_AT = Date.now();
+const PROCESS_SESSION_ID = `${new Date(PROCESS_STARTED_AT).toISOString()}#${process.pid}`;
+const RECENT_EVENTS_LIMIT = 60;
+const ACTIVE_CALL_LIMIT = 20;
+const _activeToolCalls = new Map();
+const _recentEvents = [];
+let _lastToolCall = null;
+let _lastTransportEvent = null;
+const _stdioState = {
+  stdinEnded: false,
+  stdinClosed: false,
+  stdinErrored: false,
+  stdoutErrored: false,
+};
+const _transportState = {
+  connected: false,
+  closed: false,
+  errored: false,
+  connectedAt: null,
+  closedAt: null,
+  errorAt: null,
+};
+
+function uptimeMs() {
+  return Date.now() - PROCESS_STARTED_AT;
+}
+
+function pushDiagnosticEvent(type, data = {}) {
+  _recentEvents.push({
+    ts: new Date().toISOString(),
+    uptimeMs: uptimeMs(),
+    type,
+    ...data,
+  });
+  while (_recentEvents.length > RECENT_EVENTS_LIMIT) _recentEvents.shift();
+}
 
 function currentConnectionSummary() {
   const conn = _currentConnection ? _connections[_currentConnection] : null;
@@ -134,11 +170,154 @@ function currentConnectionSummary() {
 
 function logProcessEvent(level, message, data = {}) {
   const payload = {
+    sessionId: PROCESS_SESSION_ID,
     pid: process.pid,
     ppid: process.ppid,
+    uptimeMs: uptimeMs(),
     ...data,
   };
   logger[level]("process", message, payload);
+}
+
+function activeCallSnapshot() {
+  return [..._activeToolCalls.values()]
+    .slice(-ACTIVE_CALL_LIMIT)
+    .map((call) => ({
+      callId: call.callId,
+      toolName: call.toolName,
+      ageMs: Date.now() - call.startTime,
+      startedAt: call.startedAt,
+      connection: call.connection,
+      args: call.args,
+    }));
+}
+
+function resourceUsageSnapshot() {
+  try {
+    return typeof process.resourceUsage === "function" ? process.resourceUsage() : null;
+  } catch {
+    return null;
+  }
+}
+
+function diagnosticSnapshot(reason, extra = {}) {
+  let connection = null;
+  try {
+    connection = currentConnectionSummary();
+  } catch (error) {
+    connection = { error: errorMessage(error) };
+  }
+  return {
+    sessionId: PROCESS_SESSION_ID,
+    reason,
+    ts: new Date().toISOString(),
+    pid: process.pid,
+    ppid: process.ppid,
+    uptimeMs: uptimeMs(),
+    node: process.version,
+    execPath: process.execPath,
+    platform: process.platform,
+    arch: process.arch,
+    cwd: process.cwd(),
+    argv: process.argv,
+    clientId: CLIENT_ID || null,
+    runtimeMode: _runtimeMode.mode,
+    modeSource: _runtimeMode.source,
+    connection,
+    stdio: {
+      ..._stdioState,
+      stdinReadableEnded: process.stdin.readableEnded,
+      stdinReadableDestroyed: process.stdin.destroyed,
+      stdoutWritableEnded: process.stdout.writableEnded,
+      stdoutWritableDestroyed: process.stdout.destroyed,
+    },
+    transport: _transportState,
+    memory: process.memoryUsage(),
+    resourceUsage: resourceUsageSnapshot(),
+    activeCalls: activeCallSnapshot(),
+    lastToolCall: _lastToolCall,
+    lastTransportEvent: _lastTransportEvent,
+    recentEvents: _recentEvents.slice(-20),
+    ...extra,
+  };
+}
+
+function markToolCallStarted(call) {
+  _activeToolCalls.set(call.callId, call);
+  _lastToolCall = {
+    callId: call.callId,
+    toolName: call.toolName,
+    status: "running",
+    startedAt: call.startedAt,
+    args: call.args,
+  };
+  pushDiagnosticEvent("tool.start", {
+    callId: call.callId,
+    toolName: call.toolName,
+    args: call.args,
+  });
+}
+
+function markToolCallFinished(callId, status, durationMs, error = null) {
+  const call = _activeToolCalls.get(callId);
+  if (call) _activeToolCalls.delete(callId);
+  _lastToolCall = {
+    callId,
+    toolName: call?.toolName || _lastToolCall?.toolName || "unknown",
+    status,
+    durationMs,
+    finishedAt: new Date().toISOString(),
+    error: error ? errorMessage(error) : undefined,
+    errorCode: error?.code,
+  };
+  pushDiagnosticEvent(`tool.${status}`, _lastToolCall);
+}
+
+function writeProcessRegistry() {
+  try {
+    const logDir = path.join(__dirname, "local", "logs");
+    fs.mkdirSync(logDir, { recursive: true });
+    const registryPath = path.join(logDir, "mcp-remote-agent-processes.json");
+    const now = Date.now();
+    let entries = [];
+    try {
+      entries = JSON.parse(fs.readFileSync(registryPath, "utf-8").replace(/^\uFEFF/, ""));
+      if (!Array.isArray(entries)) entries = [];
+    } catch {
+      entries = [];
+    }
+    const recent = entries.filter((entry) => {
+      const ageMs = now - Number(entry.startedAtMs || 0);
+      return entry.pid !== process.pid && ageMs >= 0 && ageMs < 30 * 60 * 1000;
+    });
+    if (recent.length) {
+      logProcessEvent("warn", "Recent MCP client processes found", {
+        registryPath,
+        recent,
+        hint: "If Transport closed is frequent, check whether the desktop host is spawning multiple MCP stdio clients for the same skill.",
+      });
+    }
+    entries = [
+      ...recent.slice(-20),
+      {
+        sessionId: PROCESS_SESSION_ID,
+        pid: process.pid,
+        ppid: process.ppid,
+        startedAt: new Date(PROCESS_STARTED_AT).toISOString(),
+        startedAtMs: PROCESS_STARTED_AT,
+        execPath: process.execPath,
+        argv: process.argv,
+        cwd: process.cwd(),
+        clientId: CLIENT_ID || null,
+        runtimeMode: _runtimeMode.mode,
+      },
+    ];
+    fs.writeFileSync(registryPath, JSON.stringify(entries, null, 2), "utf-8");
+  } catch (error) {
+    logProcessEvent("warn", "Failed to write process registry", {
+      error: errorMessage(error),
+    });
+  }
 }
 
 function boolFlag(value) {
@@ -205,17 +384,36 @@ process.on("warning", (warning) => {
 process.on("beforeExit", (code) => {
   if (_loggedBeforeExit) return;
   _loggedBeforeExit = true;
-  logProcessEvent("warn", "Process beforeExit", { code });
+  pushDiagnosticEvent("process.beforeExit", { code, activeCallCount: _activeToolCalls.size });
+  logProcessEvent("warn", "Process beforeExit", {
+    code,
+    diagnostic: diagnosticSnapshot("process.beforeExit"),
+  });
 });
 
 process.on("exit", (code) => {
-  logProcessEvent(code === 0 ? "info" : "error", "Process exit", { code });
+  pushDiagnosticEvent("process.exit", { code, activeCallCount: _activeToolCalls.size });
+  logProcessEvent(code === 0 ? "info" : "error", "Process exit", {
+    code,
+    diagnostic: diagnosticSnapshot("process.exit"),
+  });
+});
+
+process.on("disconnect", () => {
+  pushDiagnosticEvent("process.disconnect", { activeCallCount: _activeToolCalls.size });
+  logProcessEvent("warn", "Process disconnect", {
+    diagnostic: diagnosticSnapshot("process.disconnect"),
+  });
 });
 
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   try {
     process.on(signal, () => {
-      logProcessEvent("warn", `Received ${signal}`, { signal });
+      pushDiagnosticEvent("process.signal", { signal, activeCallCount: _activeToolCalls.size });
+      logProcessEvent("warn", `Received ${signal}`, {
+        signal,
+        diagnostic: diagnosticSnapshot(`signal.${signal}`),
+      });
       process.exit(0);
     });
   } catch {}
@@ -902,15 +1100,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const callId = ++_toolCallSeq;
   let args = {};
   let caughtError = null;
+  let callInfo = null;
   
   try {
     args = getArguments(request);
+    const argSummary = summarizeArgs(toolName, args);
+    callInfo = {
+      callId,
+      toolName,
+      startTime,
+      startedAt: new Date(startTime).toISOString(),
+      connection: currentConnectionSummary(),
+      args: argSummary,
+    };
+    markToolCallStarted(callInfo);
     
     if (LOG_TOOL_START) {
       logger.info(toolName, `Start call #${callId}`, {
         callId,
-        connection: currentConnectionSummary(),
-        args: summarizeArgs(toolName, args),
+        sessionId: PROCESS_SESSION_ID,
+        connection: callInfo.connection,
+        args: argSummary,
       });
     }
 
@@ -2171,8 +2381,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     };
   } finally {
     const durationMs = Date.now() - startTime;
+    markToolCallFinished(callId, caughtError ? "failed" : "completed", durationMs, caughtError);
     const payload = {
       callId,
+      sessionId: PROCESS_SESSION_ID,
       durationMs,
       connection: currentConnectionSummary(),
       args: summarizeArgs(toolName, args),
@@ -2184,11 +2396,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         errorCode: caughtError?.code,
         error: errorMessage(caughtError),
         hint: timeoutHint(durationMs, caughtError),
+        diagnostic: diagnosticSnapshot("tool failure", {
+          failedCall: callInfo,
+          failedDurationMs: durationMs,
+        }),
       });
     } else if (durationMs >= SLOW_CALL_MS) {
       logger.warn(toolName, `Slow call #${callId}`, {
         ...payload,
         hint: timeoutHint(durationMs),
+        diagnostic: diagnosticSnapshot("slow tool call", {
+          slowCall: callInfo,
+          slowDurationMs: durationMs,
+        }),
       });
     } else if (LOG_TOOL_SUCCESS) {
       logger.info(toolName, `Completed call #${callId}`, payload);
@@ -2197,6 +2417,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 async function main() {
+  pushDiagnosticEvent("process.start", {
+    pid: process.pid,
+    ppid: process.ppid,
+    cwd: process.cwd(),
+    argv: process.argv,
+  });
   logProcessEvent("info", "Process start", {
     node: process.version,
     platform: process.platform,
@@ -2213,6 +2439,7 @@ async function main() {
     authEnabled: Boolean(AUTH_TOKEN),
     clientId: CLIENT_ID || null,
   });
+  writeProcessRegistry();
 
   // Initialize connection manager
   const defaultConn = loadConnections();
@@ -2234,37 +2461,76 @@ async function main() {
   const previousOnClose = transport.onclose;
   const previousOnError = transport.onerror;
   transport.onclose = () => {
+    _transportState.closed = true;
+    _transportState.closedAt = new Date().toISOString();
+    _lastTransportEvent = {
+      type: "close",
+      at: _transportState.closedAt,
+      activeCallCount: _activeToolCalls.size,
+    };
+    pushDiagnosticEvent("transport.close", _lastTransportEvent);
     logProcessEvent("warn", "Stdio transport closed", {
-      connection: currentConnectionSummary(),
+      diagnostic: diagnosticSnapshot("transport.close"),
     });
     if (typeof previousOnClose === "function") previousOnClose();
   };
   transport.onerror = (error) => {
+    _transportState.errored = true;
+    _transportState.errorAt = new Date().toISOString();
+    _lastTransportEvent = {
+      type: "error",
+      at: _transportState.errorAt,
+      error: error instanceof Error ? error.message : String(error),
+      activeCallCount: _activeToolCalls.size,
+    };
+    pushDiagnosticEvent("transport.error", _lastTransportEvent);
     logProcessEvent("error", "Stdio transport error", {
       error: error instanceof Error ? error.stack || error.message : String(error),
-      connection: currentConnectionSummary(),
+      diagnostic: diagnosticSnapshot("transport.error"),
     });
     if (typeof previousOnError === "function") previousOnError(error);
   };
   process.stdin.on("end", () => {
-    logProcessEvent("warn", "stdin end", { connection: currentConnectionSummary() });
+    _stdioState.stdinEnded = true;
+    pushDiagnosticEvent("stdin.end", { activeCallCount: _activeToolCalls.size });
+    logProcessEvent("warn", "stdin end", { diagnostic: diagnosticSnapshot("stdin.end") });
   });
   process.stdin.on("close", () => {
-    logProcessEvent("warn", "stdin close", { connection: currentConnectionSummary() });
+    _stdioState.stdinClosed = true;
+    pushDiagnosticEvent("stdin.close", { activeCallCount: _activeToolCalls.size });
+    logProcessEvent("warn", "stdin close", { diagnostic: diagnosticSnapshot("stdin.close") });
   });
   process.stdin.on("error", (error) => {
+    _stdioState.stdinErrored = true;
+    pushDiagnosticEvent("stdin.error", {
+      error: error instanceof Error ? error.message : String(error),
+      activeCallCount: _activeToolCalls.size,
+    });
     logProcessEvent("error", "stdin error", {
       error: error instanceof Error ? error.stack || error.message : String(error),
-      connection: currentConnectionSummary(),
+      diagnostic: diagnosticSnapshot("stdin.error"),
     });
   });
   process.stdout.on("error", (error) => {
+    _stdioState.stdoutErrored = true;
+    pushDiagnosticEvent("stdout.error", {
+      error: error instanceof Error ? error.message : String(error),
+      activeCallCount: _activeToolCalls.size,
+    });
     logProcessEvent("error", "stdout error", {
       error: error instanceof Error ? error.stack || error.message : String(error),
-      connection: currentConnectionSummary(),
+      diagnostic: diagnosticSnapshot("stdout.error"),
     });
   });
   await server.connect(transport);
+  _transportState.connected = true;
+  _transportState.connectedAt = new Date().toISOString();
+  pushDiagnosticEvent("transport.connected", {
+    connection: currentConnectionSummary(),
+  });
+  logProcessEvent("info", "Stdio transport connected", {
+    diagnostic: diagnosticSnapshot("transport.connected"),
+  });
   
   const connType = _currentConnection ? (_connections[_currentConnection]?.type || 'daemon') : 'daemon';
   const connInfo = connType === 'ssh' 

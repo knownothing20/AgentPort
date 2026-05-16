@@ -1,5 +1,14 @@
 # Changelog
 
+## [2026-05-16] fix | Deepen MCP transport failure diagnostics
+
+### Changed
+- Added per-process `sessionId`, uptime, stdio state, transport state, memory/resource usage, recent diagnostic events, last tool call, and active tool call snapshots to failure/close logs.
+- Added a local process registry in `local/logs/mcp-remote-agent-processes.json` to flag recent sibling MCP client processes that may indicate repeated host restarts or duplicate stdio clients.
+- Increased structured log payload retention from 500 characters to a configurable `MCP_REMOTE_LOG_DATA_MAX_BYTES` defaulting to 4000 characters, with circular object and `Error` serialization support.
+
+---
+
 ## [2026-05-15] fix | MCP transport lifecycle diagnostics
 
 ### Changed
