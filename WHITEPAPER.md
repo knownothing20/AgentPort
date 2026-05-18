@@ -8,8 +8,8 @@ It is not trying to replace SSH for humans. It turns SSH, HTTP, and a remote dae
 
 ## 2. Goals
 
-- Prefer native `remote_*` MCP tools when an AI desktop tool can inject them.
-- Provide a CLI fallback for tools that cannot inject custom MCP servers.
+- Prefer stable CLI daemon operations for long-running development, while still supporting native `remote_*` MCP tools when an AI desktop tool can inject them.
+- Provide a CLI fallback for tools whose native MCP stdio transport is unavailable or unstable.
 - Keep public templates separate from private local secrets and runtime state.
 - Constrain remote file access to `WORKSPACE_ROOT`.
 - Protect the remote daemon with execution timeout, concurrency, and queue timeout controls.
@@ -20,13 +20,13 @@ It is not trying to replace SSH for humans. It turns SSH, HTTP, and a remote dae
 
 ```text
 AI desktop tool
-  -> native MCP tools or CLI fallback
+  -> CLI daemon gateway, native MCP tools, or SSH recovery
   -> local mcp-remote-agent client
-  -> remote daemon HTTP API or SSH fallback
+  -> remote daemon HTTP API, persistent jobs, or SSH fallback
   -> remote Linux workspace
 ```
 
-The local client registers MCP tools, reads private connection config, provides CLI fallback, and formats daemon errors for agents. The remote daemon performs token auth, safe path checks, file operations, command execution, audit logging, health checks, Dashboard responses, and config reload.
+The local client registers MCP tools, reads private connection config, provides CLI fallback, and formats daemon errors for agents. The remote daemon performs token auth, safe path checks, file operations, command execution, persistent development jobs, audit logging, health checks, Dashboard responses, and config reload.
 
 ## 4. Local Components
 
@@ -52,9 +52,10 @@ The local client registers MCP tools, reads private connection config, provides 
 
 Use the highest available integration level:
 
-1. Native MCP first: `remote_connect()` -> `remote_health()` -> normal `remote_*` operations.
-2. CLI fallback second: use `node cli.js ...` when native tools are unavailable but local shell is available.
-3. Daemon before SSH: daemon mode is preferred for long-running coding; SSH is a fallback.
+1. CLI daemon gateway first for long-running development and verification.
+2. Native MCP when it is visible and stable for quick structured operations.
+3. Persistent daemon jobs for tests, builds, polling, and commands that may outlive a single request.
+4. SSH recovery when daemon mode is unavailable or needs restart/diagnosis.
 4. HTTP or manual commands last.
 
 ## 7. Tool Surface
@@ -71,6 +72,17 @@ Use the highest available integration level:
 | Async execution | `remote_exec_async`, `remote_task` |
 | Config hot reload | `remote_config` |
 | Diagnostics | `remote_status` |
+
+CLI-only stable development commands:
+
+| Capability | Command |
+| --- | --- |
+| Gateway status | `node cli.js status` |
+| Start persistent job | `node cli.js job start "npm test" --cwd /path` |
+| Job status | `node cli.js job status <job-id>` |
+| Job logs | `node cli.js job logs <job-id> --tail 200` |
+| Cancel job | `node cli.js job cancel <job-id>` |
+| List jobs | `node cli.js job list --limit 20` |
 
 ## 8. Configuration Model
 
@@ -116,6 +128,20 @@ This avoids the old failure mode where overloaded execution appeared as a broken
 - `EXEC_QUEUE_TIMEOUT_MS`
 
 Port and bind address remain startup-level settings and normally require a daemon restart.
+
+## 10.1 Persistent Development Jobs
+
+Synchronous command execution is still available for short commands, but long-running tests, builds, and polling loops should use persistent jobs.
+
+Daemon endpoints:
+
+- `POST /api/jobs` or `POST /api/jobs/start`
+- `GET /api/jobs`
+- `GET /api/jobs/:jobId`
+- `GET /api/jobs/:jobId/logs`
+- `POST /api/jobs/:jobId/cancel`
+
+The legacy `/api/exec/async` and `/api/task/:taskId` endpoints are kept as compatibility wrappers over the same job store. Job metadata and stdout/stderr logs are written under the daemon job directory so clients can reconnect and continue reading status after the initial HTTP request has returned. SSH mode does not pretend to support persistent jobs; it remains a recovery path.
 
 ## 11. Security Boundaries
 

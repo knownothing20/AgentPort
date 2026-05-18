@@ -4,7 +4,8 @@ const fs = require('fs').promises;
 const path = require('path');
 const fg = require('fast-glob');
 const crypto = require('crypto');
-const { exec } = require('child_process');
+const fsSync = require('fs');
+const { exec, spawn } = require('child_process');
 const { promisify } = require('util');
 const os = require('os');
 require('dotenv').config();
@@ -45,6 +46,8 @@ function loadRuntimeConfig() {
 
 let runtimeConfig = loadRuntimeConfig();
 const AUDIT_LOG_PATH = process.env.AUDIT_LOG_PATH || path.join(__dirname, 'audit.log');
+const JOBS_DIR = process.env.JOBS_DIR || path.join(__dirname, 'jobs');
+const JOB_LOG_TAIL_BYTES = parseRuntimeInt(process.env.JOB_LOG_TAIL_BYTES, 64 * 1024, 1024);
 
 // 命令执行限制配置 (v2.3.1)
 const ALLOW_BASH_EXEC = !/^false$/i.test(String(process.env.ALLOW_BASH_EXEC || 'true'));
@@ -58,6 +61,7 @@ const ALLOWED_COMMANDS = new Set(
 const writeLocks = new Map();
 let runningExec = 0;
 const execWaiters = [];
+const activeJobs = new Map();
 
 function nowIso() {
   return new Date().toISOString();
@@ -225,6 +229,300 @@ function getExecStats() {
   };
 }
 
+async function pathExists(targetPath) {
+  try {
+    await fs.access(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function makeJobId() {
+  return 'job-' + Date.now().toString(36) + '-' + crypto.randomBytes(4).toString('hex');
+}
+
+function safeJobId(jobId) {
+  const id = String(jobId || '').trim();
+  if (!/^[a-zA-Z0-9._-]+$/.test(id)) {
+    const error = new Error('Invalid job id');
+    error.statusCode = 400;
+    throw error;
+  }
+  return id;
+}
+
+function jobDir(jobId) {
+  return path.join(JOBS_DIR, safeJobId(jobId));
+}
+
+function jobMetaPath(jobId) {
+  return path.join(jobDir(jobId), 'meta.json');
+}
+
+function jobStdoutPath(jobId) {
+  return path.join(jobDir(jobId), 'stdout.log');
+}
+
+function jobStderrPath(jobId) {
+  return path.join(jobDir(jobId), 'stderr.log');
+}
+
+function publicJob(job) {
+  const { command, ...rest } = job;
+  return {
+    ...rest,
+    commandPreview: typeof command === 'string' ? command.slice(0, 300) : '',
+  };
+}
+
+async function writeJobMeta(job) {
+  await fs.mkdir(jobDir(job.id), { recursive: true });
+  await fs.writeFile(jobMetaPath(job.id), JSON.stringify(job, null, 2) + '\n', 'utf-8');
+}
+
+async function readJobMeta(jobId) {
+  const id = safeJobId(jobId);
+  const raw = await fs.readFile(jobMetaPath(id), 'utf-8');
+  return JSON.parse(raw.replace(/^\uFEFF/, ''));
+}
+
+async function listJobs(limit = 50) {
+  await fs.mkdir(JOBS_DIR, { recursive: true });
+  const entries = await fs.readdir(JOBS_DIR, { withFileTypes: true });
+  const jobs = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    try {
+      jobs.push(await readJobMeta(entry.name));
+    } catch (_) {}
+  }
+  jobs.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  return jobs.slice(0, limit);
+}
+
+async function getJobStats() {
+  let persisted = 0;
+  try {
+    const entries = await fs.readdir(JOBS_DIR, { withFileTypes: true });
+    persisted = entries.filter((entry) => entry.isDirectory()).length;
+  } catch (_) {}
+  return {
+    active: activeJobs.size,
+    persisted,
+    dir: JOBS_DIR,
+  };
+}
+
+async function auditWritableStatus() {
+  try {
+    await fs.mkdir(path.dirname(AUDIT_LOG_PATH), { recursive: true });
+    await fs.appendFile(AUDIT_LOG_PATH, '', 'utf-8');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function readLogTail(filePath, maxBytes = JOB_LOG_TAIL_BYTES) {
+  const stat = await fs.stat(filePath);
+  const start = Math.max(0, stat.size - maxBytes);
+  const handle = await fs.open(filePath, 'r');
+  try {
+    const length = stat.size - start;
+    const buffer = Buffer.alloc(length);
+    await handle.read(buffer, 0, length, start);
+    return {
+      content: buffer.toString('utf-8'),
+      size: stat.size,
+      truncated: start > 0,
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
+async function updateJob(jobId, updates) {
+  const existing = await readJobMeta(jobId);
+  const next = {
+    ...existing,
+    ...updates,
+    updatedAt: nowIso(),
+  };
+  await writeJobMeta(next);
+  return next;
+}
+
+async function startPersistentJob({ command, cwd, clientId }) {
+  if (!command.trim()) {
+    const error = new Error('command is required');
+    error.statusCode = 400;
+    throw error;
+  }
+  if (!ALLOW_BASH_EXEC) {
+    const error = new Error('Bash execution is disabled. Set ALLOW_BASH_EXEC=true to enable.');
+    error.statusCode = 403;
+    throw error;
+  }
+  if (ALLOWED_COMMANDS.size > 0) {
+    const commandBase = command.split(/[\s|&;]/)[0];
+    if (!ALLOWED_COMMANDS.has(commandBase)) {
+      const error = new Error(`Command not allowed: ${commandBase}. Allowed: ${[...ALLOWED_COMMANDS].join(', ')}`);
+      error.statusCode = 403;
+      throw error;
+    }
+  }
+
+  const jobCwd = typeof cwd === 'string' && cwd.trim() ? safePath(cwd) : WORKSPACE_ROOT;
+  await acquireExecSlot();
+
+  const id = makeJobId();
+  const createdAt = nowIso();
+  const job = {
+    id,
+    command,
+    cwd: jobCwd,
+    clientId: clientId || 'unknown',
+    status: 'running',
+    exitCode: null,
+    signal: null,
+    createdAt,
+    updatedAt: createdAt,
+    startedAt: createdAt,
+    finishedAt: null,
+    pid: null,
+    timedOut: false,
+    timeoutMs: runtimeConfig.execTimeoutMs,
+    stdoutPath: jobStdoutPath(id),
+    stderrPath: jobStderrPath(id),
+  };
+
+  await fs.mkdir(jobDir(id), { recursive: true });
+  await fs.writeFile(job.stdoutPath, '', 'utf-8');
+  await fs.writeFile(job.stderrPath, '', 'utf-8');
+  await writeJobMeta(job);
+
+  let slotReleased = false;
+  const releaseSlotOnce = () => {
+    if (slotReleased) return;
+    slotReleased = true;
+    releaseExecSlot();
+  };
+
+  const stdoutStream = fsSync.createWriteStream(job.stdoutPath, { flags: 'a' });
+  const stderrStream = fsSync.createWriteStream(job.stderrPath, { flags: 'a' });
+  const child = spawn(command, {
+    cwd: jobCwd,
+    shell: true,
+    detached: process.platform !== 'win32',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  job.pid = child.pid;
+  await writeJobMeta(job);
+  activeJobs.set(id, { child, stdoutStream, stderrStream, releaseSlotOnce });
+
+  child.stdout.pipe(stdoutStream);
+  child.stderr.pipe(stderrStream);
+
+  const timeout = setTimeout(() => {
+    const active = activeJobs.get(id);
+    if (!active) return;
+    try {
+      if (process.platform !== 'win32') {
+        process.kill(-child.pid, 'SIGTERM');
+      } else {
+        child.kill('SIGTERM');
+      }
+    } catch (_) {
+      try { child.kill('SIGTERM'); } catch (_) {}
+    }
+    updateJob(id, { status: 'timeout', timedOut: true }).catch(() => {});
+  }, runtimeConfig.execTimeoutMs);
+
+  child.on('error', (error) => {
+    stderrStream.write(`\n[spawn error] ${error.stack || error.message}\n`);
+  });
+
+  child.on('close', async (code, signal) => {
+    clearTimeout(timeout);
+    activeJobs.delete(id);
+    releaseSlotOnce();
+    let existing = job;
+    try {
+      existing = await readJobMeta(id);
+    } catch (_) {}
+    const wasCancelled = existing.status === 'cancelled' || existing.status === 'cancelling';
+    const timedOut = existing.timedOut || (code === null && signal === 'SIGTERM' && !wasCancelled);
+    const status = wasCancelled ? 'cancelled' : (timedOut ? 'timeout' : (code === 0 ? 'completed' : 'error'));
+    await updateJob(id, {
+      status,
+      exitCode: typeof code === 'number' ? code : null,
+      signal: signal || null,
+      timedOut,
+      finishedAt: nowIso(),
+    }).catch(() => {});
+    try { stdoutStream.end(); } catch (_) {}
+    try { stderrStream.end(); } catch (_) {}
+  });
+
+  return job;
+}
+
+async function jobWithLogs(jobId, tailBytes) {
+  const job = await readJobMeta(jobId);
+  const stdout = await pathExists(job.stdoutPath) ? await readLogTail(job.stdoutPath, tailBytes) : { content: '', size: 0, truncated: false };
+  const stderr = await pathExists(job.stderrPath) ? await readLogTail(job.stderrPath, tailBytes) : { content: '', size: 0, truncated: false };
+  return {
+    job: publicJob(job),
+    stdout,
+    stderr,
+  };
+}
+
+async function cancelPersistentJob(jobId) {
+  const id = safeJobId(jobId);
+  const job = await readJobMeta(id);
+  const active = activeJobs.get(id);
+  if (!active) {
+    if (job.status === 'running') {
+      const orphaned = await updateJob(id, {
+        status: 'orphaned',
+        finishedAt: nowIso(),
+      });
+      return { cancelled: false, orphaned: true, job: publicJob(orphaned) };
+    }
+    return { cancelled: false, alreadyFinished: true, job: publicJob(job) };
+  }
+
+  await updateJob(id, { status: 'cancelling' });
+  try {
+    if (process.platform !== 'win32') {
+      process.kill(-active.child.pid, 'SIGTERM');
+    } else {
+      active.child.kill('SIGTERM');
+    }
+  } catch (_) {
+    try { active.child.kill('SIGTERM'); } catch (_) {}
+  }
+
+  setTimeout(() => {
+    if (!activeJobs.has(id)) return;
+    try {
+      if (process.platform !== 'win32') {
+        process.kill(-active.child.pid, 'SIGKILL');
+      } else {
+        active.child.kill('SIGKILL');
+      }
+    } catch (_) {}
+  }, 5000).unref?.();
+
+  const cancelled = await updateJob(id, {
+    status: 'cancelled',
+    finishedAt: nowIso(),
+  });
+  return { cancelled: true, job: publicJob(cancelled) };
+}
+
 function execQueueError() {
   const error = new Error('Too many concurrent exec operations');
   error.statusCode = 429;
@@ -314,12 +612,32 @@ function authAdmin(req, res, next) {
 }
 
 app.get('/healthz', async (_req, res) => {
+  const workspaceExists = await pathExists(WORKSPACE_ROOT);
+  const jobs = await getJobStats();
   res.json({
     ok: true,
     time: nowIso(),
+    uptimeSec: Math.floor(process.uptime()),
+    pid: process.pid,
+    node: process.version,
+    platform: process.platform,
     workspaceRoot: WORKSPACE_ROOT,
+    workspace: {
+      root: WORKSPACE_ROOT,
+      exists: workspaceExists,
+    },
     authClients: Object.keys(clientTokenMap),
+    auth: {
+      configured: tokenClientMap.size > 0,
+      clientsCount: Object.keys(clientTokenMap).length,
+    },
     exec: getExecStats(),
+    jobs,
+    audit: {
+      path: AUDIT_LOG_PATH,
+      writable: await auditWritableStatus(),
+    },
+    memory: process.memoryUsage(),
   });
 });
 
@@ -708,58 +1026,103 @@ app.post('/api/batch', authApi, async (req, res) => {
 const asyncTasks = new Map();
 let taskIdCounter = 0;
 
+app.get('/api/jobs', authApi, async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 50, 1), 200);
+    const status = typeof req.query.status === 'string' && req.query.status.trim() ? req.query.status.trim() : '';
+    let jobs = await listJobs(limit);
+    if (status) jobs = jobs.filter((job) => job.status === status);
+    return res.json({ success: true, jobs: jobs.map(publicJob), count: jobs.length });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+app.post(['/api/jobs', '/api/jobs/start'], authApi, async (req, res) => {
+  const start = Date.now();
+  const command = typeof req.body.command === 'string' ? req.body.command : '';
+  try {
+    const job = await startPersistentJob({
+      command,
+      cwd: req.body.cwd,
+      clientId: req.mcpClientId,
+    });
+    await audit({ type: 'job.start', clientId: req.mcpClientId, command: command.slice(0, 300), cwd: job.cwd, jobId: job.id, ms: Date.now() - start, ok: true });
+    return res.json({ success: true, jobId: job.id, taskId: job.id, status: job.status, job: publicJob(job), createdAt: job.createdAt });
+  } catch (error) {
+    await audit({ type: 'job.start', clientId: req.mcpClientId, command: command.slice(0, 300), ms: Date.now() - start, ok: false, error: error.message, exec: error.details });
+    const statusCode = Number(error.statusCode) || 500;
+    return res.status(statusCode).json(execErrorPayload(error));
+  }
+});
+
+app.get('/api/jobs/:jobId', authApi, async (req, res) => {
+  try {
+    const job = await readJobMeta(req.params.jobId);
+    return res.json({ success: true, job: publicJob(job), ...publicJob(job) });
+  } catch (error) {
+    const statusCode = error.code === 'ENOENT' ? 404 : Number(error.statusCode) || 500;
+    return res.status(statusCode).json({ error: statusCode === 404 ? 'Job not found' : error.message });
+  }
+});
+
+app.get('/api/jobs/:jobId/logs', authApi, async (req, res) => {
+  try {
+    const tailBytes = Math.min(Math.max(Number.parseInt(req.query.tailBytes || req.query.bytes, 10) || JOB_LOG_TAIL_BYTES, 1024), 5 * 1024 * 1024);
+    return res.json({ success: true, ...(await jobWithLogs(req.params.jobId, tailBytes)) });
+  } catch (error) {
+    const statusCode = error.code === 'ENOENT' ? 404 : Number(error.statusCode) || 500;
+    return res.status(statusCode).json({ error: statusCode === 404 ? 'Job not found' : error.message });
+  }
+});
+
+app.post('/api/jobs/:jobId/cancel', authApi, async (req, res) => {
+  try {
+    const result = await cancelPersistentJob(req.params.jobId);
+    await audit({ type: 'job.cancel', clientId: req.mcpClientId, jobId: req.params.jobId, ok: true, cancelled: result.cancelled });
+    return res.json({ success: true, ...result });
+  } catch (error) {
+    await audit({ type: 'job.cancel', clientId: req.mcpClientId, jobId: req.params.jobId, ok: false, error: error.message });
+    const statusCode = error.code === 'ENOENT' ? 404 : Number(error.statusCode) || 500;
+    return res.status(statusCode).json({ error: statusCode === 404 ? 'Job not found' : error.message });
+  }
+});
+
 app.post('/api/exec/async', authApi, async (req, res) => {
   const command = typeof req.body.command === 'string' ? req.body.command : '';
   if (!command.trim()) return res.status(400).json({ error: 'command is required' });
 
-  let cwd;
   try {
-    cwd = typeof req.body.cwd === 'string' && req.body.cwd.trim() ? safePath(req.body.cwd) : WORKSPACE_ROOT;
-    await acquireExecSlot();
+    const job = await startPersistentJob({
+      command,
+      cwd: req.body.cwd,
+      clientId: req.mcpClientId,
+    });
+    asyncTasks.set(job.id, { id: job.id, command, cwd: job.cwd, status: job.status, stdout: '', stderr: '', exitCode: null, createdAt: Date.parse(job.createdAt), finishedAt: null });
+    await audit({ type: 'exec.async', clientId: req.mcpClientId, command: command.slice(0, 300), taskId: job.id, ok: true });
+    return res.json({ success: true, taskId: job.id, jobId: job.id, status: job.status, createdAt: Date.parse(job.createdAt), job: publicJob(job) });
   } catch (e) {
     const statusCode = Number(e.statusCode) || 500;
     return res.status(statusCode).json(execErrorPayload(e));
   }
-
-  const taskId = 'task-' + (++taskIdCounter);
-  const createdAt = Date.now();
-
-  asyncTasks.set(taskId, { id: taskId, command, cwd, status: 'running', stdout: '', stderr: '', exitCode: null, createdAt, finishedAt: null });
-
-  // Execute in background
-  execAsync(command, { cwd, timeout: runtimeConfig.execTimeoutMs, maxBuffer: 10 * 1024 * 1024 })
-    .then(({ stdout, stderr }) => {
-      const task = asyncTasks.get(taskId);
-      if (task) {
-        task.status = 'completed';
-        task.stdout = stdout;
-        task.stderr = stderr;
-        task.exitCode = 0;
-        task.finishedAt = Date.now();
-      }
-    })
-    .catch((error) => {
-      const task = asyncTasks.get(taskId);
-      if (task) {
-        task.status = 'error';
-        task.stdout = error.stdout || '';
-        task.stderr = error.stderr || error.message || '';
-        task.exitCode = typeof error.code === 'number' ? error.code : null;
-        task.finishedAt = Date.now();
-      }
-    })
-    .finally(() => {
-      releaseExecSlot();
-    });
-
-  await audit({ type: 'exec.async', clientId: req.mcpClientId, command: command.slice(0, 300), taskId, ok: true });
-  return res.json({ success: true, taskId, status: 'running', createdAt });
 });
 
 app.get('/api/task/:taskId', authApi, async (req, res) => {
-  const task = asyncTasks.get(req.params.taskId);
-  if (!task) return res.status(404).json({ error: 'Task not found' });
-  return res.json({ success: true, ...task });
+  try {
+    const job = await readJobMeta(req.params.taskId);
+    const logs = await jobWithLogs(req.params.taskId, JOB_LOG_TAIL_BYTES);
+    return res.json({
+      success: true,
+      ...publicJob(job),
+      taskId: job.id,
+      stdout: logs.stdout.content,
+      stderr: logs.stderr.content,
+    });
+  } catch (_) {
+    const task = asyncTasks.get(req.params.taskId);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    return res.json({ success: true, ...task });
+  }
 });
 
 // Cleanup old tasks every 5 minutes

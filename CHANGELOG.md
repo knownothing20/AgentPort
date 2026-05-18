@@ -1,5 +1,17 @@
 # Changelog
 
+## [2026-05-18] feat | Stable development gateway jobs
+
+### Added
+- Added persistent daemon job APIs for long-running development commands: start, list, status, logs, and cancel.
+- Added CLI `status` plus `job start/status/logs/cancel/list` commands so agents can keep working through HTTP daemon jobs when native MCP stdio transport closes.
+
+### Changed
+- Expanded `/healthz` with daemon uptime, pid, node/platform, workspace status, job stats, audit writability, and memory usage.
+- Updated CLI doctor guidance to prefer daemon jobs and SSH recovery over blocking on native MCP transport.
+
+---
+
 ## [2026-05-16] fix | Deepen MCP transport failure diagnostics
 
 ### Changed
