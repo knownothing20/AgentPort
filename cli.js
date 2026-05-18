@@ -179,6 +179,50 @@ async function postWithFallback(client, paths, payload) {
       return response.data;
     } catch (error) {
       lastError = error;
+      if (!error?.response && ["ECONNRESET", "EPIPE", "ETIMEDOUT", "ECONNABORTED"].includes(error?.code)) {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        try {
+          const response = await client.post(route, payload);
+          return response.data;
+        } catch (retryError) {
+          lastError = retryError;
+        }
+      }
+      if (![404, 405].includes(error?.response?.status)) break;
+    }
+  }
+  const status = lastError?.response?.status;
+  const remoteMessage = lastError?.response?.data?.error || lastError?.response?.data?.message;
+  throw new Error(remoteMessage || lastError?.message || `Request failed${status ? ` (${status})` : ""}`);
+}
+
+function pathWithQuery(route, query = {}) {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query || {})) {
+    if (value === undefined || value === null || value === false) continue;
+    params.set(key, String(value));
+  }
+  const suffix = params.toString();
+  return suffix ? `${route}?${suffix}` : route;
+}
+
+async function getWithFallback(client, paths, query = {}) {
+  let lastError;
+  for (const route of paths) {
+    try {
+      const response = await client.get(pathWithQuery(route, query));
+      return response.data;
+    } catch (error) {
+      lastError = error;
+      if (!error?.response && ["ECONNRESET", "EPIPE", "ETIMEDOUT", "ECONNABORTED"].includes(error?.code)) {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        try {
+          const response = await client.get(pathWithQuery(route, query));
+          return response.data;
+        } catch (retryError) {
+          lastError = retryError;
+        }
+      }
       if (![404, 405].includes(error?.response?.status)) break;
     }
   }
@@ -275,6 +319,71 @@ async function commandHealth(args) {
   printJson(result);
 }
 
+async function commandStatus(args) {
+  const conn = selectConnection(args);
+  const result = {
+    connection: {
+      name: conn.name,
+      type: conn.type || "daemon",
+      target: (conn.type || "daemon") === "ssh" ? `${conn.username}@${conn.host}:${conn.port || 22}` : conn.url,
+    },
+    nativeMcp: {
+      role: "convenience entrypoint",
+      fallback: "If native remote_* tools return Transport closed, keep working with this CLI.",
+    },
+    recommendedOrder: ["cli-daemon", "cli-job", "cli-ssh-recovery", "native-mcp"],
+  };
+
+  if ((conn.type || "daemon") === "ssh") {
+    result.health = await checkSsh(conn);
+    result.capabilities = {
+      read: true,
+      write: true,
+      bash: true,
+      jobs: false,
+      jobLogs: false,
+      jobCancel: false,
+      config: false,
+    };
+    result.note = "SSH mode is the recovery channel. Persistent jobs require a daemon connection.";
+    printJson(result);
+    return;
+  }
+
+  const client = daemonClient(conn);
+  result.health = await checkDaemon(conn);
+  try {
+    const jobs = await getWithFallback(client, ["/api/jobs"], { limit: 1 });
+    result.capabilities = {
+      read: true,
+      write: true,
+      bash: true,
+      jobs: true,
+      jobLogs: true,
+      jobCancel: true,
+      config: true,
+    };
+    result.jobsProbe = {
+      ok: true,
+      count: jobs.count ?? jobs.jobs?.length ?? 0,
+    };
+  } catch (error) {
+    result.capabilities = {
+      read: true,
+      write: true,
+      bash: true,
+      jobs: false,
+      legacyAsync: true,
+      config: true,
+    };
+    result.jobsProbe = {
+      ok: false,
+      error: error.message,
+    };
+  }
+  printJson(result);
+}
+
 async function commandDoctor() {
   const { connections, defaultName } = loadConnections();
   const results = [];
@@ -293,10 +402,11 @@ async function commandDoctor() {
   }
   printJson({
     ok: results.some((item) => item.ok),
-    nativeMcpPriority: "If remote_* MCP tools are visible, use them first. This CLI is the Bash/terminal fallback.",
+    nativeMcpPriority: "Native remote_* MCP tools are convenient, but this CLI is the stable fallback when stdio transport closes.",
     cli: { available: true, node: process.version, cwd: __dirname },
     config: { path: CONNECTIONS_PATH, default: defaultName || null, current: getState().current || null },
-    recommendedOrder: ["native-mcp", "cli-daemon", "cli-ssh", "http-curl", "manual"],
+    recommendedOrder: ["cli-daemon", "cli-job", "cli-ssh-recovery", "native-mcp", "http-curl", "manual"],
+    transportPolicy: "When native MCP returns Transport closed, switch to CLI daemon jobs. Use SSH to recover the daemon or run one-off diagnostics.",
     results,
   });
 }
@@ -433,6 +543,147 @@ async function commandBash(args) {
   });
 }
 
+function unsupportedSshJobs() {
+  return {
+    ok: false,
+    mode: "ssh",
+    unsupported: true,
+    message: "SSH mode is for recovery and one-off commands. Persistent jobs require a daemon connection.",
+  };
+}
+
+async function commandJobStart(args) {
+  const command = args.command || args._.slice(2).join(" ");
+  if (!command) throw new Error("Usage: node cli.js job start <command> [--cwd path]");
+  await withConnection(args, async ({ type, http }) => {
+    if (type === "ssh") {
+      printJson(unsupportedSshJobs());
+      process.exitCode = 2;
+      return;
+    }
+    const data = await postWithFallback(http, ["/api/jobs", "/api/jobs/start", "/api/exec/async"], {
+      command,
+      cwd: args.cwd,
+    });
+    printJson(data);
+  });
+}
+
+async function commandJobStatus(args) {
+  const jobId = args._[2] || args.jobId || args.id;
+  if (!jobId) throw new Error("Usage: node cli.js job status <job-id>");
+  await withConnection(args, async ({ type, http }) => {
+    if (type === "ssh") {
+      printJson(unsupportedSshJobs());
+      process.exitCode = 2;
+      return;
+    }
+    const data = await getWithFallback(http, [`/api/jobs/${encodeURIComponent(jobId)}`, `/api/task/${encodeURIComponent(jobId)}`]);
+    printJson(data);
+  });
+}
+
+async function commandJobLogs(args) {
+  const jobId = args._[2] || args.jobId || args.id;
+  if (!jobId) throw new Error("Usage: node cli.js job logs <job-id> [--tail 200]");
+  const tailLines = positiveInt(args.tail || args.lines, 200, 1, 10000);
+  const tailBytes = positiveInt(args.tailBytes || args.bytes, 64 * 1024, 1024, 5 * 1024 * 1024);
+  await withConnection(args, async ({ type, http }) => {
+    if (type === "ssh") {
+      printJson(unsupportedSshJobs());
+      process.exitCode = 2;
+      return;
+    }
+    try {
+      const data = await getWithFallback(http, [`/api/jobs/${encodeURIComponent(jobId)}/logs`], { tailBytes });
+      if (args.json) {
+        printJson(data);
+        return;
+      }
+      const stdout = data.stdout?.content || "";
+      const stderr = data.stderr?.content || "";
+      const combined = [
+        stdout ? `--- stdout ---\n${stdout}` : "",
+        stderr ? `--- stderr ---\n${stderr}` : "",
+      ].filter(Boolean).join("\n");
+      print(combined.split(/\r?\n/).slice(-tailLines).join("\n"));
+    } catch (error) {
+      const data = await getWithFallback(http, [`/api/task/${encodeURIComponent(jobId)}`]);
+      if (args.json) {
+        printJson(data);
+        return;
+      }
+      const combined = [
+        data.stdout ? `--- stdout ---\n${data.stdout}` : "",
+        data.stderr ? `--- stderr ---\n${data.stderr}` : "",
+      ].filter(Boolean).join("\n");
+      print(combined.split(/\r?\n/).slice(-tailLines).join("\n"));
+    }
+  });
+}
+
+async function commandJobCancel(args) {
+  const jobId = args._[2] || args.jobId || args.id;
+  if (!jobId) throw new Error("Usage: node cli.js job cancel <job-id>");
+  await withConnection(args, async ({ type, http }) => {
+    if (type === "ssh") {
+      printJson(unsupportedSshJobs());
+      process.exitCode = 2;
+      return;
+    }
+    const data = await postWithFallback(http, [`/api/jobs/${encodeURIComponent(jobId)}/cancel`], {});
+    printJson(data);
+  });
+}
+
+async function commandJobList(args) {
+  await withConnection(args, async ({ type, http }) => {
+    if (type === "ssh") {
+      printJson(unsupportedSshJobs());
+      process.exitCode = 2;
+      return;
+    }
+    const data = await getWithFallback(http, ["/api/jobs"], {
+      limit: args.limit || 20,
+      status: args.status,
+    });
+    printJson(data);
+  });
+}
+
+async function commandJob(args) {
+  const subcommand = args._[1] || "help";
+  switch (subcommand) {
+    case "start":
+    case "run":
+      await commandJobStart(args);
+      break;
+    case "status":
+    case "show":
+      await commandJobStatus(args);
+      break;
+    case "logs":
+    case "log":
+      await commandJobLogs(args);
+      break;
+    case "cancel":
+    case "stop":
+      await commandJobCancel(args);
+      break;
+    case "list":
+    case "ls":
+      await commandJobList(args);
+      break;
+    default:
+      if (subcommand && subcommand !== "help") {
+        args.command = args._.slice(1).join(" ");
+        await commandJobStart(args);
+        return;
+      }
+      throw new Error("Usage: node cli.js job <start|status|logs|cancel|list> ...");
+  }
+}
+
 async function commandScript(args) {
   const file = args._[1] || args.file;
   const interpreter = args.interpreter || "bash";
@@ -496,6 +747,7 @@ Commands:
   node cli.js list
   node cli.js connect <name>
   node cli.js health [--connection name]
+  node cli.js status [--connection name]
   node cli.js doctor
   node cli.js read <remote-path> [--connection name]
   node cli.js write <remote-path> --content "text"
@@ -504,6 +756,11 @@ Commands:
   node cli.js glob "**/*.js" [--cwd /path]
   node cli.js grep "text" [--cwd /path] [--include "*.js,*.ts"]
   node cli.js bash "pwd && ls -la" [--cwd /path]
+  node cli.js job start "npm test" [--cwd /path]
+  node cli.js job status <job-id>
+  node cli.js job logs <job-id> [--tail 200]
+  node cli.js job cancel <job-id>
+  node cli.js job list [--limit 20]
   node cli.js script local-script.sh [--interpreter bash]
   node cli.js batch batch.json
 `);
@@ -527,6 +784,9 @@ async function main() {
     case "health":
       await commandHealth(args);
       break;
+    case "status":
+      await commandStatus(args);
+      break;
     case "doctor":
     case "probe":
       await commandDoctor(args);
@@ -548,6 +808,17 @@ async function main() {
       break;
     case "bash":
       await commandBash(args);
+      break;
+    case "job":
+      await commandJob(args);
+      break;
+    case "logs":
+      args._ = ["job", "logs", ...args._.slice(1)];
+      await commandJobLogs(args);
+      break;
+    case "cancel":
+      args._ = ["job", "cancel", ...args._.slice(1)];
+      await commandJobCancel(args);
       break;
     case "script":
       await commandScript(args);
