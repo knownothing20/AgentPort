@@ -5,22 +5,22 @@ development access through `mcp-remote-agent`.
 
 ## Capability Priority
 
-Always choose the highest available integration level:
+Always choose the most stable available runtime for the task:
 
-1. Native MCP tools.
-   Use `remote_connect`, `remote_health`, `remote_read`, `remote_write`,
-   `remote_bash`, and the other `remote_*` tools directly.
-2. Bash or terminal fallback.
-   If native `remote_*` MCP tools are not visible but the AI tool can run local
-   shell commands, use `node cli.js ...`.
-3. HTTP fallback.
-   If the AI tool can call HTTP but cannot run shell commands, call the daemon
-   REST API directly.
-4. Manual fallback.
+1. CLI daemon gateway for long-running development.
+   Use `node cli.js status` and `node cli.js job ...` for tests, builds,
+   polling, and work that must survive native MCP transport failures.
+2. Native MCP tools for quick structured operations.
+   If `remote_*` tools are visible and stable, use `remote_connect`,
+   `remote_health`, `remote_read`, `remote_write`, `remote_bash`, and the other
+   `remote_*` tools directly.
+3. SSH recovery inside the CLI.
+   Use SSH when the daemon is unavailable or needs restart/diagnosis.
+4. HTTP/manual fallback.
    If none of the above are available, print exact commands for the user to run.
 
-For long-term coding, prefer daemon connections. SSH is a reliable fallback for
-quick access or when the daemon is unavailable.
+For long-term coding, prefer daemon connections and persistent jobs. SSH is a
+recovery path, not the default long-running development channel.
 
 ## Installation Check
 
@@ -57,7 +57,8 @@ remote_glob(pattern="**/*.js", cwd="/path")
 remote_grep(pattern="video-analysis", cwd="/path", include=["**/*.ts", "**/*.py"])
 ```
 
-Do not fall back to CLI when native MCP tools are working.
+Use the CLI job gateway for long-running commands even when native MCP tools are
+available, because jobs can continue after the desktop MCP transport closes.
 
 ## CLI Fallback Usage
 
@@ -81,6 +82,17 @@ node cli.js write /path/to/workspace/tmp.txt --content "hello"
 node cli.js write /path/to/workspace/tmp.txt --file local-file.txt
 ```
 
+For long-running work:
+
+```bash
+node cli.js status
+node cli.js job start "npm test" --cwd /path/to/workspace
+node cli.js job status <job-id>
+node cli.js job logs <job-id> --tail 200
+node cli.js job cancel <job-id>
+node cli.js job list --limit 20
+```
+
 The CLI reads `local/connections.json` and stores only the selected connection
 name in `local/cli-state.json`. It does not copy or print full tokens.
 
@@ -97,7 +109,12 @@ name in `local/cli-state.json`. It does not copy or print full tokens.
 ## Minimal Agent Bootstrap Prompt
 
 ```text
-If remote_* MCP tools are visible, use native MCP first:
+For long-running development, prefer the CLI daemon gateway:
+node <skill-dir>/cli.js status
+node <skill-dir>/cli.js job start "<command>" --cwd /path/to/workspace
+node <skill-dir>/cli.js job status|logs|cancel <job-id>
+
+If remote_* MCP tools are visible and stable, use native MCP for quick structured operations:
 remote_connect() -> remote_health() -> remote_* operations.
 
 If remote_* tools are not visible but Bash is available, use:

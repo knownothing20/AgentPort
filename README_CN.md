@@ -2,11 +2,11 @@
 
 ## Agent 接入优先级
 
-`mcp-remote-agent` 同时支持原生 MCP 和 CLI fallback。给不同 AI 软件接入时，不要写死某一个软件名，而是按能力自动选择：
+`mcp-remote-agent` 现在的定位不是单一 MCP Server，而是 AI 远程开发网关。它同时支持 CLI daemon 网关、原生 MCP、SSH 恢复和持久 Job，给不同 AI 软件接入时，不要写死某一个软件名，而是按稳定性自动选择：
 
-1. **优先原生 MCP**：如果当前会话能看到 `remote_*` 工具，直接使用 `remote_connect()` -> `remote_health()` -> 其他 `remote_*` 操作。
-2. **其次 CLI fallback**：如果看不到 `remote_*`，但 AI 软件能运行 Bash/终端命令，使用 `node cli.js ...`。
-3. **CLI 内部 daemon 优先、SSH 兜底**：长期编程开发优先 daemon，daemon 不可用时再切 SSH。
+1. **长期开发优先 CLI daemon 网关**：使用 `node cli.js status` 和 `node cli.js job ...`，适合测试、构建、轮询、长任务和原生 MCP transport 断开后的恢复。
+2. **快速结构化操作使用原生 MCP**：如果当前会话能看到 `remote_*` 工具且稳定，使用 `remote_connect()` -> `remote_health()` -> 其他 `remote_*` 操作。
+3. **CLI 内部 SSH 恢复**：daemon 不可用或需要重启/诊断时，再切 SSH。
 4. **HTTP/人工兜底最后使用**：只有 MCP 和 CLI 都不可用时，才考虑直接 REST/curl 或输出人工命令。
 
 CLI fallback 示例：
@@ -21,11 +21,24 @@ node cli.js bash "pwd && ls -la" --cwd /path/to/workspace
 node cli.js write /path/to/workspace/tmp.txt --content "hello"
 ```
 
+持久 Job 示例：
+
+```bash
+node cli.js status
+node cli.js job start "npm test" --cwd /path/to/workspace
+node cli.js job status <job-id>
+node cli.js job logs <job-id> --tail 200
+node cli.js job cancel <job-id>
+node cli.js job list --limit 20
+```
+
+Job 会在远程 daemon 内继续运行；即使 AI 软件的原生 MCP stdio 链路断开，也可以重新通过 CLI 查看状态和日志。
+
 完整 Agent 安装、检测和使用流程见 [AGENT_GUIDE.md](./AGENT_GUIDE.md)。
 
-MCP Server for AI Agent Remote Development
+AI 远程开发网关：同时支持 MCP、CLI、SSH 恢复和持久 daemon Job
 
-新电脑或其他 AI 软件安装迁移请先看 [INSTALL_OTHER_MACHINE.md](./INSTALL_OTHER_MACHINE.md)。如果目标软件支持 **原生 MCP / native MCP**，优先走 MCP；如果不支持 MCP 但能执行 Bash/终端命令，就走 `cli.js` fallback。简版流程：
+新电脑或其他 AI 软件安装迁移请先看 [INSTALL_OTHER_MACHINE.md](./INSTALL_OTHER_MACHINE.md)。长期开发优先走 CLI daemon 网关；如果目标软件稳定支持 **原生 MCP / native MCP**，可用于快速结构化操作；daemon 不可用时再用 CLI 内置 SSH 恢复。简版流程：
 
 ```bash
 git clone https://github.com/knownothing20/mcp-remote-agent.git
@@ -37,7 +50,7 @@ npm run doctor
 
 然后通过安全方式复制旧电脑的 `local/connections.json`、按需复制 `local/mcp-remote-agent.json` 和 SSH 私钥，并按新电脑用户名修正私钥绝对路径。
 
-让 AI Agent 通过 MCP 协议操作远程 Linux 服务器，实现本地开发环境与远程服务器的无缝衔接。
+让 AI Agent 通过稳定的远程开发网关操作 Linux 服务器：支持原生 MCP、CLI fallback、daemon HTTP API、SSH 恢复和持久 Job。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-2.5.0-blue)](https://github.com/knownothing20/mcp-remote-agent)
@@ -46,7 +59,7 @@ npm run doctor
 
 ## 一句话简介
 
-让 AI Agent（如 WorkBuddy、Claude Desktop、Cursor）通过 MCP 直接读写远程 Linux 服务器文件、执行命令，实现本地开发环境与远程服务器的无缝衔接。
+让 AI Agent（如 WorkBuddy、Claude Desktop、Cursor）通过稳定远程开发网关读写远程 Linux 文件、执行命令、查看诊断、控制长任务，并在原生 MCP 链路不稳定时继续恢复工作。
 
 **类比**：VS Code Remote SSH 是给人用的，mcp-remote-agent 是给 AI 用的。
 
@@ -60,7 +73,10 @@ npm run doctor
 | 远程搜索 | `remote_glob` 按 glob 模式搜索文件 |
 | 命令执行 | `remote_bash` 执行简单命令，`remote_script` 执行多行脚本 |
 | 批量操作 | `remote_batch` 一次请求最多 20 个操作 |
-| 异步执行 | `remote_exec_async` + `remote_task` 处理长耗时任务 |
+| 原生 MCP 工具 | 当前 AI 软件支持自定义 MCP 时使用结构化 `remote_*` 工具 |
+| CLI daemon 网关 | `node cli.js status` 和 `node cli.js job ...` 支撑稳定开发流程 |
+| 持久 Job | 远程 daemon 内运行测试、构建、长任务，支持状态、日志和取消 |
+| 异步执行 | `remote_exec_async` + `remote_task` 作为长任务兼容接口 |
 | 配置热重载 | `remote_config` 修改远端配置无需重启 |
 | 动态连接 | 支持多服务器切换，无需重启 MCP |
 | 健康检查 | 自动检测远端服务状态 |
@@ -73,7 +89,7 @@ npm run doctor
 ### 1. 复制 skill 到本地
 
 ```bash
-git clone https://github.com/your-repo/mcp-remote-agent.git
+git clone https://github.com/knownothing20/mcp-remote-agent.git
 cd mcp-remote-agent
 ```
 

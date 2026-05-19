@@ -1,5 +1,14 @@
 # Changelog
 
+## [2026-05-19] docs | Reposition as remote development gateway
+
+### Changed
+- Updated README, README_CN, skill metadata, and package description from a single "MCP Server" positioning to an "AI Remote Development Gateway" positioning.
+- Documented the preferred runtime order: CLI daemon gateway for long-running development, native MCP for quick structured operations, SSH recovery, then manual HTTP fallback.
+- Added README examples for persistent daemon jobs: start, status, logs, cancel, and list.
+
+---
+
 ## [2026-05-18] feat | Stable development gateway jobs
 
 ### Added

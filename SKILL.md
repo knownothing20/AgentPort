@@ -1,14 +1,14 @@
 ---
 name: mcp-remote-agent
-description: MCP Server for AI Agent Remote Development - 让 AI Agent 通过 MCP 协议操作远程 Linux 服务器。触发词：远程连接、远程执行、远端命令、远程文件、remote、MCP、AI Agent、守护进程、脚本执行、base64转义、文件元信息、stat、配置热重载、remote_config
+description: AI Remote Development Gateway for MCP, CLI fallback, SSH recovery, and persistent daemon jobs - 让 AI Agent 稳定操作远程 Linux 开发环境。触发词：远程连接、远程执行、远端命令、远程文件、remote、MCP、AI Agent、守护进程、脚本执行、job、status、logs、base64转义、文件元信息、stat、配置热重载、remote_config
 license: MIT
 ---
 
 # mcp-remote-agent
 
-MCP Server for AI Agent Remote Development
+AI Remote Development Gateway for MCP, CLI, SSH, and persistent daemon jobs
 
-让 AI Agent 通过 MCP 协议操作远程 Linux 服务器，实现本地开发环境与远程服务器的无缝衔接。
+让 AI Agent 通过稳定远程开发网关操作 Linux 服务器：支持原生 MCP、CLI fallback、daemon HTTP API、SSH 恢复和持久 Job。
 
 **类比**：VS Code Remote SSH 是给人用的，mcp-remote-agent 是给 AI 用的。
 
