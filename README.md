@@ -1,8 +1,10 @@
 # mcp-remote-agent
 
-MCP Server for AI Agent Remote Development
+AI Remote Development Gateway for MCP, CLI, SSH, and persistent daemon jobs
 
-Enable AI Agents to operate remote Linux servers through MCP protocol, seamlessly connecting local development environments with remote servers.
+Enable AI Agents to develop on remote Linux servers through the most stable
+available channel: native MCP tools, CLI fallback, daemon HTTP APIs, SSH
+recovery, and persistent remote jobs.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Version](https://img.shields.io/badge/version-2.5.0-blue)](https://github.com/knownothing20/mcp-remote-agent)
@@ -13,7 +15,9 @@ Enable AI Agents to operate remote Linux servers through MCP protocol, seamlessl
 
 ## One-line Summary
 
-Enable AI Agents (like WorkBuddy, Claude Desktop, Cursor) to directly read/write remote Linux server files and execute commands via MCP, seamlessly connecting local development with remote servers.
+Give AI Agents a stable remote development gateway: direct file operations,
+command execution, diagnostics, long-running job control, and recovery paths
+when a desktop tool's native MCP transport is unavailable or unstable.
 
 **Analogy**: VS Code Remote SSH is for humans; mcp-remote-agent is for AI.
 
@@ -21,21 +25,23 @@ Enable AI Agents (like WorkBuddy, Claude Desktop, Cursor) to directly read/write
 
 ## Architecture Overview
 
-`mcp-remote-agent` is split into a local agent client and a remote Linux daemon:
+`mcp-remote-agent` is split into a local agent gateway and a remote Linux
+daemon:
 
 ```text
 AI desktop tool
-  -> native MCP tools or CLI fallback
-  -> local mcp-remote-agent client
-  -> remote daemon HTTP API or SSH fallback
+  -> CLI daemon gateway, native MCP tools, or SSH recovery
+  -> local mcp-remote-agent gateway
+  -> remote daemon HTTP API
   -> remote Linux workspace
 ```
 
-The local side registers MCP tools, reads private connection config, provides
-the CLI fallback, and turns daemon errors into agent-readable messages. The
-remote daemon performs token auth, safe path checks, file operations, command
-execution, audit logging, health checks, Dashboard responses, and hot config
-reload.
+The local side registers MCP tools when available, provides a CLI fallback for
+tools that can run terminal commands, reads private connection config, and turns
+daemon errors into agent-readable messages. The remote daemon performs token
+auth, safe path checks, file operations, command execution, persistent
+development jobs, audit logging, health checks, Dashboard responses, and hot
+config reload.
 
 For the design rationale, deployment model, security boundaries, and current
 operational defaults, see [WHITEPAPER.md](./WHITEPAPER.md).
@@ -50,7 +56,10 @@ operational defaults, see [WHITEPAPER.md](./WHITEPAPER.md).
 | Remote Search | `remote_glob` search file paths, `remote_grep` search file contents |
 | Command Execution | `remote_bash` for simple commands, `remote_script` for multi-line scripts |
 | Batch Operations | `remote_batch` up to 20 operations per request |
-| Async Execution | `remote_exec_async` + `remote_task` for long-running tasks |
+| Native MCP Tools | Structured `remote_*` tools when the host supports custom MCP servers |
+| CLI Daemon Gateway | `node cli.js status` and `node cli.js job ...` for stable development workflows |
+| Persistent Jobs | Remote daemon jobs for tests, builds, logs, status, and cancel |
+| Async Execution | `remote_exec_async` + `remote_task` compatibility for long-running tasks |
 | Config Hot Reload | `remote_config` modify remote config without restart |
 | Execution Backpressure | Queue timeout returns clear 429 with exec running/max/queued state |
 | Dynamic Connections | Switch between multiple servers without restarting MCP |
@@ -61,17 +70,20 @@ operational defaults, see [WHITEPAPER.md](./WHITEPAPER.md).
 
 ## Agent Integration Priority
 
-`mcp-remote-agent` now supports both native MCP usage and a CLI fallback for AI
-tools that cannot inject custom MCP servers.
+`mcp-remote-agent` is no longer only a native MCP server. It is a remote
+development gateway that chooses the most reliable runtime available to the AI
+tool.
 
 Use this priority order:
 
-1. **Native MCP first**: if `remote_*` tools are visible, use
-   `remote_connect()` -> `remote_health()` -> normal `remote_*` operations.
-2. **CLI fallback second**: if the AI tool cannot load custom MCP tools but can
-   run Bash/terminal commands, use `node cli.js ...`.
-3. **Daemon before SSH**: for long-term coding, prefer daemon connections; use
-   SSH as fallback when the daemon is unavailable.
+1. **CLI daemon gateway for long-running development**: use `node cli.js status`
+   and persistent `job` commands for tests, builds, polling, and recovery from
+   native MCP transport failures.
+2. **Native MCP for quick structured operations**: if `remote_*` tools are
+   visible and stable, use `remote_connect()` -> `remote_health()` -> normal
+   `remote_*` operations.
+3. **SSH recovery inside the CLI**: use SSH when the daemon is unavailable or
+   needs restart/diagnosis.
 4. **HTTP/manual last**: only use direct REST calls or manual commands when MCP
    and CLI are both unavailable.
 
@@ -86,6 +98,21 @@ node cli.js read /path/to/workspace/AGENTS.md
 node cli.js bash "pwd && ls -la" --cwd /path/to/workspace
 node cli.js write /path/to/workspace/tmp.txt --content "hello"
 ```
+
+For long-running development tasks, use the persistent daemon job gateway:
+
+```bash
+node cli.js status
+node cli.js job start "npm test" --cwd /path/to/workspace
+node cli.js job status <job-id>
+node cli.js job logs <job-id> --tail 200
+node cli.js job cancel <job-id>
+node cli.js job list --limit 20
+```
+
+The job gateway is designed for AI tools whose native MCP stdio transport may
+disconnect during long work. Jobs continue inside the remote daemon, and the AI
+can reconnect through the CLI to inspect status and logs.
 
 See [AGENT_GUIDE.md](./AGENT_GUIDE.md) for the full install and agent bootstrap
 workflow.

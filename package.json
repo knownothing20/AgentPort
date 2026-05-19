@@ -1,7 +1,7 @@
 {
   "name": "mcp-remote-agent",
   "version": "2.5.0",
-  "description": "MCP Server for AI Agent Remote Development - 让 AI Agent 通过 MCP 协议操作远程 Linux 服务器",
+  "description": "AI Remote Development Gateway for MCP, CLI, SSH recovery, and persistent daemon jobs",
   "main": "index.js",
   "type": "module",
   "scripts": {
