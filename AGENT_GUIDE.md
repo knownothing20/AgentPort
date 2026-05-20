@@ -35,6 +35,16 @@ node cli.js doctor
 
 Expected result: at least one connection reports `"ok": true`.
 
+## Remote Setup Compatibility Guard
+
+When using `remote_setup`:
+
+- Default is **client-only** (`deploy=false`), so remote daemon files are not
+  modified.
+- Use `deploy=true` only for first-time remote bootstrap or planned upgrades.
+- If remote daemon already exists, overwrite is skipped by default.
+- Use `forceDeploy=true` only for intentional replacement after confirmation.
+
 If the target AI tool supports native MCP registration, also create
 `local/agentport.json` from `agentport.example.json`, set
 `skillDir` and `mcpConfigPath`, then run `node sync.cjs`.

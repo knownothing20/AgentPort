@@ -1,5 +1,19 @@
 # Changelog
 
+## [2026-05-20] fix | Safe remote_setup compatibility guard
+
+### Added
+- Added `remote_setup` input flags: `deploy`, `forceDeploy`, and `daemonPort`.
+- Added explicit client-only behavior metadata in setup results (`deploySkipped`, daemon existence/running state).
+
+### Changed
+- Changed `remote_setup` default from auto-deploy to client-only safe mode (`deploy=false` by default).
+- Added overwrite guard: when `deploy=true` and remote daemon directory exists, deployment now skips by default.
+- Added explicit override path requiring `forceDeploy=true` for intentional replacement.
+- Updated install and agent usage docs with the new no-overwrite compatibility flow for new/old computers.
+
+---
+
 ## [2026-05-20] fix | Per-software single core + multi-session proxy
 
 ### Added
