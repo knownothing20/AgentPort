@@ -43,6 +43,11 @@ auth, safe path checks, file operations, command execution, persistent
 development jobs, audit logging, health checks, Dashboard responses, and hot
 config reload.
 
+For desktop tools that spawn multiple MCP stdio children per software, agentport
+now keeps one local "core" process per software key and lets other sessions
+attach through a localhost proxy broker. This reduces duplicate connection churn
+without forcing single-session usage.
+
 For design rationale, deployment model, and security boundaries, see
 the project documentation in this repository.
 
@@ -63,6 +68,7 @@ the project documentation in this repository.
 | Config Hot Reload | `remote_config` modify remote config without restart |
 | Execution Backpressure | Queue timeout returns clear 429 with exec running/max/queued state |
 | Dynamic Connections | Switch between multiple servers without restarting MCP |
+| Multi-session Reuse | One local core instance per software key, extra sessions attach via local proxy broker |
 | Health Check | Automatic remote service status detection |
 | Encoding Handling | Auto base64 encode special chars, clean CRLF/BOM |
 

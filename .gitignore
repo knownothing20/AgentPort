@@ -3,6 +3,7 @@ local/agentport.json
 local/connections.json
 local/cli-state.json
 local/runtime-mode.json
+local/runtime/
 local/*.backup
 local/*.bak*
 local/logs/
