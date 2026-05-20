@@ -57,6 +57,8 @@ Remote setup safety policy:
 - For first-time server bootstrap, run read-only detection first, then deploy
   once from one operator computer, then reuse generated token pairs on all
   other client computers.
+- For multi-computer usage, do not share one token. Create one unique
+  `clientId=token` per computer/software.
 
 For design rationale, deployment model, and security boundaries, see
 the project documentation in this repository.
@@ -382,8 +384,12 @@ Set in `local/agentport.json`:
 ### Access Dashboard
 
 After starting the service, visit:
-- `http://your-server:3183/`
-- `http://your-server:3183/dashboard`
+- `http://your-server:3183/?token=<admin-token>`
+- `http://your-server:3183/dashboard?token=<admin-token>`
+
+Dashboard uses admin auth. If you want one token to work for both API calls and
+Dashboard on a client machine, add that token to both `AUTH_TOKENS` and
+`ADMIN_TOKENS` in remote `.env`.
 
 ### Dashboard Features
 

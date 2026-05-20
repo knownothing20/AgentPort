@@ -52,6 +52,7 @@ Before guiding installation, always ask:
 1. Which server should this computer connect to (for example `192.168.31.183`)?
 2. Is this an existing daemon server or first-time bootstrap?
 3. Should this computer run client-only mode or perform server deployment?
+4. Does this user need Dashboard access on this computer?
 
 Then enforce read-only detection before any deployment action.
 
@@ -59,6 +60,10 @@ Token guidance:
 - For existing daemon servers, read `AUTH_TOKENS` from remote `.env` and use an
   existing `clientId=token` pair in local `connections.json`.
 - Do not generate/replace remote tokens unless deployment was explicitly approved.
+- Do not reuse one token across multiple computers.
+- Create one unique `clientId=token` per computer/software.
+- If Dashboard access is required, ensure the same token is also present in
+  `ADMIN_TOKENS`.
 
 First-time token flow (both local + server are new):
 1. Detect remote daemon state first (read-only).
