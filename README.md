@@ -52,6 +52,8 @@ Remote setup safety policy:
 - `remote_setup` defaults to client-only mode (`deploy=false`).
 - Existing remote daemon files are not overwritten by default.
 - Overwrite requires explicit `deploy=true` and `forceDeploy=true`.
+- For existing servers, read `AUTH_TOKENS` from remote `.env` and reuse token
+  pairs instead of regenerating/replacing server credentials.
 
 For design rationale, deployment model, and security boundaries, see
 the project documentation in this repository.
