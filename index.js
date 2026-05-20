@@ -114,6 +114,9 @@ const PROCESS_STARTED_AT = Date.now();
 const PROCESS_SESSION_ID = `${new Date(PROCESS_STARTED_AT).toISOString()}#${process.pid}`;
 let _traceRequestSeq = 0;
 let _currentTraceContext = null;
+let _singletonLockPath = null;
+const SINGLETON_RUNTIME_DIR = path.join(__dirname, "local", "runtime");
+const SINGLETON_LOCK_PREFIX = "instance";
 const RECENT_EVENTS_LIMIT = 60;
 const ACTIVE_CALL_LIMIT = 20;
 const _activeToolCalls = new Map();
@@ -355,6 +358,101 @@ function markToolCallFinished(callId, status, durationMs, error = null) {
   pushDiagnosticEvent(`tool.${status}`, _lastToolCall);
 }
 
+function sanitizeInstanceKey(value) {
+  return String(value || "default")
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, "_")
+    .slice(0, 80) || "default";
+}
+
+function isPidAlive(pid) {
+  const parsed = Number.parseInt(String(pid), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed === process.pid) return false;
+  try {
+    process.kill(parsed, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function getSingletonLockPath() {
+  const explicit = process.env.MCP_REMOTE_INSTANCE_KEY || process.env.NIUMA_SSH_INSTANCE_KEY || "";
+  const instanceKey = sanitizeInstanceKey(explicit || CLIENT_ID || "default");
+  return path.join(SINGLETON_RUNTIME_DIR, `${SINGLETON_LOCK_PREFIX}-${instanceKey}.lock.json`);
+}
+
+function releaseSingletonLock() {
+  if (!_singletonLockPath) return;
+  try {
+    if (!fs.existsSync(_singletonLockPath)) {
+      _singletonLockPath = null;
+      return;
+    }
+    const content = fs.readFileSync(_singletonLockPath, "utf-8").replace(/^\uFEFF/, "");
+    const data = JSON.parse(content);
+    if (Number(data?.pid) === process.pid) {
+      fs.unlinkSync(_singletonLockPath);
+    }
+  } catch {}
+  _singletonLockPath = null;
+}
+
+function acquireSingletonLock() {
+  fs.mkdirSync(SINGLETON_RUNTIME_DIR, { recursive: true });
+  const lockPath = getSingletonLockPath();
+  const payload = {
+    pid: process.pid,
+    ppid: process.ppid,
+    startedAt: new Date(PROCESS_STARTED_AT).toISOString(),
+    startedAtMs: PROCESS_STARTED_AT,
+    sessionId: PROCESS_SESSION_ID,
+    clientId: CLIENT_ID || null,
+    argv: process.argv,
+    cwd: process.cwd(),
+  };
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const fd = fs.openSync(lockPath, "wx");
+      fs.writeFileSync(fd, JSON.stringify(payload, null, 2), "utf-8");
+      fs.closeSync(fd);
+      _singletonLockPath = lockPath;
+      return { ok: true, lockPath };
+    } catch (error) {
+      if (error?.code !== "EEXIST") {
+        return { ok: false, reason: `lock-write-failed: ${errorMessage(error)}`, lockPath };
+      }
+      let existing = null;
+      try {
+        const content = fs.readFileSync(lockPath, "utf-8").replace(/^\uFEFF/, "");
+        existing = JSON.parse(content);
+      } catch {
+        try { fs.unlinkSync(lockPath); } catch {}
+        continue;
+      }
+      const existingPid = Number(existing?.pid || 0);
+      if (!isPidAlive(existingPid)) {
+        try { fs.unlinkSync(lockPath); } catch {}
+        continue;
+      }
+      return {
+        ok: false,
+        duplicate: true,
+        reason: "existing-instance-alive",
+        lockPath,
+        existing: {
+          pid: existingPid,
+          sessionId: existing?.sessionId || null,
+          startedAt: existing?.startedAt || null,
+          clientId: existing?.clientId || null,
+        },
+      };
+    }
+  }
+  return { ok: false, reason: "lock-acquire-retry-exhausted", lockPath };
+}
+
 function writeProcessRegistry() {
   try {
     const logDir = path.join(__dirname, "local", "logs");
@@ -466,6 +564,7 @@ process.on("warning", (warning) => {
 process.on("beforeExit", (code) => {
   if (_loggedBeforeExit) return;
   _loggedBeforeExit = true;
+  releaseSingletonLock();
   pushDiagnosticEvent("process.beforeExit", { code, activeCallCount: _activeToolCalls.size });
   logProcessEvent("warn", "Process beforeExit", {
     code,
@@ -474,6 +573,7 @@ process.on("beforeExit", (code) => {
 });
 
 process.on("exit", (code) => {
+  releaseSingletonLock();
   pushDiagnosticEvent("process.exit", { code, activeCallCount: _activeToolCalls.size });
   logProcessEvent(code === 0 ? "info" : "error", "Process exit", {
     code,
@@ -482,6 +582,7 @@ process.on("exit", (code) => {
 });
 
 process.on("disconnect", () => {
+  releaseSingletonLock();
   pushDiagnosticEvent("process.disconnect", { activeCallCount: _activeToolCalls.size });
   logProcessEvent("warn", "Process disconnect", {
     diagnostic: diagnosticSnapshot("process.disconnect"),
@@ -491,6 +592,7 @@ process.on("disconnect", () => {
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   try {
     process.on(signal, () => {
+      releaseSingletonLock();
       pushDiagnosticEvent("process.signal", { signal, activeCallCount: _activeToolCalls.size });
       logProcessEvent("warn", `Received ${signal}`, {
         signal,
@@ -2527,6 +2629,35 @@ async function main() {
     defaultRemote: REMOTE_URL,
     authEnabled: Boolean(AUTH_TOKEN),
     clientId: CLIENT_ID || null,
+  });
+
+  const singleton = acquireSingletonLock();
+  if (!singleton.ok) {
+    if (singleton.duplicate) {
+      logProcessEvent("warn", "Duplicate instance blocked", {
+        lockPath: singleton.lockPath,
+        existing: singleton.existing || null,
+        hint: "One software should keep exactly one agentport index.js process. Reuse the existing instance instead of spawning another.",
+      });
+      console.error(
+        `[agentport] duplicate instance blocked (clientId=${CLIENT_ID || "default"}, existingPid=${singleton.existing?.pid || "unknown"}, lock=${singleton.lockPath})`
+      );
+      process.exit(0);
+      return;
+    }
+    logProcessEvent("error", "Singleton lock acquire failed", {
+      lockPath: singleton.lockPath,
+      reason: singleton.reason || "unknown",
+    });
+    console.error(
+      `[agentport] singleton lock failed: ${singleton.reason || "unknown"} (lock=${singleton.lockPath})`
+    );
+    process.exit(1);
+    return;
+  }
+
+  logProcessEvent("info", "Singleton lock acquired", {
+    lockPath: singleton.lockPath,
   });
   writeProcessRegistry();
 
