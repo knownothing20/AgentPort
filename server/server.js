@@ -600,6 +600,46 @@ function clientIp(req) {
   return xff || req.ip || req.socket?.remoteAddress || '-';
 }
 
+function extractTraceContext(req) {
+  const header = req.headers || {};
+  const traceId = String(
+    header['x-agentport-trace-id']
+      || header['x-trace-id']
+      || req.query?.traceId
+      || ''
+  ).trim();
+  const sessionId = String(header['x-agentport-session-id'] || '').trim();
+  const callId = String(header['x-agentport-call-id'] || '').trim();
+  const toolName = String(header['x-agentport-tool'] || '').trim();
+  return {
+    traceId: traceId || null,
+    sessionId: sessionId || null,
+    callId: callId || null,
+    toolName: toolName || null,
+  };
+}
+
+function shouldObserveConnectionPath(pathname) {
+  if (!pathname) return false;
+  if (pathname === '/healthz' || pathname === '/') return true;
+  if (pathname.startsWith('/api/connections')) return true;
+  if (pathname.startsWith('/api/connection-errors')) return true;
+  if (pathname.startsWith('/api/connection-diagnostics')) return true;
+  if (pathname.startsWith('/api/jobs')) return true;
+  if (pathname.startsWith('/api/task/')) return true;
+  if (pathname === '/api/exec' || pathname === '/api/cmd/execute' || pathname === '/api/batch') return true;
+  return false;
+}
+
+function normalizeErrorSignature(text) {
+  if (!text) return 'unknown';
+  let out = String(text).toLowerCase();
+  out = out.replace(/[0-9]+/g, '#');
+  out = out.replace(/\s+/g, ' ').trim();
+  if (!out) return 'unknown';
+  return out.slice(0, 140);
+}
+
 async function auditConnEvent(event) {
   try {
     await audit({
@@ -610,6 +650,18 @@ async function auditConnEvent(event) {
       ip: event.ip || null,
       error: event.error ? redactSensitive(event.error) : undefined,
       detail: event.detail ? redactSensitive(event.detail) : undefined,
+      method: event.method || null,
+      statusCode: (event.statusCode === null || event.statusCode === undefined || event.statusCode === '')
+        ? null
+        : (Number.isFinite(Number(event.statusCode)) ? Number(event.statusCode) : null),
+      durationMs: (event.durationMs === null || event.durationMs === undefined || event.durationMs === '')
+        ? null
+        : (Number.isFinite(Number(event.durationMs)) ? Number(event.durationMs) : null),
+      phase: event.phase || null,
+      traceId: event.traceId || null,
+      sessionId: event.sessionId || null,
+      callId: event.callId || null,
+      toolName: event.toolName || null,
     });
   } catch {}
 }
@@ -671,6 +723,40 @@ function authAdmin(req, res, next) {
   }
   return next();
 }
+
+app.use((req, res, next) => {
+  const startedAt = Date.now();
+  const trace = extractTraceContext(req);
+  const watch = shouldObserveConnectionPath(req.path) || !!trace.traceId;
+  if (watch) {
+    auditConnEvent({
+      type: 'conn.req.start',
+      ok: true,
+      path: req.path,
+      method: req.method,
+      ip: clientIp(req),
+      phase: 'request_start',
+      ...trace,
+    });
+  }
+
+  res.on('finish', () => {
+    if (!watch && res.statusCode < 400) return;
+    const ok = res.statusCode < 400;
+    auditConnEvent({
+      type: ok ? 'conn.req.end' : 'conn.req.fail',
+      ok,
+      path: req.path,
+      method: req.method,
+      ip: clientIp(req),
+      statusCode: res.statusCode,
+      durationMs: Date.now() - startedAt,
+      phase: 'request_end',
+      ...trace,
+    });
+  });
+  next();
+});
 
 app.get('/healthz', async (_req, res) => {
   const workspaceExists = await pathExists(WORKSPACE_ROOT);
@@ -1406,6 +1492,104 @@ async function readDaemonRestartEvents(limit) {
   return out;
 }
 
+function summarizeConnectionDiagnostics(entries, limitTraces) {
+  const byType = new Map();
+  const bySignature = new Map();
+  const traces = new Map();
+  let errorCount = 0;
+
+  for (const entry of entries) {
+    const type = String(entry.type || 'conn.event');
+    byType.set(type, (byType.get(type) || 0) + 1);
+
+    const traceId = entry.traceId || null;
+    if (traceId) {
+      if (!traces.has(traceId)) {
+        traces.set(traceId, {
+          traceId,
+          sessionId: entry.sessionId || null,
+          callId: entry.callId || null,
+          toolName: entry.toolName || null,
+          clientId: entry.clientId || null,
+          firstTs: entry.ts || null,
+          lastTs: entry.ts || null,
+          eventCount: 0,
+          errorCount: 0,
+          lastError: null,
+          lastPath: entry.path || null,
+          lastType: type,
+          lastStatusCode: (entry.statusCode === null || entry.statusCode === undefined || entry.statusCode === '')
+            ? null
+            : (Number.isFinite(Number(entry.statusCode)) ? Number(entry.statusCode) : null),
+        });
+      }
+      const t = traces.get(traceId);
+      t.eventCount += 1;
+      t.lastPath = entry.path || t.lastPath || null;
+      t.lastType = type;
+      if (entry.ts && (!t.firstTs || entry.ts < t.firstTs)) t.firstTs = entry.ts;
+      if (entry.ts && (!t.lastTs || entry.ts > t.lastTs)) t.lastTs = entry.ts;
+      const rawCode = entry.statusCode;
+      const code = (rawCode === null || rawCode === undefined || rawCode === '') ? NaN : Number(rawCode);
+      if (Number.isFinite(code)) t.lastStatusCode = code;
+      if (entry.error) t.lastError = redactSensitive(entry.error);
+      if (entry.ok === false || code >= 400) {
+        t.errorCount += 1;
+      }
+    }
+
+    const statusCode = Number(entry.statusCode);
+    if (entry.ok === false || statusCode >= 400 || entry.error) {
+      errorCount += 1;
+      const sig = normalizeErrorSignature(entry.error || `${type} ${entry.path || ''}`.trim());
+      const prev = bySignature.get(sig);
+      if (!prev) {
+        bySignature.set(sig, {
+          signature: sig,
+          count: 1,
+          lastTs: entry.ts || null,
+          sample: redactSensitive(entry.error || type),
+          type,
+        });
+      } else {
+        prev.count += 1;
+        if (entry.ts && (!prev.lastTs || entry.ts > prev.lastTs)) prev.lastTs = entry.ts;
+      }
+    }
+  }
+
+  const traceRows = [...traces.values()]
+    .map((row) => {
+      const firstMs = Date.parse(row.firstTs || '');
+      const lastMs = Date.parse(row.lastTs || '');
+      return {
+        ...row,
+        durationMs: Number.isFinite(firstMs) && Number.isFinite(lastMs) ? Math.max(0, lastMs - firstMs) : null,
+      };
+    })
+    .sort((a, b) => String(b.lastTs || '').localeCompare(String(a.lastTs || '')))
+    .slice(0, limitTraces);
+
+  const topErrors = [...bySignature.values()]
+    .sort((a, b) => b.count - a.count || String(b.lastTs || '').localeCompare(String(a.lastTs || '')))
+    .slice(0, 8);
+
+  const typeStats = [...byType.entries()]
+    .map(([type, count]) => ({ type, count }))
+    .sort((a, b) => b.count - a.count || a.type.localeCompare(b.type));
+
+  return {
+    totals: {
+      events: entries.length,
+      errors: errorCount,
+      traces: traceRows.length,
+    },
+    byType: typeStats,
+    topErrors,
+    recentTraces: traceRows,
+  };
+}
+
 async function collectConnectionsSnapshot(windowMinutes) {
   const sinceMs = Date.now() - windowMinutes * 60 * 1000;
   const [whoOut, sshEstablishedOut, mcpEstablishedOut, topProcOut, auditEntries] = await Promise.all([
@@ -1590,6 +1774,60 @@ app.get('/api/connection-errors', authAdmin, async (req, res) => {
 
   items.sort((a, b) => (b.ts || '').localeCompare(a.ts || ''));
   res.json({ errors: items.slice(0, limit) });
+});
+
+app.get('/api/connection-diagnostics', authAdmin, async (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit, 10) || 300, 1000);
+  const traceLimit = Math.min(parseInt(req.query.traceLimit, 10) || 20, 100);
+  const windowMinutes = Math.min(Math.max(parseInt(req.query.windowMinutes, 10) || 180, 5), 7 * 24 * 60);
+  const sinceMs = Date.now() - windowMinutes * 60 * 1000;
+
+  const raw = await readIfExists(AUDIT_LOG_PATH);
+  const lines = raw ? raw.split('\n').filter((line) => line.trim()) : [];
+  const events = [];
+
+  for (let i = lines.length - 1; i >= 0 && events.length < limit; i--) {
+    try {
+      const entry = JSON.parse(lines[i]);
+      const tsMs = Date.parse(entry.ts || '');
+      if (!Number.isFinite(tsMs) || tsMs < sinceMs) continue;
+      if (!isConnectionErrorEntry(entry) && !String(entry.type || '').startsWith('conn.req.')) continue;
+      events.push({
+        ts: entry.ts,
+        type: entry.type || 'conn.event',
+        ok: entry.ok !== false,
+        clientId: entry.clientId || null,
+        path: entry.path || null,
+        method: entry.method || null,
+        statusCode: (entry.statusCode === null || entry.statusCode === undefined || entry.statusCode === '')
+          ? null
+          : (Number.isFinite(Number(entry.statusCode)) ? Number(entry.statusCode) : null),
+        durationMs: (entry.durationMs === null || entry.durationMs === undefined || entry.durationMs === '')
+          ? null
+          : (Number.isFinite(Number(entry.durationMs)) ? Number(entry.durationMs) : null),
+        phase: entry.phase || null,
+        traceId: entry.traceId || null,
+        sessionId: entry.sessionId || null,
+        callId: entry.callId || null,
+        toolName: entry.toolName || null,
+        source: entry.source || 'audit',
+        error: entry.error ? redactSensitive(entry.error) : null,
+        detail: entry.detail ? redactSensitive(entry.detail) : null,
+      });
+    } catch {}
+  }
+
+  events.sort((a, b) => String(b.ts || '').localeCompare(String(a.ts || '')));
+  const diagnostics = summarizeConnectionDiagnostics(events, traceLimit);
+  res.json({
+    windowMinutes,
+    generatedAt: nowIso(),
+    totals: diagnostics.totals,
+    byType: diagnostics.byType,
+    topErrors: diagnostics.topErrors,
+    recentTraces: diagnostics.recentTraces,
+    recentEvents: events.slice(0, 40),
+  });
 });
 
 app.get('/api/service-status', authAdmin, async (req, res) => {

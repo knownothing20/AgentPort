@@ -112,6 +112,8 @@ let _toolCallSeq = 0;
 let _loggedBeforeExit = false;
 const PROCESS_STARTED_AT = Date.now();
 const PROCESS_SESSION_ID = `${new Date(PROCESS_STARTED_AT).toISOString()}#${process.pid}`;
+let _traceRequestSeq = 0;
+let _currentTraceContext = null;
 const RECENT_EVENTS_LIMIT = 60;
 const ACTIVE_CALL_LIMIT = 20;
 const _activeToolCalls = new Map();
@@ -145,6 +147,84 @@ function pushDiagnosticEvent(type, data = {}) {
     ...data,
   });
   while (_recentEvents.length > RECENT_EVENTS_LIMIT) _recentEvents.shift();
+}
+
+function buildTraceHeaders() {
+  const ctx = _currentTraceContext || {};
+  const base = ctx.traceBase || `${PROCESS_SESSION_ID}`;
+  const traceId = `${base}/${++_traceRequestSeq}`;
+  return {
+    "x-agentport-trace-id": traceId,
+    "x-agentport-session-id": PROCESS_SESSION_ID,
+    ...(ctx.callId ? { "x-agentport-call-id": String(ctx.callId) } : {}),
+    ...(ctx.toolName ? { "x-agentport-tool": String(ctx.toolName) } : {}),
+  };
+}
+
+function attachTraceInterceptors(client) {
+  if (!client || client.__agentportTraceAttached) return client;
+  client.__agentportTraceAttached = true;
+
+  client.interceptors.request.use((config) => {
+    const headers = buildTraceHeaders();
+    config.headers = {
+      ...(config.headers || {}),
+      ...headers,
+    };
+    config.metadata = {
+      startedAt: Date.now(),
+      traceId: headers["x-agentport-trace-id"],
+      toolName: _currentTraceContext?.toolName || null,
+      callId: _currentTraceContext?.callId || null,
+    };
+    pushDiagnosticEvent("http.request", {
+      traceId: headers["x-agentport-trace-id"],
+      method: String(config.method || "get").toUpperCase(),
+      url: config.url || "",
+      toolName: config.metadata.toolName,
+      callId: config.metadata.callId,
+    });
+    return config;
+  });
+
+  client.interceptors.response.use(
+    (response) => {
+      const metadata = response?.config?.metadata || {};
+      pushDiagnosticEvent("http.response", {
+        traceId: metadata.traceId || null,
+        status: response?.status,
+        durationMs: Number.isFinite(metadata.startedAt) ? (Date.now() - metadata.startedAt) : null,
+        url: response?.config?.url || "",
+      });
+      return response;
+    },
+    (error) => {
+      const metadata = error?.config?.metadata || {};
+      const status = error?.response?.status;
+      const code = error?.code || error?.cause?.code || null;
+      const message = error?.message || "request failed";
+      pushDiagnosticEvent("http.error", {
+        traceId: metadata.traceId || null,
+        status: Number.isFinite(status) ? status : null,
+        code,
+        durationMs: Number.isFinite(metadata.startedAt) ? (Date.now() - metadata.startedAt) : null,
+        url: error?.config?.url || "",
+        message,
+      });
+      if (isNetworkError(error)) {
+        logProcessEvent("warn", "HTTP transport error", {
+          traceId: metadata.traceId || null,
+          status: Number.isFinite(status) ? status : null,
+          code,
+          message,
+          connection: currentConnectionSummary(),
+        });
+      }
+      return Promise.reject(error);
+    }
+  );
+
+  return client;
 }
 
 function currentConnectionSummary() {
@@ -455,7 +535,7 @@ function getAxiosInstance(connectionName) {
     if (conn.type === 'ssh') {
       throw new Error('Cannot use axios for SSH connection. Use SSH client instead.');
     }
-    return axios.create({
+    return attachTraceInterceptors(axios.create({
       baseURL: conn.url.replace(/\/+$/, ''),
       timeout: REQUEST_TIMEOUT_MS,
       headers: {
@@ -463,7 +543,7 @@ function getAxiosInstance(connectionName) {
         ...(conn.clientId ? { "x-mcp-client-id": conn.clientId } : {}),
         "Content-Type": "application/json",
       },
-    });
+    }));
   }
   return axiosInstance;
 }
@@ -642,7 +722,7 @@ const server = new Server(
   }
 );
 
-const axiosInstance = axios.create({
+const axiosInstance = attachTraceInterceptors(axios.create({
   baseURL: REMOTE_URL,
   timeout: REQUEST_TIMEOUT_MS,
   headers: {
@@ -650,7 +730,7 @@ const axiosInstance = axios.create({
     ...(CLIENT_ID ? { "x-mcp-client-id": CLIENT_ID } : {}),
     "Content-Type": "application/json",
   },
-});
+}));
 
 function getArguments(request) {
   const args = request?.params?.arguments;
@@ -1100,6 +1180,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const toolName = request.params.name;
   const startTime = Date.now();
   const callId = ++_toolCallSeq;
+  const previousTraceContext = _currentTraceContext;
   let args = {};
   let caughtError = null;
   let callInfo = null;
@@ -1114,6 +1195,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       startedAt: new Date(startTime).toISOString(),
       connection: currentConnectionSummary(),
       args: argSummary,
+    };
+    _currentTraceContext = {
+      callId,
+      toolName,
+      traceBase: `${PROCESS_SESSION_ID}:${callId}`,
     };
     markToolCallStarted(callInfo);
     
@@ -2241,7 +2327,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               clientId: daemonInfo.clientId,
             };
             _currentConnection = daemonName;
-            _connectionAxios = axios.create({
+            _connectionAxios = attachTraceInterceptors(axios.create({
               baseURL: daemonInfo.url,
               timeout: REQUEST_TIMEOUT_MS,
               headers: {
@@ -2249,7 +2335,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 "x-mcp-client-id": daemonInfo.clientId,
                 "Content-Type": "application/json",
               },
-            });
+            }));
           } else {
             // Register SSH connection in memory
             _connections[name] = connConfig;
@@ -2382,6 +2468,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       isError: true,
     };
   } finally {
+    _currentTraceContext = previousTraceContext;
     const durationMs = Date.now() - startTime;
     markToolCallFinished(callId, caughtError ? "failed" : "completed", durationMs, caughtError);
     const payload = {

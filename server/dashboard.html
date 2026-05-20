@@ -75,6 +75,34 @@
     .error-time { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted); }
     .error-msg { font-size: 13px; color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .error-type { font-size: 11px; padding: 3px 8px; border-radius: 4px; background: rgba(255,71,87,0.15); color: var(--red); white-space: nowrap; }
+    .error-toggle { color: var(--muted); font-size: 11px; transition: transform 0.2s; }
+    .error-item.expandable { grid-template-columns: auto 1fr auto auto; cursor: pointer; }
+    .error-item.expandable:hover { background: rgba(255,255,255,0.02); }
+    .error-item.open .error-toggle { transform: rotate(90deg); }
+    .error-detail { display: none; padding: 10px 16px 14px 16px; border-bottom: 1px solid var(--border); color: var(--text2); font-size: 12px; font-family: 'JetBrains Mono', monospace; white-space: pre-wrap; word-break: break-word; background: rgba(255,255,255,0.01); }
+    .error-detail.open { display: block; }
+
+    .diag-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; align-items: start; }
+    .diag-channels { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 12px; }
+    .diag-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 14px; min-width: 0; }
+    .diag-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+    .diag-title { font-size: 13px; color: var(--text2); font-weight: 600; }
+    .diag-status { font-size: 11px; padding: 3px 8px; border-radius: 10px; font-weight: 600; white-space: nowrap; }
+    .diag-status.ok { background: rgba(0,255,136,0.15); color: var(--green); }
+    .diag-status.warn { background: rgba(255,165,2,0.15); color: var(--orange); }
+    .diag-status.error { background: rgba(255,71,87,0.15); color: var(--red); }
+    .diag-line { font-size: 12px; color: var(--text2); margin-bottom: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .diag-line strong { color: var(--text); font-family: 'JetBrains Mono', monospace; font-weight: 600; }
+    .diag-hint { font-size: 12px; color: var(--muted); line-height: 1.5; min-height: 34px; }
+
+    .cmd-list { display: grid; gap: 10px; }
+    .cmd-item { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 10px; }
+    .cmd-label { font-size: 12px; color: var(--text2); margin-bottom: 6px; }
+    .cmd-row { display: flex; gap: 8px; align-items: center; }
+    .cmd-code { flex: 1; min-width: 0; font-size: 12px; color: var(--text); font-family: 'JetBrains Mono', monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .cmd-btn { flex-shrink: 0; border: 1px solid var(--border); background: var(--cardh); color: var(--text); border-radius: 8px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
+    .cmd-btn:hover { border-color: var(--cyan); color: var(--cyan); }
+    .copy-status { font-size: 12px; color: var(--muted); padding-top: 4px; min-height: 18px; }
 
     .svc-item { display: flex; align-items: flex-start; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid var(--border); }
     .svc-item:last-child { border-bottom: none; }
@@ -96,13 +124,23 @@
     .svc-badge.warn { background: rgba(255,165,2,0.15); color: var(--orange); }
     .svc-badge.error { background: rgba(255,71,87,0.15); color: var(--red); }
 
+    .trace-list { max-height: 320px; overflow-y: auto; display: grid; gap: 8px; }
+    .trace-item { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+    .trace-head { display: flex; justify-content: space-between; gap: 8px; align-items: center; margin-bottom: 4px; }
+    .trace-id { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .trace-meta { font-size: 12px; color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .trace-detail { margin-top: 4px; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .trace-chip { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+    .trace-chip.warn { background: rgba(255,165,2,0.15); color: var(--orange); }
+    .trace-chip.error { background: rgba(255,71,87,0.15); color: var(--red); }
+    .trace-chip.ok { background: rgba(0,255,136,0.15); color: var(--green); }
     .loading { display: flex; align-items: center; justify-content: center; padding: 40px; color: var(--muted); }
     .spinner { width: 24px; height: 24px; border: 2px solid var(--border); border-top-color: var(--cyan); border-radius: 50%; animation: spin 1s linear infinite; margin-right: 12px; }
     @keyframes spin { to { transform: rotate(360deg); } }
     ::-webkit-scrollbar { width: 6px; }
     ::-webkit-scrollbar-track { background: var(--bg2); }
     ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-    @media (max-width:1200px){ .stats-grid{grid-template-columns:repeat(2,1fr)} .channel-grid{grid-template-columns:1fr} .bottom-grid{grid-template-columns:1fr} }
+    @media (max-width:1200px){ .stats-grid{grid-template-columns:repeat(2,1fr)} .channel-grid{grid-template-columns:1fr} .diag-grid{grid-template-columns:1fr} .diag-channels{grid-template-columns:1fr} .bottom-grid{grid-template-columns:1fr} }
   </style>
 </head>
 <body>
@@ -189,6 +227,40 @@
       </div>
     </div>
 
+    <div class="card">
+      <div class="card-header">🧭 连接诊断与恢复</div>
+      <div class="card-body">
+        <div class="diag-grid">
+          <div class="diag-channels">
+            <div class="diag-card">
+              <div class="diag-head"><div class="diag-title">Daemon 通道</div><span class="diag-status" id="diagDaemonStatus">检测中</span></div>
+              <div class="diag-line">最近断开: <strong id="diagDaemonLast">-</strong></div>
+              <div class="diag-hint" id="diagDaemonHint">等待数据...</div>
+            </div>
+            <div class="diag-card">
+              <div class="diag-head"><div class="diag-title">MCP 通道</div><span class="diag-status" id="diagMcpStatus">检测中</span></div>
+              <div class="diag-line">最近断开: <strong id="diagMcpLast">-</strong></div>
+              <div class="diag-hint" id="diagMcpHint">等待数据...</div>
+            </div>
+            <div class="diag-card">
+              <div class="diag-head"><div class="diag-title">SSH 通道</div><span class="diag-status" id="diagSshStatus">检测中</span></div>
+              <div class="diag-line">最近断开: <strong id="diagSshLast">-</strong></div>
+              <div class="diag-hint" id="diagSshHint">等待数据...</div>
+            </div>
+          </div>
+          <div>
+            <div class="cmd-list">
+              <div class="cmd-item"><div class="cmd-label">健康检查</div><div class="cmd-row"><div class="cmd-code">curl -sS http://127.0.0.1:3183/healthz</div><button class="cmd-btn" data-cmd="curl -sS http://127.0.0.1:3183/healthz" onclick="copyCmd(this.dataset.cmd)">复制</button></div></div>
+              <div class="cmd-item"><div class="cmd-label">端口监听</div><div class="cmd-row"><div class="cmd-code">ss -lntp | grep ':3183'</div><button class="cmd-btn" data-cmd="ss -lntp | grep ':3183'" onclick="copyCmd(this.dataset.cmd)">复制</button></div></div>
+              <div class="cmd-item"><div class="cmd-label">连接错误筛查</div><div class="cmd-row"><div class="cmd-code">tail -n 200 /home/YOUR_USER/.agentport/daemon/audit.log | grep -Ei 'transport closed|econnreset|timeout|unauthorized'</div><button class="cmd-btn" data-cmd="tail -n 200 /home/YOUR_USER/.agentport/daemon/audit.log | grep -Ei 'transport closed|econnreset|timeout|unauthorized'" onclick="copyCmd(this.dataset.cmd)">复制</button></div></div>
+              <div class="cmd-item"><div class="cmd-label">重启守护进程</div><div class="cmd-row"><div class="cmd-code">/home/YOUR_USER/.agentport/daemon/agentport-manager.sh restart</div><button class="cmd-btn" data-cmd="/home/YOUR_USER/.agentport/daemon/agentport-manager.sh restart" onclick="copyCmd(this.dataset.cmd)">复制</button></div></div>
+            </div>
+            <div class="copy-status" id="copyStatus"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="bottom-grid">
       <div class="card">
         <div class="card-header">⚠️ 最近错误</div>
@@ -206,15 +278,24 @@
         <div class="error-list" id="connectionErrorList"><div class="loading"><div class="spinner"></div>加载中...</div></div>
       </div>
     </div>
+    <div class="card">
+      <div class="card-header">🧪 断链诊断摘要</div>
+      <div class="card-body">
+        <div class="trace-list" id="connectionDiagPanel"><div class="loading"><div class="spinner"></div>加载中...</div></div>
+      </div>
+    </div>
+
   </div>
 
+  
   <script>
     const TOKEN=new URLSearchParams(location.search).get('token')||'';
     let currentDays=1;
     let refreshTimer=null;
-    function esc(v){return String(v??'').replace(/[&<>\"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[m]));}
+    function esc(v){return String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
     async function fetchJSON(url){return fetch(url+(TOKEN?(url.includes('?')?'&':'?')+'token='+encodeURIComponent(TOKEN):'')).then(r=>r.json())}
-    function fmtTime(iso){return new Date(iso).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}
+    function fmtTime(iso){if(!iso)return '-';const d=new Date(iso);if(Number.isNaN(d.getTime()))return '-';return d.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}
+    function fmtWhen(iso){if(!iso)return '无';const d=new Date(iso);if(Number.isNaN(d.getTime()))return '无';return d.toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'})}
     function setDays(d,btn){
       currentDays=d;
       document.querySelectorAll('.time-btn').forEach(b=>b.classList.remove('active'));
@@ -248,15 +329,118 @@
         ?procRows.map(p=>`<div class="channel-item"><div class="channel-name">#${esc(p.pid)} ${esc(p.command)}</div><div class="channel-meta">CPU ${Number(p.cpu||0).toFixed(1)}% · MEM ${Number(p.mem||0).toFixed(1)}% · T ${esc(p.threads)}</div></div>`).join('')
         :'<div class="channel-empty">暂无进程数据</div>';
     }
+
+    function classifyConnError(e){
+      const type=String((e&&e.type)||'').toLowerCase();
+      const msg=String((e&&e.error)||'').toLowerCase();
+      const text=type+' '+msg;
+      if(text.includes('daemon')||text.includes('manager.log')||text.includes('eaddrinuse')) return 'daemon';
+      if(text.includes('mcp')||text.includes('transport closed')||text.includes('x-mcp')||text.includes('client id mismatch')) return 'mcp';
+      if(text.includes('ssh')||text.includes('port 22')||text.includes('ehostunreach')||text.includes('connection refused')) return 'ssh';
+      return 'mcp';
+    }
+
+    function setDiag(channel,status,last,detail){
+      const statusEl=document.getElementById('diag'+channel+'Status');
+      const lastEl=document.getElementById('diag'+channel+'Last');
+      const hintEl=document.getElementById('diag'+channel+'Hint');
+      if(statusEl){
+        statusEl.className='diag-status '+status;
+        statusEl.textContent=status==='ok'?'正常':(status==='warn'?'波动':'异常');
+      }
+      if(lastEl) lastEl.textContent=last?fmtWhen(last):'无';
+      if(hintEl) hintEl.textContent=detail||'无异常';
+    }
+
+    function renderDiagnostics(health,conn,connErr){
+      const errors=Array.isArray(connErr&&connErr.errors)?connErr.errors:[];
+      const lastBy={daemon:null,mcp:null,ssh:null};
+      for(const e of errors){
+        const ch=classifyConnError(e);
+        if(!lastBy[ch]) lastBy[ch]=e;
+      }
+      const mcpConn=Number((((conn||{}).mcp)||{}).establishedCount||0);
+      const mcpOnline=Number((((conn||{}).mcp)||{}).activeClientsCount||0);
+      const sshConn=Number((((conn||{}).ssh)||{}).establishedCount||0);
+      const sshUsers=Number((((conn||{}).ssh)||{}).sessionsCount||0);
+
+      const daemonOk=!!(health&&health.ok);
+      const mcpWarn=(!mcpConn && !mcpOnline) || !!lastBy.mcp;
+      const sshWarn=(!sshConn && !sshUsers) || !!lastBy.ssh;
+
+      setDiag('Daemon', daemonOk ? (lastBy.daemon?'warn':'ok') : 'error', lastBy.daemon&&lastBy.daemon.ts, daemonOk ? (`PID ${health.pid||'-'} · 运行 ${Math.max(0,Math.floor((health.uptimeSec||0)/60))} 分钟`) : 'healthz 不可用');
+      setDiag('Mcp', mcpWarn ? (mcpConn||mcpOnline ? 'warn':'error') : 'ok', lastBy.mcp&&lastBy.mcp.ts, `在线 ${mcpOnline} · 连接 ${mcpConn}${lastBy.mcp?` · ${String(lastBy.mcp.error||'').slice(0,40)}`:''}`);
+      setDiag('Ssh', sshWarn ? (sshConn||sshUsers ? 'warn':'error') : 'ok', lastBy.ssh&&lastBy.ssh.ts, `会话 ${sshUsers} · 建连 ${sshConn}${lastBy.ssh?` · ${String(lastBy.ssh.error||'').slice(0,40)}`:''}`);
+    }
+
+    function renderExpandableErrors(el,rows,opts){
+      const includeClient=!!(opts&&opts.includeClient);
+      const prefix=(opts&&opts.prefix)||'err';
+      const emptyText=(opts&&opts.emptyText)||'暂无错误';
+      if(!Array.isArray(rows)||rows.length===0){
+        el.innerHTML=`<div style="text-align:center;padding:20px;color:var(--green)">✓ ${esc(emptyText)}</div>`;
+        return;
+      }
+      el.innerHTML=rows.map((e,i)=>{
+        const type=esc(e.type||'error');
+        const err=String(e.error||'');
+        const cid=includeClient&&e.clientId?`\nclientId: ${String(e.clientId)}`:'';
+        const src=includeClient&&e.source?`\nsource: ${String(e.source)}`:'';
+        const detail=esc(`${err}${cid}${src}`);
+        return `<div class="error-item expandable" onclick="toggleErrorDetail('${prefix}',${i})" id="${prefix}Row${i}"><span class="error-time">${fmtTime(e.ts)}</span><span class="error-msg" title="${esc(err)}">${esc(err)}</span><span class="error-type">${type}</span><span class="error-toggle">▸</span></div><div class="error-detail" id="${prefix}Detail${i}">${detail}</div>`;
+      }).join('');
+    }
+
+    function toggleErrorDetail(prefix,i){
+      const row=document.getElementById(prefix+'Row'+i);
+      const detail=document.getElementById(prefix+'Detail'+i);
+      if(!row||!detail)return;
+      row.classList.toggle('open');
+      detail.classList.toggle('open');
+    }
+
+    function renderConnectionDiagnostics(diag){
+      const panel=document.getElementById('connectionDiagPanel');
+      if(!panel)return;
+      const topErr=Array.isArray(diag&&diag.topErrors)?diag.topErrors:[];
+      const traces=Array.isArray(diag&&diag.recentTraces)?diag.recentTraces:[];
+      const totals=(diag&&diag.totals)||{};
+      if(!topErr.length && !traces.length){
+        panel.innerHTML='<div style="text-align:center;padding:20px;color:var(--green)">✓ 最近未发现可疑断链模式</div>';
+        return;
+      }
+      const rows=[];
+      rows.push(`<div class="trace-item"><div class="trace-head"><div class="trace-id">总览</div><span class="trace-chip ${Number(totals.errors||0)>0?'warn':'ok'}">events ${Number(totals.events||0)} / errors ${Number(totals.errors||0)}</span></div><div class="trace-meta">window ${Number(diag.windowMinutes||0)} 分钟 · traces ${Number(totals.traces||0)}</div></div>`);
+      for(const e of topErr.slice(0,5)){
+        rows.push(`<div class="trace-item"><div class="trace-head"><div class="trace-id">${esc(e.type||'conn')}</div><span class="trace-chip error">x${Number(e.count||0)}</span></div><div class="trace-detail" title="${esc(e.sample||e.signature||'')}">${esc(e.sample||e.signature||'-')}</div></div>`);
+      }
+      for(const t of traces.slice(0,5)){
+        const bad=Number(t.errorCount||0)>0;
+        rows.push(`<div class="trace-item"><div class="trace-head"><div class="trace-id" title="${esc(t.traceId||'-')}">${esc(t.traceId||'-')}</div><span class="trace-chip ${bad?'warn':'ok'}">${bad?'异常':'正常'}</span></div><div class="trace-meta">${esc(t.toolName||'-')} · call ${esc(t.callId||'-')} · ${esc(t.clientId||'-')}</div><div class="trace-detail">events ${Number(t.eventCount||0)} · err ${Number(t.errorCount||0)} · path ${esc(t.lastPath||'-')}</div></div>`);
+      }
+      panel.innerHTML=rows.join('');
+    }
+
+    function copyCmd(cmd){
+      const done=(msg)=>{ const el=document.getElementById('copyStatus'); if(el) el.textContent=msg; };
+      if(navigator.clipboard && navigator.clipboard.writeText){
+        navigator.clipboard.writeText(cmd).then(()=>done('已复制命令')).catch(()=>{ window.prompt('复制命令', cmd); done('浏览器限制，已打开手动复制'); });
+      }else{
+        window.prompt('复制命令', cmd);
+        done('浏览器限制，已打开手动复制');
+      }
+    }
+
     async function loadData(){
       try{
-        const[h,st,err,svc,conn,connErr]=await Promise.all([
+        const[h,st,err,svc,conn,connErr,connDiag]=await Promise.all([
           fetchJSON('/healthz'),
           fetchJSON('/api/stats?days='+currentDays),
           fetchJSON('/api/errors?limit=15&days='+currentDays),
           fetchJSON('/api/service-status'),
           fetchJSON('/api/connections?mcpWindowMin=5'),
-          fetchJSON('/api/connection-errors?limit=20&days='+currentDays)
+          fetchJSON('/api/connection-errors?limit=20&days='+currentDays),
+          fetchJSON('/api/connection-diagnostics?windowMinutes=180&traceLimit=30&limit=600')
         ]);
         const workspace = h.workspaceRoot || '-';
         const daemonDir = h.daemonDir || '-';
@@ -270,20 +454,9 @@
         const typeLabels={'fs.read':'文件读取','fs.write':'文件写入','fs.glob':'文件搜索','fs.grep':'内容搜索','exec':'命令执行','exec.async':'异步命令执行','exec.script':'脚本执行','batch':'批量操作','job.start':'任务启动','job.cancel':'任务取消'};
         const pt=document.getElementById('perfTable'),total=st.byType.reduce((s,t)=>s+t.count,0);
         pt.innerHTML=st.byType.map(t=>{const rate=parseFloat(t.successRate);const color=rate>=95?'var(--green)':rate>=80?'var(--orange)':'var(--red)';return`<tr><td><span class="type-badge ${t.type.split('.')[0]}">${t.type}</span></td><td style="color:var(--text2)">${typeLabels[t.type]||t.type}</td><td>${t.count}</td><td style="color:var(--text2)">${t.ok}/${t.fail}</td><td style="color:${color};font-weight:600">${t.successRate}%</td><td>${total?(t.count/total*100).toFixed(1):'0'}%</td></tr>`}).join('');
-        const el=document.getElementById('errorList');
-        if(err.errors&&err.errors.length>0)el.innerHTML=err.errors.map(e=>`<div class="error-item"><span class="error-time">${fmtTime(e.ts)}</span><span class="error-msg" title="${esc(e.error)}">${esc(e.error)}</span><span class="error-type">${esc(e.type)}</span></div>`).join('');
-        else el.innerHTML='<div style="text-align:center;padding:20px;color:var(--green)">✓ 暂无错误</div>';
 
-        const ce=document.getElementById('connectionErrorList');
-        if(connErr.errors&&connErr.errors.length>0){
-          ce.innerHTML=connErr.errors.map(e=>{
-            const cid=e.clientId?` · ${esc(e.clientId)}`:'';
-            const src=e.source?` · ${esc(e.source)}`:'';
-            return `<div class="error-item"><span class="error-time">${fmtTime(e.ts)}</span><span class="error-msg" title="${esc(e.error)}">${esc(e.error)}${cid}${src}</span><span class="error-type">${esc(e.type||'conn')}</span></div>`;
-          }).join('');
-        }else{
-          ce.innerHTML='<div style="text-align:center;padding:20px;color:var(--green)">✓ 暂无连接断开日志</div>';
-        }
+        renderExpandableErrors(document.getElementById('errorList'), err.errors||[], { emptyText: '暂无错误', includeClient: false, prefix: 'appErr' });
+        renderExpandableErrors(document.getElementById('connectionErrorList'), connErr.errors||[], { emptyText: '暂无连接断开日志', includeClient: true, prefix: 'connErr' });
 
         const ssEl=document.getElementById('serviceStatus');
         const svcItems=Object.entries(svc).filter(([k])=>k!=='disk').map(([,s])=>s);
@@ -296,7 +469,10 @@
           }
           return`<div class="svc-item"><div class="svc-main"><div class="svc-name">${esc(s.name)}</div><div class="svc-detail">${esc(s.detail||'')}</div></div><span class="svc-badge ${badge}">${label}</span></div>`;
         }).join('');
+
         renderConnections(conn);
+        renderDiagnostics(h, conn, connErr);
+        renderConnectionDiagnostics(connDiag);
       }catch(e){document.body.innerHTML='<div style="padding:40px;text-align:center;color:var(--red)">加载失败: '+esc(e.message)+'</div>'}
     }
     loadData();
@@ -309,5 +485,6 @@
       if(arrow)arrow.classList.toggle('open');
     }
   </script>
+
 </body>
 </html>
