@@ -66,6 +66,19 @@ cd agentport
 npm install
 ```
 
+### 2.1 首次接入顺序（本地 + 远端）
+
+1. 先确认目标服务器（例如 `192.168.31.183`），先测 SSH 可达。
+2. 先完成本地安装（`git clone` + `npm install`），再做远端动作。
+3. 先只读检测远端状态：daemon 目录、`.env`、进程、`3183` 端口。
+4. 若远端已存在 daemon：保持客户端模式（`deploy=false`），不要覆盖部署。
+5. 若远端不存在 daemon：仅一次首装（`deploy=true`，由一台运维机执行）。
+6. token 必须“每台机器 + 每个软件”唯一，不要跨机器复用同一个 token。
+7. 若该机器需要监控面板权限，token 还要在 `ADMIN_TOKENS` 中，并使用：
+   - `http://<host>:3183/?token=<admin-token>`
+   - `http://<host>:3183/dashboard?token=<admin-token>`
+8. 稳定性预期：原生 MCP 不稳定或出现 `Transport closed` 时，切到 `node cli.js ... --route ssh` 继续。
+
 ### 3. CLI 引导式配置（推荐）
 
 使用交互式向导自动扫描 SSH 环境，一步步引导配置：
@@ -235,8 +248,8 @@ agentport 提供 Web Dashboard 用于监控和管理：
 ### 访问 Dashboard
 
 启动服务后，访问：
-- `http://your-server:3183/`
-- `http://your-server:3183/dashboard`
+- `http://your-server:3183/?token=<admin-token>`
+- `http://your-server:3183/dashboard?token=<admin-token>`
 
 ### Dashboard 功能
 

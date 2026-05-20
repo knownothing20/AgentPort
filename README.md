@@ -191,7 +191,20 @@ cd agentport
 npm install
 ```
 
-### 2.1 Install on another computer
+### 2.1 First-Time Onboarding (Do This Order)
+
+1. Confirm target host first (example: `192.168.31.183`) and verify SSH.
+2. Finish local install (`git clone` + `npm install`) before any remote deploy action.
+3. Detect remote state first (read-only): daemon dir, `.env`, process, port `3183`.
+4. If remote daemon already exists: stay client-only (`deploy=false`) and reuse/add token safely.
+5. If remote daemon is missing: one-time bootstrap only (`deploy=true` from one operator machine).
+6. Use one unique token per `machine+software` client (`win11-codex`, `macbook-workbuddy`), never reuse one token across machines.
+7. If Dashboard is needed on this machine, ensure token is also in `ADMIN_TOKENS`, then open:
+   - `http://<host>:3183/?token=<admin-token>`
+   - `http://<host>:3183/dashboard?token=<admin-token>`
+8. Stability expectation: if native MCP is unstable or reports `Transport closed`, continue with `node cli.js ... --route ssh`.
+
+### 2.2 Install on another computer
 
 For a new computer or another AI desktop tool, see
 [INSTALL_OTHER_MACHINE.md](./INSTALL_OTHER_MACHINE.md).

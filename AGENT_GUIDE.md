@@ -56,6 +56,16 @@ Before guiding installation, always ask:
 
 Then enforce read-only detection before any deployment action.
 
+Practical setup order:
+1. Local install first (`git clone` + `npm install`).
+2. Confirm target host and SSH connectivity.
+3. Detect existing daemon state first (dir/env/process/3183).
+4. Existing daemon -> client-only (`deploy=false`), configure unique machine token.
+5. Missing daemon -> one-time bootstrap (`deploy=true`) from one operator machine.
+6. If Dashboard is required, ensure token is in `ADMIN_TOKENS` and use:
+   - `http://<host>:3183/?token=<admin-token>`
+   - `http://<host>:3183/dashboard?token=<admin-token>`
+
 Token guidance:
 - For existing daemon servers, read `AUTH_TOKENS` from remote `.env` and use an
   existing `clientId=token` pair in local `connections.json`.

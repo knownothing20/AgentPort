@@ -186,6 +186,19 @@ async function stepCollectDetails(rl, authChoice, sshInfo) {
 }
 
 // ============================================
+// Step 3.5: Confirm target and dashboard need
+// ============================================
+
+async function stepConfirmTarget(rl, details) {
+  console.log(colorize(BOLD + CYAN, "\n[Step 3.5] Confirm target and access plan\n"));
+  console.log(`  Target server: ${details.username}@${details.host}:${details.port}`);
+  const needDashboard = await ask(rl, colorize(CYAN, "  Need dashboard access on this machine? [y/N]: "));
+  return {
+    needDashboard: /^y(es)?$/i.test(needDashboard || ""),
+  };
+}
+
+// ============================================
 // Step 4: Test connection
 // ============================================
 
@@ -353,6 +366,12 @@ function stepShowNextSteps(details, connResult) {
   console.log(`     选择已保存的密钥即可自动部署\n`);
 }
 
+function printClientIdHint() {
+  console.log("  clientId naming suggestion:");
+  console.log("  - Use machine-software format, e.g. win11-codex, yoga-niuma");
+  console.log("  - Keep one token per clientId and per machine/software");
+}
+
 // ============================================
 // Main
 // ============================================
@@ -366,6 +385,7 @@ async function main() {
   try {
     const authChoice = await stepChooseAuth(rl, sshInfo);
     const details = await stepCollectDetails(rl, authChoice, sshInfo);
+    const accessPlan = await stepConfirmTarget(rl, details);
 
     const ok = await stepTestConnection(details);
     if (!ok) {
@@ -385,17 +405,30 @@ async function main() {
       console.log(colorize(YELLOW, "  Existing remote daemon detected."));
       console.log("  Recommendation: do NOT redeploy from this computer.");
       console.log(`  Token check command: ssh ${details.username}@${details.host} "grep '^AUTH_TOKENS=' ~/.agentport/daemon/.env"`);
-      console.log("  Create a NEW token for this computer/software. Do not reuse other machine tokens.");
-      console.log("  Dashboard URL format: http://<server>:3183/?token=<admin-token>");
-      console.log("  If dashboard is needed, ensure this token is also in ADMIN_TOKENS.");
+      console.log("  Create a NEW token for this computer/software.");
+      console.log(colorize(RED, "  Never reuse tokens from other computers."));
+      printClientIdHint();
+      if (accessPlan.needDashboard) {
+        console.log("  Dashboard URL format: http://<server>:3183/?token=<admin-token>");
+        console.log("  Since dashboard access is needed, ensure this token is also in ADMIN_TOKENS.");
+      } else {
+        console.log("  Dashboard access not requested; keep token in AUTH_TOKENS only unless needed later.");
+      }
     } else if (daemonState?.ok && !daemonState.hasDir) {
       console.log(colorize(YELLOW, "  Remote daemon directory not found."));
       console.log("  This looks like first-time bootstrap server.");
-      console.log("  If needed, run remote_setup with deploy=true.");
-      console.log("  Bootstrap will generate token; then save clientId/authToken locally.");
+      console.log("  First-time flow:");
+      console.log("  1) Run remote_setup with deploy=true");
+      console.log("  2) Record generated token");
+      console.log("  3) Fill back local config: clientId + authToken");
+      printClientIdHint();
+      if (accessPlan.needDashboard) {
+        console.log("  4) If dashboard is needed, add admin token and open /?token=<admin-token>");
+      }
     } else {
       console.log(colorize(YELLOW, "  Remote daemon state unknown."));
       console.log("  Run manual read-only checks before any deployment.");
+      printClientIdHint();
     }
     console.log("");
     console.log("  Safety policy:");

@@ -51,25 +51,30 @@
     .type-badge.exec { background: rgba(255,165,2,0.15); color: var(--orange); }
     .type-badge.fs { background: rgba(168,85,247,0.15); color: var(--purple); }
 
-    .channel-grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 12px; }
+    .channel-grid { display: grid; grid-template-columns: repeat(3, minmax(260px,1fr)); gap: 14px; align-items: start; }
     .channel-card { min-width: 0; background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
     .channel-head { padding: 12px 14px; border-bottom: 1px solid var(--border); font-size: 13px; color: var(--text2); font-weight: 600; letter-spacing: .2px; }
     .channel-kpi { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; padding: 12px; border-bottom: 1px solid var(--border); }
     .kpi-mini { min-width: 0; background: rgba(255,255,255,.01); border: 1px solid var(--border); border-radius: 10px; padding: 10px; }
     .kpi-mini .k { font-size: 11px; color: var(--muted); text-transform: uppercase; }
     .kpi-mini .v { margin-top: 6px; font-family: 'JetBrains Mono', monospace; font-size: 22px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .channel-list { max-height: 260px; overflow-y: auto; }
-    .channel-item { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+    .channel-list-head { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 11px; color: var(--muted); letter-spacing: .2px; text-transform: uppercase; }
+    .channel-list { max-height: 290px; overflow-y: auto; }
+    .channel-item { padding: 12px; border-bottom: 1px solid var(--border); }
     .channel-item:last-child { border-bottom: none; }
     .channel-main { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
     .channel-name { font-family: 'JetBrains Mono', monospace; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-    .channel-meta { margin-top: 4px; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .channel-meta { margin-top: 6px; font-size: 12px; color: var(--muted); line-height: 1.45; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .channel-meta .tag { color: var(--text2); margin-right: 4px; }
     .channel-badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; flex-shrink: 0; }
     .channel-badge.online { background: rgba(0,255,136,0.15); color: var(--green); }
     .channel-badge.offline { background: rgba(85,85,102,0.2); color: var(--muted); }
     .channel-empty { text-align: center; color: var(--muted); padding: 26px 10px; font-size: 12px; }
 
-    .bottom-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; align-items: start; }
+    .bottom-grid { display: grid; grid-template-columns: minmax(0,2.2fr) minmax(280px,1fr); gap: 16px; align-items: start; }
+    .bottom-grid > .card { margin-bottom: 0; }
+    .bottom-grid .card-body { height: 100%; }
+    #serviceStatus { max-height: 420px; overflow-y: auto; }
     .error-list { max-height: 420px; overflow-y: auto; }
     .error-item { padding: 12px 16px; border-bottom: 1px solid var(--border); display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center; }
     .error-time { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted); }
@@ -140,7 +145,9 @@
     ::-webkit-scrollbar { width: 6px; }
     ::-webkit-scrollbar-track { background: var(--bg2); }
     ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-    @media (max-width:1200px){ .stats-grid{grid-template-columns:repeat(2,1fr)} .channel-grid{grid-template-columns:1fr} .diag-grid{grid-template-columns:1fr} .diag-channels{grid-template-columns:1fr} .bottom-grid{grid-template-columns:1fr} }
+    @media (max-width:1400px){ .channel-grid{grid-template-columns:repeat(2,minmax(0,1fr));} .diag-channels{grid-template-columns:repeat(2,minmax(0,1fr));} }
+    @media (max-width:1200px){ .stats-grid{grid-template-columns:repeat(2,1fr)} .diag-grid{grid-template-columns:1fr} .bottom-grid{grid-template-columns:1fr} }
+    @media (max-width:900px){ .channel-grid{grid-template-columns:1fr} .diag-channels{grid-template-columns:1fr} .channel-list-head{display:none;} .bottom-grid > .card { margin-bottom: 24px; } }
   </style>
 </head>
 <body>
@@ -313,6 +320,22 @@
       document.getElementById('kpiMcpConn').textContent=mcp.establishedCount??0;
       document.getElementById('kpiProc').textContent=proc.totalProcesses??0;
       document.getElementById('kpiThread').textContent=proc.totalThreads??0;
+      const ensureListHead=(listId,leftLabel,rightLabel)=>{
+        const listEl=document.getElementById(listId);
+        if(!listEl || !listEl.parentElement) return;
+        const prev=listEl.previousElementSibling;
+        if(prev && prev.classList && prev.classList.contains('channel-list-head')){
+          prev.innerHTML=`<span>${esc(leftLabel)}</span><span>${esc(rightLabel)}</span>`;
+          return;
+        }
+        const head=document.createElement('div');
+        head.className='channel-list-head';
+        head.innerHTML=`<span>${esc(leftLabel)}</span><span>${esc(rightLabel)}</span>`;
+        listEl.parentElement.insertBefore(head,listEl);
+      };
+      ensureListHead('sshSessionsList','session','state');
+      ensureListHead('mcpClientsConnList','client','state');
+      ensureListHead('topProcList','process','usage');
 
       const sshRows=Array.isArray(ssh.sessions)?ssh.sessions:[];
       document.getElementById('sshSessionsList').innerHTML=sshRows.length
