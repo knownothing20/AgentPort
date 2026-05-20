@@ -1,5 +1,18 @@
 # Changelog
 
+## [2026-05-20] fix | Per-software single core + multi-session proxy
+
+### Added
+- Added a local singleton broker inside `index.js` for each software/client instance key. The lock owner now starts a localhost broker and publishes broker metadata in the lock file.
+- Added duplicate-process proxy mode: when a second MCP stdio process starts for the same software, it no longer exits immediately; it attaches to the owner broker and forwards `tools/list` and `tools/call`.
+- Added lock metadata field `broker` (`url`, `token`, `port`, `startedAt`) so sibling processes can discover and reuse the owner instance.
+
+### Changed
+- Changed singleton behavior from "hard block duplicate" to "single core + proxy fan-in", preserving multi-session usability while keeping one stateful core instance per software key.
+- Kept strict duplicate block as fallback when an owner lock exists but no reachable broker is available.
+
+---
+
 ## [2026-05-20] feat | Connection trace diagnostics for Transport closed
 
 ### Added

@@ -7,6 +7,8 @@ import {
 import axios from "axios";
 import fs from "fs";
 import path from "path";
+import http from "http";
+import { randomBytes } from "crypto";
 import { SSHClient, SSHConnectionManager } from "./ssh-client.js";
 import { scanLocalSSH, formatSSHScanSummary } from "./ssh-scanner.js";
 import logger from "./logger.js";
@@ -115,6 +117,8 @@ const PROCESS_SESSION_ID = `${new Date(PROCESS_STARTED_AT).toISOString()}#${proc
 let _traceRequestSeq = 0;
 let _currentTraceContext = null;
 let _singletonLockPath = null;
+let _singletonBroker = null;
+let _proxyBroker = null;
 const SINGLETON_RUNTIME_DIR = path.join(__dirname, "local", "runtime");
 const SINGLETON_LOCK_PREFIX = "instance";
 const RECENT_EVENTS_LIMIT = 60;
@@ -383,6 +387,7 @@ function getSingletonLockPath() {
 }
 
 function releaseSingletonLock() {
+  stopSingletonBroker();
   if (!_singletonLockPath) return;
   try {
     if (!fs.existsSync(_singletonLockPath)) {
@@ -446,6 +451,7 @@ function acquireSingletonLock() {
           sessionId: existing?.sessionId || null,
           startedAt: existing?.startedAt || null,
           clientId: existing?.clientId || null,
+          broker: existing?.broker || null,
         },
       };
     }
@@ -899,6 +905,183 @@ function toTextResult(text) {
   };
 }
 
+function writeJsonResponse(res, statusCode, payload) {
+  res.statusCode = statusCode;
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.end(JSON.stringify(payload));
+}
+
+function randomToken() {
+  return randomBytes(20).toString("hex");
+}
+
+function readJsonBody(req, maxBytes = 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    let total = 0;
+    const chunks = [];
+    req.on("data", (chunk) => {
+      total += chunk.length;
+      if (total > maxBytes) {
+        reject(new Error(`Body too large (>${maxBytes} bytes)`));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      const raw = Buffer.concat(chunks).toString("utf-8").trim();
+      if (!raw) {
+        resolve({});
+        return;
+      }
+      try {
+        resolve(JSON.parse(raw));
+      } catch (error) {
+        reject(new Error(`Invalid JSON body: ${errorMessage(error)}`));
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+function updateSingletonLockFile(update = {}) {
+  if (!_singletonLockPath) return false;
+  try {
+    const currentText = fs.readFileSync(_singletonLockPath, "utf-8").replace(/^\uFEFF/, "");
+    const current = JSON.parse(currentText);
+    if (Number(current?.pid) !== process.pid) return false;
+    const next = {
+      ...current,
+      ...update,
+      updatedAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(_singletonLockPath, JSON.stringify(next, null, 2), "utf-8");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function getProxyBrokerHeaders() {
+  if (!_proxyBroker?.token) return {};
+  return { "x-agentport-broker-token": _proxyBroker.token };
+}
+
+async function proxyListToolsRequest() {
+  if (!_proxyBroker?.url) throw new Error("Proxy broker is not configured.");
+  const response = await axios.get(`${_proxyBroker.url}/mcp-tools`, {
+    timeout: Math.min(REQUEST_TIMEOUT_MS, 30000),
+    headers: getProxyBrokerHeaders(),
+  });
+  return response.data;
+}
+
+async function proxyCallToolRequest(name, args) {
+  if (!_proxyBroker?.url) throw new Error("Proxy broker is not configured.");
+  const response = await axios.post(
+    `${_proxyBroker.url}/mcp-call`,
+    { name, arguments: args || {} },
+    {
+      timeout: REQUEST_TIMEOUT_MS,
+      headers: {
+        "content-type": "application/json",
+        ...getProxyBrokerHeaders(),
+      },
+    }
+  );
+  return response.data;
+}
+
+async function startSingletonBroker() {
+  if (_singletonBroker?.server) return _singletonBroker;
+
+  const authToken = randomToken();
+  const localServer = http.createServer(async (req, res) => {
+    try {
+      const url = new URL(req.url || "/", "http://127.0.0.1");
+      const token = req.headers["x-agentport-broker-token"] || url.searchParams.get("token");
+      if (token !== authToken) {
+        writeJsonResponse(res, 401, { ok: false, error: "unauthorized" });
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/health") {
+        writeJsonResponse(res, 200, { ok: true, pid: process.pid, sessionId: PROCESS_SESSION_ID });
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/mcp-tools") {
+        const handler = server?._requestHandlers?.get("tools/list");
+        if (typeof handler !== "function") {
+          writeJsonResponse(res, 500, { ok: false, error: "tools/list handler unavailable" });
+          return;
+        }
+        const result = await handler({ method: "tools/list", params: {} }, { sessionId: `broker:${PROCESS_SESSION_ID}` });
+        writeJsonResponse(res, 200, result || { tools: [] });
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/mcp-call") {
+        const body = await readJsonBody(req, 2 * 1024 * 1024);
+        const toolName = typeof body?.name === "string" ? body.name : "";
+        const toolArgs = body?.arguments && typeof body.arguments === "object" ? body.arguments : {};
+        if (!toolName) {
+          writeJsonResponse(res, 400, { ok: false, error: "name is required" });
+          return;
+        }
+        const handler = server?._requestHandlers?.get("tools/call");
+        if (typeof handler !== "function") {
+          writeJsonResponse(res, 500, { ok: false, error: "tools/call handler unavailable" });
+          return;
+        }
+        const result = await handler(
+          {
+            method: "tools/call",
+            params: {
+              name: toolName,
+              arguments: toolArgs,
+            },
+          },
+          { sessionId: `broker:${PROCESS_SESSION_ID}` }
+        );
+        writeJsonResponse(res, 200, result || toTextResult(""));
+        return;
+      }
+
+      writeJsonResponse(res, 404, { ok: false, error: "not found" });
+    } catch (error) {
+      writeJsonResponse(res, 500, { ok: false, error: errorMessage(error) });
+    }
+  });
+
+  await new Promise((resolve, reject) => {
+    localServer.once("error", reject);
+    localServer.listen(0, "127.0.0.1", () => resolve());
+  });
+
+  const address = localServer.address();
+  const port = typeof address === "object" && address ? address.port : null;
+  if (!port) throw new Error("Failed to allocate local broker port.");
+
+  _singletonBroker = {
+    token: authToken,
+    port,
+    url: `http://127.0.0.1:${port}`,
+    server: localServer,
+    startedAt: new Date().toISOString(),
+  };
+  return _singletonBroker;
+}
+
+function stopSingletonBroker() {
+  const broker = _singletonBroker;
+  _singletonBroker = null;
+  if (!broker?.server) return;
+  try {
+    broker.server.close();
+  } catch {}
+}
+
 function normalizeGlobEntries(data) {
   if (Array.isArray(data?.entries)) return data.entries;
   if (Array.isArray(data?.files)) return data.files;
@@ -961,8 +1144,20 @@ function formatExecOutput(data) {
   return chunks.join("\n\n").trim() || "Command executed successfully with no output.";
 }
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  if (_proxyBroker) {
+    try {
+      return await proxyListToolsRequest();
+    } catch (error) {
+      logProcessEvent("warn", "Proxy tools/list failed, fallback to local handlers", {
+        error: errorMessage(error),
+        broker: _proxyBroker,
+      });
+    }
+  }
+
+  return {
+    tools: [
     {
       name: "remote_connect",
       description: "Switch remote connection target. View available connections or switch to a specific one.",
@@ -1275,8 +1470,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: [],
       },
     },
-  ],
-}));
+    ],
+  };
+});
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const toolName = request.params.name;
@@ -1312,6 +1508,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         connection: callInfo.connection,
         args: argSummary,
       });
+    }
+
+    if (_proxyBroker) {
+      try {
+        return await proxyCallToolRequest(toolName, args);
+      } catch (error) {
+        logProcessEvent("warn", "Proxy tools/call failed, fallback to local handlers", {
+          toolName,
+          error: errorMessage(error),
+          broker: _proxyBroker,
+        });
+      }
     }
 
     switch (toolName) {
@@ -2634,32 +2842,96 @@ async function main() {
   const singleton = acquireSingletonLock();
   if (!singleton.ok) {
     if (singleton.duplicate) {
-      logProcessEvent("warn", "Duplicate instance blocked", {
+      const broker = singleton.existing?.broker;
+      if (broker?.url && broker?.token) {
+        _proxyBroker = {
+          url: broker.url,
+          token: broker.token,
+          pid: singleton.existing?.pid || null,
+          sessionId: singleton.existing?.sessionId || null,
+          lockPath: singleton.lockPath,
+        };
+        try {
+          await axios.get(`${broker.url}/health`, {
+            timeout: 3000,
+            headers: { "x-agentport-broker-token": broker.token },
+          });
+          logProcessEvent("warn", "Duplicate instance switched to proxy mode", {
+            lockPath: singleton.lockPath,
+            existing: singleton.existing || null,
+            proxyBroker: _proxyBroker,
+          });
+        } catch (error) {
+          _proxyBroker = null;
+          logProcessEvent("warn", "Duplicate instance found but broker unavailable", {
+            lockPath: singleton.lockPath,
+            existing: singleton.existing || null,
+            error: errorMessage(error),
+          });
+        }
+      }
+
+      if (_proxyBroker) {
+        console.error(
+          `[agentport] duplicate instance proxy mode enabled (clientId=${CLIENT_ID || "default"}, ownerPid=${singleton.existing?.pid || "unknown"}, broker=${_proxyBroker.url})`
+        );
+      } else {
+        logProcessEvent("warn", "Duplicate instance blocked", {
+          lockPath: singleton.lockPath,
+          existing: singleton.existing || null,
+          hint: "Owner instance has no proxy broker yet. Close stale process or restart agentport.",
+        });
+        console.error(
+          `[agentport] duplicate instance blocked (clientId=${CLIENT_ID || "default"}, existingPid=${singleton.existing?.pid || "unknown"}, lock=${singleton.lockPath})`
+        );
+        process.exit(0);
+        return;
+      }
+
+      logProcessEvent("info", "Running as proxy process", {
         lockPath: singleton.lockPath,
-        existing: singleton.existing || null,
-        hint: "One software should keep exactly one agentport index.js process. Reuse the existing instance instead of spawning another.",
+        proxyBroker: _proxyBroker,
+      });
+      writeProcessRegistry();
+    } else {
+      logProcessEvent("error", "Singleton lock acquire failed", {
+        lockPath: singleton.lockPath,
+        reason: singleton.reason || "unknown",
       });
       console.error(
-        `[agentport] duplicate instance blocked (clientId=${CLIENT_ID || "default"}, existingPid=${singleton.existing?.pid || "unknown"}, lock=${singleton.lockPath})`
+        `[agentport] singleton lock failed: ${singleton.reason || "unknown"} (lock=${singleton.lockPath})`
       );
-      process.exit(0);
+      process.exit(1);
       return;
     }
-    logProcessEvent("error", "Singleton lock acquire failed", {
+  } else {
+    logProcessEvent("info", "Singleton lock acquired", {
       lockPath: singleton.lockPath,
-      reason: singleton.reason || "unknown",
     });
-    console.error(
-      `[agentport] singleton lock failed: ${singleton.reason || "unknown"} (lock=${singleton.lockPath})`
-    );
-    process.exit(1);
-    return;
+    try {
+      const broker = await startSingletonBroker();
+      updateSingletonLockFile({
+        broker: {
+          url: broker.url,
+          token: broker.token,
+          port: broker.port,
+          startedAt: broker.startedAt,
+        },
+      });
+      logProcessEvent("info", "Singleton broker started", {
+        broker: {
+          url: broker.url,
+          port: broker.port,
+        },
+      });
+    } catch (error) {
+      logProcessEvent("error", "Failed to start singleton broker", {
+        error: errorMessage(error),
+      });
+      console.error(`[agentport] failed to start singleton broker: ${errorMessage(error)}`);
+    }
+    writeProcessRegistry();
   }
-
-  logProcessEvent("info", "Singleton lock acquired", {
-    lockPath: singleton.lockPath,
-  });
-  writeProcessRegistry();
 
   // Initialize connection manager
   const defaultConn = loadConnections();
