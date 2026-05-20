@@ -1,5 +1,22 @@
 # Changelog
 
+## [2026-05-20] feat | SSH-first CLI route and diagnostics
+
+### Added
+- Added `node cli.js ssh-health` to force an SSH path health probe even when the current default connection is daemon-based.
+- Added `--route ssh|daemon|auto` route selection support so one-off commands can explicitly choose the transport channel.
+- Added structured `--json` error output with fallback guidance for transport failures such as `Transport closed`.
+- Added SSH route job support in CLI: `job start/status/logs/cancel/list` now works through `--route ssh`, with remote job state persisted under `~/.agentport/cli-jobs`.
+- Added SSH job idempotency key support: `node cli.js job start "<cmd>" --route ssh --key <stable-key>`.
+
+### Changed
+- Updated CLI status and doctor recommendations to prefer `ssh-first` as the baseline route, then daemon jobs, then native MCP convenience.
+- Extended `read` and `bash` commands to return richer structured payloads in `--json` mode (`mode`, `path`, `command`, `cwd`).
+- Updated README integration guidance and examples to match SSH-first operation.
+- Added automatic daemon-to-SSH fallback in CLI for transport-level failures (`Transport closed`, `ECONNRESET`, `ETIMEDOUT`, etc.) when route is `auto`.
+
+---
+
 ## [2026-05-19] docs | Reposition as remote development gateway
 
 ### Changed

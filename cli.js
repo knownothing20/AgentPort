@@ -20,7 +20,20 @@ function printJson(value) {
   print(JSON.stringify(value, null, 2));
 }
 
-function fail(message, code = 1) {
+function fail(message, code = 1, args = null) {
+  if (args?.json) {
+    const text = String(message || "Unknown error");
+    const hint = /Transport closed|ECONNRESET|EPIPE|ETIMEDOUT|ECONNABORTED/i.test(text)
+      ? "Native MCP or daemon transport is unstable. Retry with --route ssh or switch to an SSH connection."
+      : "Run `node cli.js doctor --json` to inspect route health.";
+    printJson({
+      ok: false,
+      error: text,
+      fallback: hint,
+    });
+    process.exitCode = code;
+    return;
+  }
   process.stderr.write(`${message}\n`);
   process.exitCode = code;
 }
@@ -99,6 +112,24 @@ function selectConnection(options = {}) {
   const explicit = options.connection || process.env.MCP_REMOTE_CONNECTION || process.env.NIUMA_SSH_CONNECTION;
   const stateCurrent = getState().current;
   const wanted = explicit || stateCurrent || defaultName;
+  const route = String(options.route || "").toLowerCase();
+  const wantsSsh = route === "ssh" || route === "openssh";
+  const wantsDaemon = route === "daemon";
+
+  if (wantsSsh || wantsDaemon) {
+    if (wanted && byName.has(wanted)) {
+      const chosen = byName.get(wanted);
+      const chosenType = chosen.type || "daemon";
+      if ((wantsSsh && chosenType === "ssh") || (wantsDaemon && chosenType === "daemon")) return chosen;
+    }
+    const fallback = connections.find((conn) => {
+      const type = conn.type || "daemon";
+      return wantsSsh ? type === "ssh" : type === "daemon";
+    });
+    if (fallback) return fallback;
+    throw new Error(`No ${wantsSsh ? "SSH" : "daemon"} connection found in ${CONNECTIONS_PATH}.`);
+  }
+
   if (wanted && byName.has(wanted)) return byName.get(wanted);
   if (connections.length === 0) {
     throw new Error(`No connections found. Create ${CONNECTIONS_PATH} first.`);
@@ -116,6 +147,32 @@ function listArg(value, fallback) {
     return value.split(",").map((item) => item.trim()).filter(Boolean);
   }
   return fallback;
+}
+
+function shellSingleQuote(value) {
+  return `'${String(value).replace(/'/g, `'\"'\"'`)}'`;
+}
+
+function isTransportError(error) {
+  const text = String(error?.message || error || "");
+  return /Transport closed|ECONNRESET|EPIPE|ETIMEDOUT|ECONNABORTED|socket hang up|connect ECONNREFUSED/i.test(text);
+}
+
+function sshJobRootPath() {
+  return "~/.agentport/cli-jobs";
+}
+
+function normalizeJobId(text) {
+  return String(text || "").trim();
+}
+
+function sanitizeKey(value) {
+  return String(value || "").trim().replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
+function randomJobId(prefix = "ssh") {
+  const rand = Math.random().toString(36).slice(2, 8);
+  return `${prefix}-${Date.now()}-${rand}`;
 }
 
 function positiveInt(value, fallback, min = 1, max = 5000) {
@@ -241,7 +298,30 @@ async function withConnection(options, fn) {
       client.disconnect();
     }
   }
-  return fn({ type: "daemon", conn, http: daemonClient(conn) });
+  const daemonCtx = { type: "daemon", conn, http: daemonClient(conn) };
+  try {
+    return await fn(daemonCtx);
+  } catch (error) {
+    const route = String(options.route || "auto").toLowerCase();
+    const canFallback = route !== "daemon" && isTransportError(error);
+    if (!canFallback) throw error;
+
+    const sshConn = fallbackSshConnection(conn, options);
+    if (!sshConn) throw error;
+
+    const sshClient = new SSHClient(sshConn);
+    try {
+      return await fn({
+        type: "ssh",
+        conn: sshConn,
+        ssh: sshClient,
+        fallbackFrom: "daemon",
+        fallbackReason: String(error?.message || error),
+      });
+    } finally {
+      sshClient.disconnect();
+    }
+  }
 }
 
 async function checkDaemon(conn) {
@@ -316,6 +396,15 @@ async function commandConnect(args) {
 async function commandHealth(args) {
   const conn = selectConnection(args);
   const result = (conn.type || "daemon") === "ssh" ? await checkSsh(conn) : await checkDaemon(conn);
+  result.route = (conn.type || "daemon") === "ssh" ? "ssh" : "daemon";
+  printJson(result);
+}
+
+async function commandSshHealth(args) {
+  const conn = selectConnection({ ...args, route: "ssh" });
+  const result = await checkSsh(conn);
+  result.route = "ssh";
+  result.recommendedOrder = ["ssh-first", "daemon-job", "native-mcp"];
   printJson(result);
 }
 
@@ -331,7 +420,7 @@ async function commandStatus(args) {
       role: "convenience entrypoint",
       fallback: "If native remote_* tools return Transport closed, keep working with this CLI.",
     },
-    recommendedOrder: ["cli-daemon", "cli-job", "cli-ssh-recovery", "native-mcp"],
+    recommendedOrder: ["ssh-first", "daemon-job", "native-mcp"],
   };
 
   if ((conn.type || "daemon") === "ssh") {
@@ -340,12 +429,12 @@ async function commandStatus(args) {
       read: true,
       write: true,
       bash: true,
-      jobs: false,
-      jobLogs: false,
-      jobCancel: false,
+      jobs: true,
+      jobLogs: true,
+      jobCancel: true,
       config: false,
     };
-    result.note = "SSH mode is the recovery channel. Persistent jobs require a daemon connection.";
+    result.note = "SSH route now supports lightweight persistent jobs for transport recovery.";
     printJson(result);
     return;
   }
@@ -405,10 +494,31 @@ async function commandDoctor() {
     nativeMcpPriority: "Native remote_* MCP tools are convenient, but this CLI is the stable fallback when stdio transport closes.",
     cli: { available: true, node: process.version, cwd: __dirname },
     config: { path: CONNECTIONS_PATH, default: defaultName || null, current: getState().current || null },
-    recommendedOrder: ["cli-daemon", "cli-job", "cli-ssh-recovery", "native-mcp", "http-curl", "manual"],
-    transportPolicy: "When native MCP returns Transport closed, switch to CLI daemon jobs. Use SSH to recover the daemon or run one-off diagnostics.",
+    recommendedOrder: ["ssh-first", "daemon-job", "native-mcp", "http-curl", "manual"],
+    transportPolicy: "When native MCP returns Transport closed, switch to SSH route first. Use daemon jobs for persistent tasks.",
     results,
   });
+}
+
+function fallbackSshConnection(primaryConn, options = {}) {
+  const { connections, byName } = loadConnections();
+  const explicit = options.connection || process.env.MCP_REMOTE_CONNECTION || process.env.NIUMA_SSH_CONNECTION;
+  const primaryName = primaryConn?.name || "";
+  const baseName = primaryName.endsWith("-agentport-daemon")
+    ? primaryName.slice(0, -"-agentport-daemon".length)
+    : primaryName;
+
+  if (explicit && byName.has(explicit)) {
+    const selected = byName.get(explicit);
+    if ((selected.type || "daemon") === "ssh") return selected;
+  }
+
+  if (baseName && byName.has(baseName)) {
+    const paired = byName.get(baseName);
+    if ((paired.type || "daemon") === "ssh") return paired;
+  }
+
+  return connections.find((conn) => (conn.type || "daemon") === "ssh") || null;
 }
 
 async function commandRead(args) {
@@ -416,10 +526,19 @@ async function commandRead(args) {
   if (!targetPath) throw new Error("Usage: node cli.js read <remote-path> [--connection name]");
   await withConnection(args, async ({ type, http, ssh }) => {
     if (type === "ssh") {
-      print(await ssh.readFile(targetPath));
+      const content = await ssh.readFile(targetPath);
+      if (args.json) {
+        printJson({ ok: true, mode: "ssh", path: targetPath, content });
+        return;
+      }
+      print(content);
       return;
     }
     const data = await postWithFallback(http, ["/api/fs/read", "/read"], { path: targetPath });
+    if (args.json) {
+      printJson({ ok: true, mode: "daemon", path: targetPath, etag: data.etag, content: data.content ?? "" });
+      return;
+    }
     print(data.content ?? "");
   });
 }
@@ -534,7 +653,7 @@ async function commandBash(args) {
       ? await ssh.exec(command, { cwd: args.cwd })
       : await postWithFallback(http, ["/api/exec", "/bash", "/api/cmd/execute"], { command, cwd: args.cwd });
     if (args.json) {
-      printJson(data);
+      printJson({ ok: true, mode: type, command, cwd: args.cwd || null, ...data });
       return;
     }
     if (data.stdout) print(data.stdout.replace(/\s+$/, ""));
@@ -543,22 +662,138 @@ async function commandBash(args) {
   });
 }
 
-function unsupportedSshJobs() {
+async function buildSshJobContext(ssh, jobId) {
+  const root = await ssh.resolveRemotePath(sshJobRootPath());
   return {
-    ok: false,
-    mode: "ssh",
-    unsupported: true,
-    message: "SSH mode is for recovery and one-off commands. Persistent jobs require a daemon connection.",
+    root,
+    jobId: normalizeJobId(jobId),
+    jobDir: `${root}/${normalizeJobId(jobId)}`,
+    keysDir: `${root}/keys`,
   };
+}
+
+async function readRemoteOptional(ssh, filePath) {
+  try {
+    return await ssh.readFile(filePath);
+  } catch {
+    return null;
+  }
+}
+
+async function readSshJobStatus(ssh, jobId) {
+  const ctx = await buildSshJobContext(ssh, jobId);
+  const exists = await ssh.exists(ctx.jobDir);
+  if (!exists) {
+    return { ok: false, mode: "ssh", route: "ssh", jobId: ctx.jobId, status: "not_found", error: "job not found" };
+  }
+
+  const pidRaw = await readRemoteOptional(ssh, `${ctx.jobDir}/pid`);
+  const exitRaw = await readRemoteOptional(ssh, `${ctx.jobDir}/exit_code`);
+  const canceledAtRaw = await readRemoteOptional(ssh, `${ctx.jobDir}/canceled_at`);
+  const startedAtRaw = await readRemoteOptional(ssh, `${ctx.jobDir}/started_at`);
+  const finishedAtRaw = await readRemoteOptional(ssh, `${ctx.jobDir}/finished_at`);
+  const commandRaw = await readRemoteOptional(ssh, `${ctx.jobDir}/command.txt`);
+  const cwdRaw = await readRemoteOptional(ssh, `${ctx.jobDir}/cwd.txt`);
+
+  const pid = normalizeJobId(pidRaw);
+  const exitCodeText = normalizeJobId(exitRaw);
+  let running = false;
+  if (pid) {
+    const probe = await ssh.exec(`if kill -0 ${shellSingleQuote(pid)} 2>/dev/null; then echo running; else echo stopped; fi`);
+    running = probe.stdout.trim() === "running";
+  }
+
+  let status = "unknown";
+  if (running) status = "running";
+  else if (normalizeJobId(canceledAtRaw)) status = "canceled";
+  else if (exitCodeText !== "") status = Number(exitCodeText) === 0 ? "completed" : "failed";
+
+  return {
+    ok: true,
+    mode: "ssh",
+    route: "ssh",
+    jobId: ctx.jobId,
+    status,
+    pid: pid || null,
+    exitCode: exitCodeText === "" ? null : Number(exitCodeText),
+    canceledAt: normalizeJobId(canceledAtRaw) || null,
+    startedAt: normalizeJobId(startedAtRaw) || null,
+    finishedAt: normalizeJobId(finishedAtRaw) || null,
+    cwd: normalizeJobId(cwdRaw) || null,
+    command: commandRaw ? commandRaw.trimEnd() : null,
+    paths: {
+      jobDir: ctx.jobDir,
+      stdout: `${ctx.jobDir}/stdout.log`,
+      stderr: `${ctx.jobDir}/stderr.log`,
+    },
+  };
+}
+
+async function listSshJobIds(ssh, limit = 20) {
+  const root = await ssh.resolveRemotePath(sshJobRootPath());
+  await ssh.exec(`mkdir -p ${JSON.stringify(root)}`);
+  const safeRoot = shellSingleQuote(root);
+  const safeLimit = Math.max(1, Number(limit) || 20);
+  const listCmd = `if [ -d ${safeRoot} ]; then for d in ${safeRoot}/*; do [ -d "$d" ] || continue; b=$(basename "$d"); [ "$b" = "keys" ] && continue; echo "$b"; done | sort | tail -n ${safeLimit}; fi`;
+  const result = await ssh.exec(listCmd);
+  return result.stdout.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
 }
 
 async function commandJobStart(args) {
   const command = args.command || args._.slice(2).join(" ");
   if (!command) throw new Error("Usage: node cli.js job start <command> [--cwd path]");
-  await withConnection(args, async ({ type, http }) => {
+  await withConnection(args, async ({ type, http, ssh }) => {
     if (type === "ssh") {
-      printJson(unsupportedSshJobs());
-      process.exitCode = 2;
+      const root = await ssh.resolveRemotePath(sshJobRootPath());
+      const keysDir = `${root}/keys`;
+      await ssh.exec(`mkdir -p ${JSON.stringify(root)} ${JSON.stringify(keysDir)}`);
+
+      const key = args.key ? sanitizeKey(args.key) : "";
+      if (key) {
+        const keyFile = `${keysDir}/${key}.job`;
+        if (await ssh.exists(keyFile)) {
+          const existingJobId = normalizeJobId(await ssh.readFile(keyFile));
+          if (existingJobId) {
+            const existing = await readSshJobStatus(ssh, existingJobId);
+            printJson({ ...existing, reused: true, key });
+            return;
+          }
+        }
+      }
+
+      const jobId = randomJobId("ssh");
+      const ctx = await buildSshJobContext(ssh, jobId);
+      await ssh.exec(`mkdir -p ${JSON.stringify(ctx.jobDir)}`);
+
+      const runCommand = args.cwd
+        ? `cd ${JSON.stringify(args.cwd)} && ${command}`
+        : command;
+
+      const runnerPath = `${ctx.jobDir}/runner.sh`;
+      const runnerScript = [
+        "#!/usr/bin/env bash",
+        "set +e",
+        `bash -lc ${JSON.stringify(runCommand)} > ${JSON.stringify(`${ctx.jobDir}/stdout.log`)} 2> ${JSON.stringify(`${ctx.jobDir}/stderr.log`)}`,
+        "code=$?",
+        `printf '%s' \"$code\" > ${JSON.stringify(`${ctx.jobDir}/exit_code`)}`,
+        `date -Is > ${JSON.stringify(`${ctx.jobDir}/finished_at`)}`,
+      ].join("\n") + "\n";
+
+      await ssh.writeFile(`${ctx.jobDir}/command.txt`, command.endsWith("\n") ? command : `${command}\n`);
+      if (args.cwd) await ssh.writeFile(`${ctx.jobDir}/cwd.txt`, `${args.cwd}\n`);
+      await ssh.writeFile(`${ctx.jobDir}/started_at`, `${new Date().toISOString()}\n`);
+      await ssh.writeFile(runnerPath, runnerScript);
+      await ssh.exec(`chmod +x ${JSON.stringify(runnerPath)}`);
+
+      const launch = await ssh.exec(`nohup ${JSON.stringify(runnerPath)} >/dev/null 2>&1 & echo $!`);
+      const pid = normalizeJobId(launch.stdout);
+      if (pid) await ssh.writeFile(`${ctx.jobDir}/pid`, `${pid}\n`);
+      if (key) {
+        await ssh.writeFile(`${ctx.keysDir}/${key}.job`, `${jobId}\n`);
+      }
+
+      const created = await readSshJobStatus(ssh, jobId);
+      printJson({ ...created, key: key || undefined });
       return;
     }
     const data = await postWithFallback(http, ["/api/jobs", "/api/jobs/start", "/api/exec/async"], {
@@ -572,10 +807,9 @@ async function commandJobStart(args) {
 async function commandJobStatus(args) {
   const jobId = args._[2] || args.jobId || args.id;
   if (!jobId) throw new Error("Usage: node cli.js job status <job-id>");
-  await withConnection(args, async ({ type, http }) => {
+  await withConnection(args, async ({ type, http, ssh }) => {
     if (type === "ssh") {
-      printJson(unsupportedSshJobs());
-      process.exitCode = 2;
+      printJson(await readSshJobStatus(ssh, jobId));
       return;
     }
     const data = await getWithFallback(http, [`/api/jobs/${encodeURIComponent(jobId)}`, `/api/task/${encodeURIComponent(jobId)}`]);
@@ -588,10 +822,36 @@ async function commandJobLogs(args) {
   if (!jobId) throw new Error("Usage: node cli.js job logs <job-id> [--tail 200]");
   const tailLines = positiveInt(args.tail || args.lines, 200, 1, 10000);
   const tailBytes = positiveInt(args.tailBytes || args.bytes, 64 * 1024, 1024, 5 * 1024 * 1024);
-  await withConnection(args, async ({ type, http }) => {
+  await withConnection(args, async ({ type, http, ssh }) => {
     if (type === "ssh") {
-      printJson(unsupportedSshJobs());
-      process.exitCode = 2;
+      const ctx = await buildSshJobContext(ssh, jobId);
+      const stat = await readSshJobStatus(ssh, jobId);
+      if (!stat.ok) {
+        printJson(stat);
+        process.exitCode = 2;
+        return;
+      }
+      const stdout = (await readRemoteOptional(ssh, `${ctx.jobDir}/stdout.log`)) || "";
+      const stderr = (await readRemoteOptional(ssh, `${ctx.jobDir}/stderr.log`)) || "";
+      const trimLines = (text) => text.split(/\r?\n/).slice(-tailLines).join("\n");
+      const payload = {
+        ok: true,
+        mode: "ssh",
+        route: "ssh",
+        jobId,
+        status: stat.status,
+        stdout: { content: trimLines(stdout), bytes: Buffer.byteLength(stdout, "utf8") },
+        stderr: { content: trimLines(stderr), bytes: Buffer.byteLength(stderr, "utf8") },
+      };
+      if (args.json) {
+        printJson(payload);
+      } else {
+        const out = [
+          payload.stdout.content ? `--- stdout ---\n${payload.stdout.content}` : "",
+          payload.stderr.content ? `--- stderr ---\n${payload.stderr.content}` : "",
+        ].filter(Boolean).join("\n");
+        print(out);
+      }
       return;
     }
     try {
@@ -625,10 +885,25 @@ async function commandJobLogs(args) {
 async function commandJobCancel(args) {
   const jobId = args._[2] || args.jobId || args.id;
   if (!jobId) throw new Error("Usage: node cli.js job cancel <job-id>");
-  await withConnection(args, async ({ type, http }) => {
+  await withConnection(args, async ({ type, http, ssh }) => {
     if (type === "ssh") {
-      printJson(unsupportedSshJobs());
-      process.exitCode = 2;
+      const ctx = await buildSshJobContext(ssh, jobId);
+      const stat = await readSshJobStatus(ssh, jobId);
+      if (!stat.ok) {
+        printJson(stat);
+        process.exitCode = 2;
+        return;
+      }
+      if (!stat.pid) {
+        printJson({ ok: false, mode: "ssh", route: "ssh", jobId, canceled: false, message: "Job has no active pid." });
+        process.exitCode = 2;
+        return;
+      }
+      await ssh.exec(`if kill -0 ${shellSingleQuote(stat.pid)} 2>/dev/null; then kill ${shellSingleQuote(stat.pid)} 2>/dev/null || true; fi`);
+      await ssh.writeFile(`${ctx.jobDir}/finished_at`, `${new Date().toISOString()}\n`);
+      await ssh.writeFile(`${ctx.jobDir}/canceled_at`, `${new Date().toISOString()}\n`);
+      const updated = await readSshJobStatus(ssh, jobId);
+      printJson({ ...updated, canceled: true });
       return;
     }
     const data = await postWithFallback(http, [`/api/jobs/${encodeURIComponent(jobId)}/cancel`], {});
@@ -637,10 +912,21 @@ async function commandJobCancel(args) {
 }
 
 async function commandJobList(args) {
-  await withConnection(args, async ({ type, http }) => {
+  await withConnection(args, async ({ type, http, ssh }) => {
     if (type === "ssh") {
-      printJson(unsupportedSshJobs());
-      process.exitCode = 2;
+      const limit = positiveInt(args.limit || 20, 20, 1, 200);
+      const ids = await listSshJobIds(ssh, limit);
+      const jobs = [];
+      for (const id of ids) {
+        jobs.push(await readSshJobStatus(ssh, id));
+      }
+      printJson({
+        ok: true,
+        mode: "ssh",
+        route: "ssh",
+        count: jobs.length,
+        jobs,
+      });
       return;
     }
     const data = await getWithFallback(http, ["/api/jobs"], {
@@ -739,14 +1025,15 @@ function usage() {
   print(`agentport CLI fallback
 
 Priority for agents:
-  1. Use native remote_* MCP tools when they are visible.
-  2. If MCP is not visible but Bash/terminal is available, use this CLI.
-  3. CLI prefers daemon connections for long-term development; SSH is the fallback.
+  1. SSH-first for stable base operations.
+  2. Use daemon jobs for persistent long-running tasks.
+  3. Use native remote_* MCP tools when they are visible and stable.
 
 Commands:
   node cli.js list
   node cli.js connect <name>
   node cli.js health [--connection name]
+  node cli.js ssh-health [--connection name]
   node cli.js status [--connection name]
   node cli.js doctor
   node cli.js read <remote-path> [--connection name]
@@ -763,11 +1050,15 @@ Commands:
   node cli.js job list [--limit 20]
   node cli.js script local-script.sh [--interpreter bash]
   node cli.js batch batch.json
+
+Options:
+  --connection <name>       choose connection
+  --route <auto|ssh|daemon> prefer route for this command
+  --json                    structured output for read/bash/logs/errors
 `);
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
+async function main(args) {
   const command = args._[0] || "help";
   switch (command) {
     case "help":
@@ -783,6 +1074,9 @@ async function main() {
       break;
     case "health":
       await commandHealth(args);
+      break;
+    case "ssh-health":
+      await commandSshHealth(args);
       break;
     case "status":
       await commandStatus(args);
@@ -831,4 +1125,5 @@ async function main() {
   }
 }
 
-main().catch((error) => fail(error.message));
+const _args = parseArgs(process.argv.slice(2));
+main(_args).catch((error) => fail(error.message, 1, _args));
