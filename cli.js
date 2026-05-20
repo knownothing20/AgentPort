@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import axios from "axios";
+import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -11,6 +12,7 @@ const __dirname = path.dirname(__filename);
 const CONNECTIONS_PATH = path.join(__dirname, "local", "connections.json");
 const STATE_PATH = path.join(__dirname, "local", "cli-state.json");
 const TIMEOUT_MS = Number(process.env.MCP_REMOTE_TIMEOUT_MS || process.env.NIUMA_SSH_TIMEOUT_MS || 120000);
+const DEFAULT_TOKEN_ENV_PATH = "~/.agentport/daemon/.env";
 
 function print(text = "") {
   process.stdout.write(`${text}\n`);
@@ -139,6 +141,362 @@ function selectConnection(options = {}) {
 
 function sanitizeContent(content) {
   return String(content).replace(/\r\n/g, "\n").replace(/^\uFEFF/, "");
+}
+
+function decodeEnvValue(value) {
+  const text = String(value ?? "").trim();
+  if (!text) return "";
+  if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) {
+    return text.slice(1, -1);
+  }
+  return text;
+}
+
+function parseCsv(value) {
+  return String(value || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function parseAuthTokenMap(rawValue) {
+  const out = new Map();
+  for (const entry of parseCsv(rawValue)) {
+    const idx = entry.indexOf("=");
+    if (idx <= 0 || idx >= entry.length - 1) continue;
+    const clientId = entry.slice(0, idx).trim();
+    const token = entry.slice(idx + 1).trim();
+    if (!clientId || !token) continue;
+    out.set(clientId, token);
+  }
+  return out;
+}
+
+function serializeAuthTokenMap(tokenMap) {
+  return [...tokenMap.entries()].map(([clientId, token]) => `${clientId}=${token}`).join(",");
+}
+
+function parseAdminTokenSet(rawValue) {
+  return new Set(parseCsv(rawValue));
+}
+
+function serializeAdminTokenSet(adminSet) {
+  return [...adminSet.values()].join(",");
+}
+
+function parseEnvDocument(content) {
+  const normalized = sanitizeContent(content ?? "");
+  const hadTrailingNewline = normalized.endsWith("\n");
+  const rows = normalized.split("\n");
+  if (rows.length > 0 && rows[rows.length - 1] === "") rows.pop();
+  const lines = rows.map((line) => {
+    const match = line.match(/^(\s*(?:export\s+)?)(([A-Za-z_][A-Za-z0-9_]*))\s*=(.*)$/);
+    if (!match) return { kind: "raw", raw: line };
+    return {
+      kind: "kv",
+      prefix: match[1] || "",
+      key: match[2],
+      value: match[4] ?? "",
+    };
+  });
+  return { lines, hadTrailingNewline };
+}
+
+function stringifyEnvDocument(doc) {
+  const body = doc.lines
+    .map((line) => (line.kind === "kv" ? `${line.prefix || ""}${line.key}=${line.value}` : line.raw))
+    .join("\n");
+  if (body.length === 0) return "\n";
+  return doc.hadTrailingNewline ? `${body}\n` : body;
+}
+
+function getEnvValue(doc, key) {
+  for (let i = doc.lines.length - 1; i >= 0; i--) {
+    const line = doc.lines[i];
+    if (line.kind === "kv" && line.key === key) return line.value;
+  }
+  return "";
+}
+
+function setEnvValue(doc, key, value) {
+  let updated = false;
+  const next = [];
+  for (const line of doc.lines) {
+    if (line.kind === "kv" && line.key === key) {
+      if (!updated) {
+        next.push({ ...line, value });
+        updated = true;
+      }
+      continue;
+    }
+    next.push(line);
+  }
+  if (!updated) next.push({ kind: "kv", prefix: "", key, value });
+  doc.lines = next;
+}
+
+function normalizeClientId(value) {
+  const clientId = String(value || "").trim();
+  if (!clientId) throw new Error("Missing clientId. Use --client-id <client-id>.");
+  if (!/^[a-zA-Z0-9._-]+$/.test(clientId)) {
+    throw new Error("Invalid clientId. Use only letters, numbers, dot, underscore, or dash.");
+  }
+  return clientId;
+}
+
+function generateAuthToken(clientId) {
+  const scope = String(clientId || "client").replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 48);
+  const rand = crypto.randomBytes(16).toString("hex");
+  return `agentport-${scope}-${Date.now().toString(36)}-${rand}`;
+}
+
+function redactSensitiveText(message, secrets = []) {
+  let text = String(message || "");
+  const unique = [...new Set(secrets.map((item) => String(item || "").trim()).filter(Boolean))]
+    .sort((a, b) => b.length - a.length);
+  for (const secret of unique) {
+    text = text.split(secret).join(mask(secret));
+  }
+  text = text.replace(/(AUTH_TOKENS\s*=\s*)([^\n]+)/gi, (_, p1) => `${p1}<redacted>`);
+  text = text.replace(/(ADMIN_TOKENS\s*=\s*)([^\n]+)/gi, (_, p1) => `${p1}<redacted>`);
+  return text;
+}
+
+function parseMaybeInt(value, fallback) {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function normalizeBaseUrl(url) {
+  return String(url || "").replace(/\/+$/, "");
+}
+
+function defaultTokenArgs(args) {
+  if (args.route) return args;
+  return { ...args, route: "ssh" };
+}
+
+function tokenEnvPathFromArgs(args) {
+  return args["env-path"] || args.envPath || DEFAULT_TOKEN_ENV_PATH;
+}
+
+function expandTildeForDaemon(targetPath, conn) {
+  const input = String(targetPath || "").trim();
+  if (!input.startsWith("~")) return input;
+  const user = String(conn?.username || "").trim();
+  const home = user === "root" ? "/root" : user ? `/home/${user}` : "";
+  if (!home) {
+    throw new Error("Cannot resolve '~' on daemon route without username. Use --route ssh or --env-path /absolute/path.");
+  }
+  if (input === "~") return home;
+  if (input.startsWith("~/")) return `${home}/${input.slice(2)}`;
+  throw new Error("Unsupported '~' path format. Use ~/.agentport/daemon/.env or an absolute path.");
+}
+
+async function resolveTokenEnvPath(ctx, args) {
+  const targetPath = tokenEnvPathFromArgs(args);
+  if (ctx.type === "ssh") return await ctx.ssh.resolveRemotePath(targetPath);
+  return expandTildeForDaemon(targetPath, ctx.conn);
+}
+
+async function readTokenEnv(ctx, args) {
+  const envPath = await resolveTokenEnvPath(ctx, args);
+  let content = "";
+  try {
+    if (ctx.type === "ssh") {
+      content = await ctx.ssh.readFile(envPath);
+    } else {
+      const data = await postWithFallback(ctx.http, ["/api/fs/read", "/read"], { path: envPath });
+      content = data.content ?? "";
+    }
+  } catch (error) {
+    throw new Error(`Failed to read remote env file '${envPath}'. ${redactSensitiveText(error.message)}`);
+  }
+  const doc = parseEnvDocument(content);
+  const authTokens = parseAuthTokenMap(decodeEnvValue(getEnvValue(doc, "AUTH_TOKENS")));
+  const adminTokens = parseAdminTokenSet(decodeEnvValue(getEnvValue(doc, "ADMIN_TOKENS")));
+  const port = parseMaybeInt(decodeEnvValue(getEnvValue(doc, "PORT")), 3183);
+  return { envPath, doc, authTokens, adminTokens, port };
+}
+
+async function writeTokenEnv(ctx, envPath, doc, secrets = []) {
+  const content = stringifyEnvDocument(doc);
+  try {
+    if (ctx.type === "ssh") {
+      await ctx.ssh.writeFile(envPath, content);
+      return;
+    }
+    await postWithFallback(ctx.http, ["/api/fs/write", "/write"], { path: envPath, content });
+  } catch (error) {
+    throw new Error(redactSensitiveText(`Failed to write remote env file '${envPath}'. ${error.message}`, secrets));
+  }
+}
+
+function tokenValueByClient(authTokens, clientId) {
+  return authTokens.get(clientId) || "";
+}
+
+function addTokenUsage() {
+  return "Usage: node cli.js token add --client-id <client-id> [--token value] [--admin] [--route ssh|daemon]";
+}
+
+async function commandTokenList(args) {
+  await withConnection(defaultTokenArgs(args), async (ctx) => {
+    const { envPath, authTokens, adminTokens } = await readTokenEnv(ctx, args);
+    const tokens = [...authTokens.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([clientId, token]) => ({
+        clientId,
+        token: mask(token),
+        admin: adminTokens.has(token),
+      }));
+    printJson({
+      ok: true,
+      mode: ctx.type,
+      route: ctx.type,
+      envPath,
+      count: tokens.length,
+      adminTokenCount: adminTokens.size,
+      tokens,
+    });
+  });
+}
+
+async function commandTokenAdd(args) {
+  const clientId = normalizeClientId(args["client-id"] || args.clientId || args._[2]);
+  const wantsAdmin = Boolean(args.admin);
+  const rawToken = typeof args.token === "string" ? args.token.trim() : "";
+  const token = rawToken || generateAuthToken(clientId);
+  if (!token) throw new Error(addTokenUsage());
+
+  await withConnection(defaultTokenArgs(args), async (ctx) => {
+    const state = await readTokenEnv(ctx, args);
+    const existing = tokenValueByClient(state.authTokens, clientId);
+    if (existing && !args.replace && !args.force) {
+      throw new Error(`clientId '${clientId}' already exists. Use --replace to rotate token or run token revoke first.`);
+    }
+    state.authTokens.set(clientId, token);
+    if (wantsAdmin) state.adminTokens.add(token);
+    setEnvValue(state.doc, "AUTH_TOKENS", serializeAuthTokenMap(state.authTokens));
+    setEnvValue(state.doc, "ADMIN_TOKENS", serializeAdminTokenSet(state.adminTokens));
+    await writeTokenEnv(ctx, state.envPath, state.doc, [token, existing]);
+
+    printJson({
+      ok: true,
+      mode: ctx.type,
+      route: ctx.type,
+      envPath: state.envPath,
+      clientId,
+      token,
+      tokenMasked: mask(token),
+      admin: wantsAdmin,
+      replaced: Boolean(existing),
+      previousTokenMasked: existing ? mask(existing) : null,
+    });
+  });
+}
+
+async function commandTokenRevoke(args) {
+  const clientId = normalizeClientId(args["client-id"] || args.clientId || args._[2]);
+  const removeAdmin = Boolean(args.admin || args["remove-admin"]);
+
+  await withConnection(defaultTokenArgs(args), async (ctx) => {
+    const state = await readTokenEnv(ctx, args);
+    const removedToken = state.authTokens.get(clientId);
+    if (!removedToken) {
+      throw new Error(`clientId '${clientId}' was not found in AUTH_TOKENS.`);
+    }
+    state.authTokens.delete(clientId);
+    const adminRemoved = removeAdmin ? state.adminTokens.delete(removedToken) : false;
+    setEnvValue(state.doc, "AUTH_TOKENS", serializeAuthTokenMap(state.authTokens));
+    setEnvValue(state.doc, "ADMIN_TOKENS", serializeAdminTokenSet(state.adminTokens));
+    await writeTokenEnv(ctx, state.envPath, state.doc, [removedToken]);
+
+    printJson({
+      ok: true,
+      mode: ctx.type,
+      route: ctx.type,
+      envPath: state.envPath,
+      clientId,
+      removed: true,
+      removedToken: mask(removedToken),
+      adminRemoved,
+    });
+  });
+}
+
+async function commandTokenDashboardUrl(args) {
+  await withConnection(defaultTokenArgs(args), async (ctx) => {
+    const state = await readTokenEnv(ctx, args);
+    const clientId = args["client-id"] || args.clientId || args._[2];
+    let adminToken = "";
+
+    if (clientId) {
+      const normalizedClientId = normalizeClientId(clientId);
+      const token = state.authTokens.get(normalizedClientId);
+      if (!token) throw new Error(`clientId '${normalizedClientId}' was not found in AUTH_TOKENS.`);
+      if (!state.adminTokens.has(token)) {
+        throw new Error(`Token for clientId '${normalizedClientId}' is not in ADMIN_TOKENS. Use 'token add --admin' or 'token revoke --admin' workflow.`);
+      }
+      adminToken = token;
+    } else {
+      adminToken = [...state.adminTokens.values()][0] || "";
+      if (!adminToken) throw new Error("No ADMIN_TOKENS found in remote env.");
+    }
+
+    let baseUrl = args.url || args["base-url"] || "";
+    if (!baseUrl) {
+      if (ctx.conn.url) {
+        baseUrl = normalizeBaseUrl(ctx.conn.url);
+      } else if (ctx.conn.host) {
+        baseUrl = `http://${ctx.conn.host}:${state.port || 3183}`;
+      } else {
+        throw new Error("Cannot infer daemon URL from current connection. Use --base-url http://host:port.");
+      }
+    }
+    baseUrl = normalizeBaseUrl(baseUrl);
+    const tokenParam = encodeURIComponent(adminToken);
+    const rootUrl = `${baseUrl}/?token=${tokenParam}`;
+    const dashboardUrl = `${baseUrl}/dashboard?token=${tokenParam}`;
+
+    printJson({
+      ok: true,
+      mode: ctx.type,
+      route: ctx.type,
+      envPath: state.envPath,
+      baseUrl,
+      tokenMasked: mask(adminToken),
+      rootUrl,
+      dashboardUrl,
+    });
+  });
+}
+
+async function commandToken(args) {
+  const subcommand = (args._[1] || "help").toLowerCase();
+  switch (subcommand) {
+    case "list":
+    case "ls":
+      await commandTokenList(args);
+      break;
+    case "add":
+    case "create":
+      await commandTokenAdd(args);
+      break;
+    case "revoke":
+    case "rm":
+    case "remove":
+    case "delete":
+      await commandTokenRevoke(args);
+      break;
+    case "dashboard-url":
+    case "dashboard":
+    case "url":
+      await commandTokenDashboardUrl(args);
+      break;
+    default:
+      throw new Error("Usage: node cli.js token <list|add|revoke|dashboard-url> [options]");
+  }
 }
 
 function listArg(value, fallback) {
@@ -1048,6 +1406,10 @@ Commands:
   node cli.js job logs <job-id> [--tail 200]
   node cli.js job cancel <job-id>
   node cli.js job list [--limit 20]
+  node cli.js token list [--route ssh]
+  node cli.js token add --client-id <client-id> [--admin]
+  node cli.js token revoke --client-id <client-id> [--admin]
+  node cli.js token dashboard-url [--client-id <client-id>]
   node cli.js script local-script.sh [--interpreter bash]
   node cli.js batch batch.json
 
@@ -1105,6 +1467,9 @@ async function main(args) {
       break;
     case "job":
       await commandJob(args);
+      break;
+    case "token":
+      await commandToken(args);
       break;
     case "logs":
       args._ = ["job", "logs", ...args._.slice(1)];

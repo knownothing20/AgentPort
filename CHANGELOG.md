@@ -1,5 +1,34 @@
 # Changelog
 
+## [2026-05-20] feat | Multi-agent onboarding hardening and dashboard polish
+
+### Added
+- Added CLI token management commands in `cli.js`:
+  - `token list`
+  - `token add --client-id <id> [--admin] [--replace]`
+  - `token revoke --client-id <id> [--admin]`
+  - `token dashboard-url [--client-id <id>]`
+- Added remote `.env` token parsing/serialization utilities for `AUTH_TOKENS` and `ADMIN_TOKENS`.
+- Added setup wizard Step 3.5 in `setup.js` to confirm target host and whether dashboard access is needed on the current machine.
+
+### Changed
+- Updated setup guidance for both existing-daemon and first-bootstrap paths:
+  - always create unique token per machine/software
+  - provide explicit clientId naming hint (`machine-software`)
+  - keep dashboard guidance conditional on user need
+- Updated docs (`README.md`, `README_CN.md`, `INSTALL_OTHER_MACHINE.md`, `AGENT_GUIDE.md`) to standardize onboarding order:
+  - local install first
+  - remote read-only detection before deploy
+  - existing daemon defaults to client-only mode
+  - dashboard token URL usage with `?token=<admin-token>`
+  - fallback to `--route ssh` when native MCP transport is unstable
+- Polished `server/dashboard.html` layout:
+  - improved channel readability in connection status section
+  - kept desktop one-row bottom layout for recent errors + service status (left wide, right narrow)
+  - improved responsive behavior for medium/small screens
+
+---
+
 ## [2026-05-20] fix | Safe remote_setup compatibility guard
 
 ### Added

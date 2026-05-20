@@ -37,8 +37,21 @@ Use this exact order to avoid accidental overwrite:
 4. If daemon already exists:
    - do **not** deploy
    - read `AUTH_TOKENS` and configure local `authToken/clientId`
+   - add a **new** token for this machine/software if needed (do not reuse another machine token)
 5. If daemon does not exist:
    - first-time bootstrap is allowed (`deploy=true`)
+
+## Fast Decision Flow
+
+1. Ask target host first.
+2. Local install first.
+3. Run remote detection first.
+4. Existing daemon -> client-only mode (`deploy=false`) + unique token for this machine/software.
+5. Missing daemon -> one operator runs bootstrap (`deploy=true`) once.
+6. Need Dashboard on this machine -> token must be in `ADMIN_TOKENS`, then use:
+   - `http://<host>:3183/?token=<admin-token>`
+   - `http://<host>:3183/dashboard?token=<admin-token>`
+7. If native MCP is unstable, continue with `--route ssh` CLI path.
 
 ## First-Time Local + First-Time Server (Detailed)
 
