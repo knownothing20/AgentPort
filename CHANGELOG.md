@@ -12,6 +12,7 @@
 - Added explicit override path requiring `forceDeploy=true` for intentional replacement.
 - Updated install and agent usage docs with the new no-overwrite compatibility flow for new/old computers.
 - Updated `setup.js` flow to include remote daemon read-only detection and explicit safe-mode guidance (existing server vs first bootstrap).
+- Expanded first-time bootstrap instructions with explicit token lifecycle steps (generate once, read `AUTH_TOKENS`, reuse across client computers).
 
 ---
 
