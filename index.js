@@ -1457,6 +1457,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             type: "boolean",
             description: "Test connection only, don't save config. Default false.",
           },
+          deploy: {
+            type: "boolean",
+            description: "Whether to deploy/update remote daemon files. Default false (safe client-only mode).",
+          },
+          forceDeploy: {
+            type: "boolean",
+            description: "When deploy=true and daemon exists, force overwrite server files and .env. Default false.",
+          },
+          daemonPort: {
+            type: "number",
+            description: "Remote daemon port, default 3183.",
+          },
         },
         required: ["host", "username"],
       },
@@ -2487,24 +2499,39 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           await testClient.connect();
           const result = await testClient.exec('echo "connected" && uname -a && whoami');
           
-          // Auto-deploy daemon
-          const autoDeploy = args.autoDeploy !== false; // default true
+          const hasLegacyAutoDeploy = Object.prototype.hasOwnProperty.call(args || {}, "autoDeploy");
+          const deploy = args.deploy === true || (hasLegacyAutoDeploy && args.autoDeploy === true);
+          const forceDeploy = args.forceDeploy === true;
+          const daemonPort = typeof args.daemonPort === "number" && Number.isFinite(args.daemonPort) ? args.daemonPort : 3183;
           let daemonInfo = null;
           
-          if (autoDeploy) {
-            try {
-              // Check if daemon already exists
-              const daemonCheck = await testClient.exec('test -d ~/.agentport/daemon && echo "exists" || echo "not exists"');
-              const daemonExists = daemonCheck.stdout.includes('exists');
-              
-              if (!daemonExists) {
+          try {
+            const daemonCheck = await testClient.exec('test -d ~/.agentport/daemon && echo "exists" || echo "not exists"');
+            const daemonExists = daemonCheck.stdout.includes('exists');
+            const runningCheck = await testClient.exec('pgrep -f "node server.js" || echo "not running"');
+            const daemonRunning = !runningCheck.stdout.includes('not running');
+
+            if (deploy) {
+              if (daemonExists && !forceDeploy) {
+                daemonInfo = {
+                  skipped: true,
+                  reason: "daemon-exists-safe-skip",
+                  url: `http://${host}:${daemonPort}`,
+                  workspaceRoot: `/home/${username}`,
+                  daemonExists: true,
+                  daemonRunning,
+                  message: "Remote daemon already exists. Skipped deployment to avoid overwriting existing server files and tokens.",
+                };
+              } else {
                 // Upload server files
                 const serverDir = path.join(__dirname, 'server');
                 const files = ['server.js', 'package.json', 'agentport-manager.sh', 'setup-autostart-agentport.sh', 'dashboard.html'];
                 
                 await testClient.exec('mkdir -p ~/.agentport/daemon');
-                // Clean up leftover temp files from previous deployments
                 await testClient.exec('rm -f ~/.agentport/daemon/*.clobbered ~/.agentport/daemon/*.tmp ~/.agentport/daemon/*.bak 2>/dev/null; true');
+                if (daemonExists && forceDeploy) {
+                  await testClient.exec('if [ -f ~/.agentport/daemon/.env ]; then cp ~/.agentport/daemon/.env ~/.agentport/daemon/.env.bak.$(date +%Y%m%d-%H%M%S); fi');
+                }
                 
                 for (const file of files) {
                   const localPath = path.join(serverDir, file);
@@ -2514,44 +2541,53 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   }
                 }
                 
-                // Install dependencies
                 await testClient.exec('cd ~/.agentport/daemon && npm install --production 2>&1');
+
+                // Generate secure auth token (auto-generated, no user input needed)
+                const token = `agentport-${host.replace(/\./g, '-')}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 14)}`;
+                const clientId = args.clientId || `client-${username}-${host.replace(/\./g, '-')}`;
+                
+                // Create .env file
+                const envContent = [
+                  `PORT=${daemonPort}`,
+                  `BIND_HOST=0.0.0.0`,
+                  `WORKSPACE_ROOT=/home/${username}`,
+                  `AUTH_TOKENS=${clientId}=${token}`,
+                  `ADMIN_TOKENS=${token}`,
+                  `EXEC_TIMEOUT_MS=120000`,
+                  `EXEC_MAX_CONCURRENCY=2`,
+                ].join('\n');
+                await testClient.writeFile(`~/.agentport/daemon/.env`, envContent);
+                
+                const refreshRunning = await testClient.exec('pgrep -f "node server.js" || echo "not running"');
+                if (refreshRunning.stdout.includes('not running')) {
+                  await testClient.exec('cd ~/.agentport/daemon && nohup node server.js > daemon.log 2>&1 &');
+                  await testClient.exec('sleep 2');
+                }
+                
+                daemonInfo = {
+                  url: `http://${host}:${daemonPort}`,
+                  authToken: token,
+                  clientId: clientId,
+                  workspaceRoot: `/home/${username}`,
+                  deployed: true,
+                  forceDeploy,
+                };
               }
-              
-              // Generate secure auth token (auto-generated, no user input needed)
-              const token = `agentport-${host.replace(/\./g, '-')}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 14)}`;
-              const clientId = args.clientId || `client-${username}-${host.replace(/\./g, '-')}`;
-              
-              // Create .env file
-              const envContent = [
-                `PORT=3183`,
-                `BIND_HOST=0.0.0.0`,
-                `WORKSPACE_ROOT=/home/${username}`,
-                `AUTH_TOKENS=${clientId}=${token}`,
-                `ADMIN_TOKENS=${token}`,
-                `EXEC_TIMEOUT_MS=120000`,
-                `EXEC_MAX_CONCURRENCY=2`,
-              ].join('\n');
-              await testClient.writeFile(`~/.agentport/daemon/.env`, envContent);
-              
-              // Start daemon (check if already running)
-              const runningCheck = await testClient.exec('pgrep -f "node server.js" || echo "not running"');
-              if (runningCheck.stdout.includes('not running')) {
-                await testClient.exec('cd ~/.agentport/daemon && nohup node server.js > daemon.log 2>&1 &');
-                await testClient.exec('sleep 2');
-              }
-              
-              // Get daemon URL
+            } else {
               daemonInfo = {
-                url: `http://${host}:3183`,
-                authToken: token,
-                clientId: clientId,
+                deploySkipped: true,
+                reason: "client-only-mode",
+                url: `http://${host}:${daemonPort}`,
                 workspaceRoot: `/home/${username}`,
+                daemonExists,
+                daemonRunning,
+                message: "Client-only setup completed. Remote daemon files were not modified.",
               };
-            } catch (deployError) {
-              // Deployment failed, but SSH connection worked
-              daemonInfo = { error: deployError.message };
             }
+          } catch (deployError) {
+            // Deployment or daemon detection failed, but SSH connection worked
+            daemonInfo = { error: deployError.message };
           }
           
           testClient.disconnect();
@@ -2586,8 +2622,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }
           } catch {}
 
-          // Save daemon connection if deployed (after config is initialized)
-          if (daemonInfo && !daemonInfo.error) {
+          const daemonConnectionReady = Boolean(daemonInfo && !daemonInfo.error && daemonInfo.authToken && daemonInfo.clientId);
+
+          // Save daemon connection only when deployment generated usable credentials
+          if (daemonConnectionReady) {
             const daemonName = `${name}-daemon`;
             const daemonConn = {
               name: daemonName,
@@ -2615,8 +2653,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           } else {
             config.connections.push(connConfig);
           }
-          // Don't override default if daemon was deployed
-          if (!daemonInfo || daemonInfo.error) {
+          // Don't override default if daemon connection was added
+          if (!daemonConnectionReady) {
             config.default = name;
           }
 
@@ -2627,8 +2665,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
           fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
 
-          // Register daemon connection in memory if deployed
-          if (daemonInfo && !daemonInfo.error) {
+          // Register daemon connection in memory only when usable credentials were generated
+          if (daemonConnectionReady) {
             const daemonName = `${name}-daemon`;
             _connections[daemonName] = {
               type: "daemon",
@@ -2656,7 +2694,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
           // Build response message
           let message = '✅ Connection successful!';
-          if (daemonInfo && !daemonInfo.error) {
+          if (daemonConnectionReady) {
             const dashboardUrl = `${daemonInfo.url}/?token=${daemonInfo.authToken}`;
             message = [
               '✅ Development environment ready!',
@@ -2678,6 +2716,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             message = `✅ SSH connection saved!\nReady for remote development.`;
           }
 
+          if (daemonInfo && daemonInfo.deploySkipped) {
+            message = [
+              "✅ SSH connection saved (client-only mode).",
+              "",
+              "Remote daemon files were not modified.",
+              `- daemonExists: ${daemonInfo.daemonExists ? "yes" : "no"}`,
+              `- daemonRunning: ${daemonInfo.daemonRunning ? "yes" : "no"}`,
+              "",
+              "If this is a first-time server setup, rerun remote_setup with deploy=true.",
+            ].join("\n");
+          } else if (daemonInfo && daemonInfo.skipped) {
+            message = [
+              "✅ SSH connection saved.",
+              "",
+              "Remote daemon already exists. Deployment skipped to avoid overwrite.",
+              `- daemonRunning: ${daemonInfo.daemonRunning ? "yes" : "no"}`,
+              "",
+              "To intentionally replace server files, rerun with deploy=true and forceDeploy=true.",
+            ].join("\n");
+          }
+
           const resultData = withRuntimeMeta({
             success: true,
             message: message,
@@ -2686,7 +2745,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             defaultConnection: _currentConnection,
           });
           
-          if (daemonInfo && !daemonInfo.error) {
+          if (daemonConnectionReady) {
             resultData.daemon = {
               url: daemonInfo.url,
               dashboardUrl: `${daemonInfo.url}/?token=${daemonInfo.authToken}`,

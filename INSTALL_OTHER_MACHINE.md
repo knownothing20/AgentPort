@@ -3,6 +3,14 @@
 This guide explains how to install `agentport` on a new computer or in a
 different AI desktop tool.
 
+## Safe Policy (Important)
+
+- Treat remote server deployment as a one-time bootstrap action.
+- New/old client computers should normally run in **client-only mode** and must
+  not overwrite existing remote daemon files or tokens.
+- In `remote_setup`, deployment is now opt-in: `deploy=false` by default.
+  Existing daemon directories are never overwritten unless `forceDeploy=true`.
+
 ## What Installs From GitHub
 
 ```bash
@@ -95,3 +103,17 @@ node cli.js health
 ```
 
 Expected result: at least one connection reports `"ok": true`.
+
+## remote_setup Safety Modes
+
+Use `remote_setup` in one of two explicit modes:
+
+1. Client-only (recommended for additional computers):
+   - `deploy=false` (default)
+   - only tests SSH + saves local connection
+   - does **not** write `~/.agentport/daemon/*` on remote
+
+2. First-time server bootstrap or planned upgrade:
+   - set `deploy=true`
+   - if daemon already exists, setup skips overwrite by default
+   - only use `forceDeploy=true` for intentional replacement/upgrade

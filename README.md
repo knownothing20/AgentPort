@@ -48,6 +48,11 @@ now keeps one local "core" process per software key and lets other sessions
 attach through a localhost proxy broker. This reduces duplicate connection churn
 without forcing single-session usage.
 
+Remote setup safety policy:
+- `remote_setup` defaults to client-only mode (`deploy=false`).
+- Existing remote daemon files are not overwritten by default.
+- Overwrite requires explicit `deploy=true` and `forceDeploy=true`.
+
 For design rationale, deployment model, and security boundaries, see
 the project documentation in this repository.
 
