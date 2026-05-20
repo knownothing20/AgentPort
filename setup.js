@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// setup.js - Interactive CLI setup for mcp-remote-agent
+// setup.js - Interactive CLI setup for agentport
 // Shares SSH scanning logic with index.js via ssh-scanner.js
 
 import readline from "readline";
@@ -16,7 +16,7 @@ const PRIVATE_CONNECTIONS_PATH = join(__dirname, "local", "connections.json");
 const DEFAULT_SHARED_CONNECTIONS_PATH = (() => {
   const home = process.env.USERPROFILE || process.env.HOME;
   if (!home) return PRIVATE_CONNECTIONS_PATH;
-  return join(home, ".mcp-remote-agent", "connections.shared.json");
+  return join(home, ".agentport", "connections.shared.json");
 })();
 const SHARED_CONNECTIONS_PATH = (process.env.MCP_REMOTE_SHARED_CONNECTIONS_PATH || process.env.NIUMA_SSH_SHARED_CONNECTIONS_PATH || DEFAULT_SHARED_CONNECTIONS_PATH).trim();
 
@@ -39,7 +39,7 @@ function colorize(color, text) {
 function printBanner() {
   console.log("");
   console.log(colorize(CYAN, "  ╔══════════════════════════════════════════╗"));
-  console.log(colorize(CYAN, "  ║   mcp-remote-agent setup wizard v2.5.0   ║"));
+  console.log(colorize(CYAN, "  ║   agentport setup wizard v2.5.0   ║"));
   console.log(colorize(CYAN, "  ╚══════════════════════════════════════════╝"));
   console.log("");
 }

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * mcp-remote-agent Sync Script
+ * AgentPort Sync Script
  *
- * 从 local/mcp-remote-agent.json 读取变量，同步到：
+ * 从 local/agentport.json 读取变量（兼容 local/agentport.json），同步到：
  *   - package.json (version, name, description)
  *   - index.js (version 常量、启动日志)
  *   - <mcpConfigPath> (MCP server 配置，变量替换)
@@ -25,7 +25,11 @@ const CHECK = process.argv.includes("--check");
 const ENV_ONLY = process.argv.includes("--env-only");
 
 const SKILL_DIR = __dirname;
-const CONFIG_JSON_PATH = path.join(SKILL_DIR, "local", "mcp-remote-agent.json");
+const PRIMARY_CONFIG_JSON_PATH = path.join(SKILL_DIR, "local", "agentport.json");
+function resolveConfigPath() {
+  if (fs.existsSync(PRIMARY_CONFIG_JSON_PATH)) return PRIMARY_CONFIG_JSON_PATH;
+  return PRIMARY_CONFIG_JSON_PATH;
+}
 
 // ─── Helpers ──────────────────────────────────────────────
 
@@ -88,10 +92,10 @@ function resolveObject(obj, vars) {
   return obj;
 }
 
-// ─── Generate server/.env from mcp-remote-agent.json variables ──────
+// ─── Generate server/.env from config variables ──────
 
 function generateServerEnv(vars) {
-  // .env key → mcp-remote-agent.json variable key mapping
+  // .env key → config variable key mapping
   const envMapping = [
     ["WORKSPACE_ROOT", "serverWorkspaceRoot"],
     ["PORT", "serverPort"],
@@ -118,23 +122,25 @@ function generateServerEnv(vars) {
 // ─── Main ─────────────────────────────────────────────────
 
 function main() {
-  console.log(`\n\x1b[1m\x1b[36m mcp-remote-agent sync\x1b[0m ${DRY_RUN ? "(dry-run)" : CHECK ? "(check)" : ENV_ONLY ? "(env-only)" : ""}\n`);
+  console.log(`\n\x1b[1m\x1b[36m agentport sync\x1b[0m ${DRY_RUN ? "(dry-run)" : CHECK ? "(check)" : ENV_ONLY ? "(env-only)" : ""}\n`);
 
-  // 1. Read local/mcp-remote-agent.json
-  if (!fs.existsSync(CONFIG_JSON_PATH)) {
-    log("err", `local/mcp-remote-agent.json not found at ${CONFIG_JSON_PATH}`);
-    log("err", `Please copy mcp-remote-agent.example.json to local/mcp-remote-agent.json and configure it`);
+  const configPath = resolveConfigPath();
+
+  // 1. Read local config
+  if (!fs.existsSync(configPath)) {
+    log("err", `Config not found at ${PRIMARY_CONFIG_JSON_PATH}`);
+    log("err", `Please copy agentport.example.json to local/agentport.json and configure it`);
     process.exit(2);
   }
 
-  const configData = readJson(CONFIG_JSON_PATH);
+  const configData = readJson(configPath);
   const { version, name, description, variables: vars } = configData;
 
   log("sync", `Version: ${version}`);
   log("sync", `Client:  ${vars.clientId}`);
   log("sync", `Remote:  ${vars.remoteUrl}`);
   log("sync", `MCP:     ${vars.mcpConfigPath}`);
-  log("sync", `Shared:  ${vars.sharedConnectionsPath || "(default ~/.mcp-remote-agent/connections.shared.json)"}`);
+  log("sync", `Shared:  ${vars.sharedConnectionsPath || "(default ~/.agentport/connections.shared.json)"}`);
   log("sync", `Server:  ${vars.serverDaemonDir}`);
 
   let changes = 0;
@@ -263,7 +269,7 @@ function main() {
   }
 
   // ─── 6. Sync MCP config ────────────────────────────
-  // Read MCP config path from mcp-remote-agent.json variables (supports any AI tool)
+  // Read MCP config path from config variables (supports any AI tool)
   const mcpConfigPath = vars.mcpConfigPath;
   const mcpServerName = vars.mcpServerName || name;
 
@@ -301,7 +307,7 @@ function main() {
       log("warn", `MCP config directory not found: ${mcpDir}, skipping`);
     }
   } else {
-    log("warn", `mcpConfigPath not set in mcp-remote-agent.json, skipping MCP registration`);
+    log("warn", `mcpConfigPath not set in config, skipping MCP registration`);
   }
 
   // ─── Summary ─────────────────────────────────────────

@@ -1,16 +1,16 @@
 ---
-name: mcp-remote-agent
+name: agentport
 description: AI Remote Development Gateway for MCP, CLI fallback, SSH recovery, and persistent daemon jobs - 让 AI Agent 稳定操作远程 Linux 开发环境。触发词：远程连接、远程执行、远端命令、远程文件、remote、MCP、AI Agent、守护进程、脚本执行、job、status、logs、base64转义、文件元信息、stat、配置热重载、remote_config
 license: MIT
 ---
 
-# mcp-remote-agent
+# agentport
 
 AI Remote Development Gateway for MCP, CLI, SSH, and persistent daemon jobs
 
 让 AI Agent 通过稳定远程开发网关操作 Linux 服务器：支持原生 MCP、CLI fallback、daemon HTTP API、SSH 恢复和持久 Job。
 
-**类比**：VS Code Remote SSH 是给人用的，mcp-remote-agent 是给 AI 用的。
+**类比**：VS Code Remote SSH 是给人用的，agentport 是给 AI 用的。
 
 **v2.5.0**
 
@@ -50,10 +50,10 @@ For full installation and agent bootstrap guidance, read `AGENT_GUIDE.md`.
 为避免"能看到 skill 但 remote_* 工具不可用"，第一次使用时必须先检查这 4 项：
 
 1. **MCP 注册是否正确**
-   - 目标 AI 软件的 MCP 配置里必须有 `mcp-remote-agent`
+   - 目标 AI 软件的 MCP 配置里必须有 `agentport`
    - `command`/`args` 路径必须是当前机器可执行的绝对路径
 2. **skill 是否安装完整**
-   - `SKILL.md`、`index.js`、`package.json`、`local/mcp-remote-agent.json` 必须存在
+   - `SKILL.md`、`index.js`、`package.json`、`local/agentport.json` 必须存在
 3. **依赖是否安装完整（关键门槛）**
    - `node_modules` 必须存在
    - `ssh2`、`@modelcontextprotocol/sdk`、`axios` 必须可用
@@ -99,9 +99,9 @@ For full installation and agent bootstrap guidance, read `AGENT_GUIDE.md`.
 
 ---
 
-## 核心原则：mcp-remote-agent.json 是唯一配置入口
+## 核心原则：agentport.json 是唯一配置入口
 
-> **所有可变配置都集中在 `mcp-remote-agent.json` 的 `variables` 区。**
+> **所有可变配置都集中在 `agentport.json` 的 `variables` 区。**
 > 部署到新环境时，只需修改这一个文件，然后运行 `node sync.cjs` 自动同步到所有下游文件。
 
 `variables` 分两组：
@@ -119,7 +119,7 @@ For full installation and agent bootstrap guidance, read `AGENT_GUIDE.md`.
 | `package.json` | version、name、description |
 | `index.js` | version 常量、启动日志 |
 | `SKILL.md` | 版本号 |
-| `<mcpConfigPath>` | MCP server 注册（变量替换，路径由 mcp-remote-agent.json 的 mcpConfigPath 决定） |
+| `<mcpConfigPath>` | MCP server 注册（变量替换，路径由 agentport.json 的 mcpConfigPath 决定） |
 | `server/.env` | 服务端运行配置（自动生成） |
 | `test.cjs` | 版本号 |
 
@@ -128,20 +128,20 @@ For full installation and agent bootstrap guidance, read `AGENT_GUIDE.md`.
 ## 目录结构
 
 ```
-mcp-remote-agent/
+agentport/
 ├── SKILL.md                        # 本说明文件
 ├── index.js                        # MCP server 主程序（客户端）
 ├── package.json                    # 客户端依赖声明
-├── mcp-remote-agent.example.json   # 配置模板（复制到 local/mcp-remote-agent.json 后修改）
+├── agentport.example.json   # 配置模板（复制到 local/agentport.json 后修改）
 ├── sync.cjs                        # 变量同步脚本
 ├── test.cjs                        # 安装后测试脚本
 ├── local/                          # 本地配置（不上传 Git）
-│   ├── mcp-remote-agent.json       # ⭐ 唯一配置入口（从模板复制）
+│   ├── agentport.json       # ⭐ 唯一配置入口（从模板复制）
 │   ├── connections.json            # ⭐ 动态连接配置（可选）
 │   └── server/.env                 # 服务端配置（由 sync.cjs 自动生成）
 └── server/                         # 远程守护进程（部署到 Linux 服务器）
     ├── server.js                   # 守护进程主程序
-    ├── mcp-remote-agent-manager.sh # 进程守护脚本（崩溃 5s 自动拉起）
+    ├── agentport-manager.sh # 进程守护脚本（崩溃 5s 自动拉起）
     └── package.json                # 服务端依赖声明
 ```
 
@@ -296,13 +296,13 @@ mcp-remote-agent/
 1. **通过 SSH 部署守护进程**：
    ```bash
    # 上传服务端文件
-   scp server/* user@server:~/.mcp-remote-agent/daemon/
+   scp server/* user@server:~/.agentport/daemon/
    
    # 在服务器上安装依赖
-   ssh user@server "cd ~/.mcp-remote-agent/daemon && npm install"
+   ssh user@server "cd ~/.agentport/daemon && npm install"
    
    # 启动守护进程
-   ssh user@server "cd ~/.mcp-remote-agent/daemon && nohup node server.js > server.log 2>&1 &"
+   ssh user@server "cd ~/.agentport/daemon && nohup node server.js > server.log 2>&1 &"
    ```
 
 2. **更新 connections.json**：
@@ -537,22 +537,22 @@ echo "token-$(hostname)-$(date +%s)-$(head -c 8 /dev/urandom | base64 | tr -dc '
 mkdir -p <serverDaemonDir>
 
 # 从本地 scp（在本地执行）
-scp server/server.js server/mcp-remote-agent-manager.sh server/package.json YOUR_USER@YOUR_SERVER:<serverDaemonDir>/
+scp server/server.js server/agentport-manager.sh server/package.json YOUR_USER@YOUR_SERVER:<serverDaemonDir>/
 ```
 
-### 第 3 步：配置 local/mcp-remote-agent.json（本地）
+### 第 3 步：配置 local/agentport.json（本地）
 
 复制模板并填写真实配置：
 
 ```bash
-cp mcp-remote-agent.example.json local/mcp-remote-agent.json
+cp agentport.example.json local/agentport.json
 ```
 
-编辑 `local/mcp-remote-agent.json`，**只需要改 `variables` 区**：
+编辑 `local/agentport.json`，**只需要改 `variables` 区**：
 
 ```json
 {
-  "name": "mcp-remote-agent",
+  "name": "agentport",
   "version": "2.5.0",
   "variables": {
     "remoteUrl": "http://你的服务器IP:3183",
@@ -563,7 +563,7 @@ cp mcp-remote-agent.example.json local/mcp-remote-agent.json
     "nodePath": "node",
 
     "mcpConfigPath": "你的AI工具的MCP配置文件路径",
-    "mcpServerName": "mcp-remote-agent",
+    "mcpServerName": "agentport",
 
     "serverPort": "3183",
     "serverBindHost": "0.0.0.0",
@@ -572,8 +572,8 @@ cp mcp-remote-agent.example.json local/mcp-remote-agent.json
     "serverExecTimeoutMs": "120000",
     "serverExecMaxConcurrency": "4",
     "serverExecQueueTimeoutMs": "15000",
-    "serverDaemonDir": "/home/你的用户名/.mcp-remote-agent/daemon",
-    "serverAuditLogPath": "/home/你的用户名/.mcp-remote-agent/daemon/audit.log",
+    "serverDaemonDir": "/home/你的用户名/.agentport/daemon",
+    "serverAuditLogPath": "/home/你的用户名/.agentport/daemon/audit.log",
     "serverAuthTokens": "client1=token1,client2=token2",
     "serverAdminTokens": "token1,token2"
   }
@@ -602,7 +602,7 @@ cp mcp-remote-agent.example.json local/mcp-remote-agent.json
 ```json
 {
   "mcpServers": {
-    "mcp-remote-agent": {
+    "agentport": {
       "command": "node",
       "args": ["<skillDir>/index.js"],
       "env": {
@@ -618,7 +618,7 @@ cp mcp-remote-agent.example.json local/mcp-remote-agent.json
 
 **TOML 格式**（如 Codex）：
 ```toml
-[mcp_servers.mcp-remote-agent]
+[mcp_servers.agentport]
 command = "node"
 args = [ "<skillDir>/index.js" ]
 env.MCP_REMOTE_URL = "<remoteUrl>"
@@ -627,9 +627,9 @@ env.MCP_REMOTE_CLIENT_ID = "<clientId>"
 env.MCP_REMOTE_TIMEOUT_MS = "<timeoutMs>"
 ```
 
-> ⚠️ 将 `<skillDir>`、`<remoteUrl>`、`<authToken>`、`<clientId>`、`<timeoutMs>` 替换为 mcp-remote-agent.json 中对应的值。
+> ⚠️ 将 `<skillDir>`、`<remoteUrl>`、`<authToken>`、`<clientId>`、`<timeoutMs>` 替换为 agentport.json 中对应的值。
 
-> ⚠️ `mcp-remote-agent.json` 含敏感信息，不要提交到 Git。
+> ⚠️ `agentport.json` 含敏感信息，不要提交到 Git。
 
 #### Token 格式说明
 
@@ -640,7 +640,7 @@ env.MCP_REMOTE_TIMEOUT_MS = "<timeoutMs>"
 ### 第 4 步：运行 sync
 
 ```bash
-cd <skillDir>    # 即 mcp-remote-agent.json 中 skillDir 的值，如 ~/.workbuddy/skills/mcp-remote-agent
+cd <skillDir>    # 即 agentport.json 中 skillDir 的值，如 ~/.workbuddy/skills/agentport
 
 # 安装客户端依赖
 npm install
@@ -669,13 +669,13 @@ scp local/server/.env YOUR_USER@YOUR_SERVER:<serverDaemonDir>/
 # SSH 到远程服务器
 cd <serverDaemonDir>
 npm install
-nohup bash mcp-remote-agent-manager.sh >> boot.log 2>&1 &
+nohup bash agentport-manager.sh >> boot.log 2>&1 &
 ```
 
 设置开机自启（可选）：
 
 ```bash
-(crontab -l 2>/dev/null; echo "@reboot sleep 10 && /bin/bash <serverDaemonDir>/mcp-remote-agent-manager.sh") | crontab -
+(crontab -l 2>/dev/null; echo "@reboot sleep 10 && /bin/bash <serverDaemonDir>/agentport-manager.sh") | crontab -
 ```
 
 ### 第 7 步：验证
@@ -776,9 +776,9 @@ node test.cjs --local-only
 
 ## 客户端环境变量
 
-在 `mcp-remote-agent.json` 的 `variables` 中配置，通过 `sync.cjs` 自动写入 `mcp.json`：
+在 `agentport.json` 的 `variables` 中配置，通过 `sync.cjs` 自动写入 `mcp.json`：
 
-| 变量 | 对应 mcp-remote-agent.json key | 说明 | 必填 | 默认值 |
+| 变量 | 对应 agentport.json key | 说明 | 必填 | 默认值 |
 |------|--------------------------------|------|------|--------|
 | `MCP_REMOTE_URL` | `remoteUrl` | 远端守护进程地址 | ✅ | — |
 | `MCP_REMOTE_AUTH_TOKEN` | `authToken` | API 鉴权 token | ✅ | — |
@@ -790,10 +790,10 @@ node test.cjs --local-only
 
 #### MCP 注册变量
 
-| 变量 | 对应 mcp-remote-agent.json key | 说明 | 必填 | 默认值 |
+| 变量 | 对应 agentport.json key | 说明 | 必填 | 默认值 |
 |------|--------------------------------|------|------|--------|
 | — | `mcpConfigPath` | 目标 AI 工具的 MCP 配置文件路径（sync.cjs 据此写入） | ✅ | — |
-| — | `mcpServerName` | MCP 注册的 server 名称 | 否 | `mcp-remote-agent` |
+| — | `mcpServerName` | MCP 注册的 server 名称 | 否 | `agentport` |
 | — | `skillDir` | skill 安装目录绝对路径（用于生成 MCP args） | ✅ | — |
 | — | `nodePath` | node 可执行文件路径 | 否 | `node` |
 
@@ -801,9 +801,9 @@ node test.cjs --local-only
 
 ## 服务端环境变量
 
-在 `mcp-remote-agent.json` 的 `variables` 中配置，通过 `sync.cjs` 自动生成 `server/.env`：
+在 `agentport.json` 的 `variables` 中配置，通过 `sync.cjs` 自动生成 `server/.env`：
 
-| .env 变量 | 对应 mcp-remote-agent.json key | 说明 | 默认值 |
+| .env 变量 | 对应 agentport.json key | 说明 | 默认值 |
 |-----------|---------------------|------|--------|
 | `PORT` | `serverPort` | 服务端口 | `3183` |
 | `BIND_HOST` | `serverBindHost` | 绑定地址 | `0.0.0.0` |
@@ -922,7 +922,7 @@ Dashboard 功能：
 | ✅ 使用相对路径更安全 | 如 `package.json`、`src/main.py`，自动解析为工作区内路径 |
 | ❌ 不要对工作区外路径做文件操作 | `/`、`/tmp/`、`/etc/` 等会返回 `Access denied` |
 | ✅ `remote_bash` 不受此限制 | 命令在 shell 中执行，可以访问任何路径 |
-| ⚠️ 写临时文件用 `WORKSPACE_ROOT/.mcp-remote-agent-tmp/` | `remote_script` fallback 自动使用此路径 |
+| ⚠️ 写临时文件用 `WORKSPACE_ROOT/.agentport-tmp/` | `remote_script` fallback 自动使用此路径 |
 
 ### Windows 环境注意事项
 
@@ -931,7 +931,7 @@ Dashboard 功能：
 | `curl` 被别名 | 用 `curl.exe` 而非 `curl`（PowerShell 把 `curl` 映射到 `Invoke-WebRequest`） |
 | curl 卡住 | 加 `-4` 强制 IPv4：`curl.exe -4 -s URL` |
 | CRLF 残留 | `remote_write` 已自动清理 CRLF→LF，无需手动处理 |
-| BOM 残留 | `remote_write` 已自动去 BOM，`mcp-remote-agent.json` 读取也做了 BOM 剥离 |
+| BOM 残留 | `remote_write` 已自动去 BOM，`agentport.json` 读取也做了 BOM 剥离 |
 | PowerShell 转义 | 不要在 PS 中用 `node -e` 传递复杂脚本，写 `.cjs` 文件再执行 |
 | 测试脚本后缀 | 用 `.cjs` 而非 `.js`（`package.json` 的 `"type": "module"` 会让 `.js` 被视为 ESM） |
 
@@ -943,30 +943,30 @@ Dashboard 功能：
 
 | 现象 | 原因 | 解决 |
 |------|------|------|
-| 端口不可达 | 守护进程未启动 | `cd <serverDaemonDir> && nohup bash mcp-remote-agent-manager.sh >> boot.log 2>&1 &` |
-| 多个 node server.js 进程 | manager.sh 重复启动 | `pkill -9 -f mcp-remote-agent-manager; pkill -9 -f 'server.js'; sleep 1; cd <serverDaemonDir> && nohup bash mcp-remote-agent-manager.sh >> boot.log 2>&1 &` |
+| 端口不可达 | 守护进程未启动 | `cd <serverDaemonDir> && nohup bash agentport-manager.sh >> boot.log 2>&1 &` |
+| 多个 node server.js 进程 | manager.sh 重复启动 | `pkill -9 -f agentport-manager; pkill -9 -f 'server.js'; sleep 1; cd <serverDaemonDir> && nohup bash agentport-manager.sh >> boot.log 2>&1 &` |
 | EADDRINUSE | 端口被占用 | `lsof -i :3183` 找到占用进程并 kill |
-| 401/403 | Token 不匹配 | 检查本地 `mcp-remote-agent.json` 的 authToken 与远端 `.env` 的 AUTH_TOKENS |
+| 401/403 | Token 不匹配 | 检查本地 `agentport.json` 的 authToken 与远端 `.env` 的 AUTH_TOKENS |
 | 新增 token 不生效 | dotenv 不覆盖已有环境变量 | manager.sh 已自动 unset，确认使用最新版；或用 `remote_config write` 热重载 |
 
 ### 客户端连接失败
 
 | 错误 | 原因 | 排查 |
 |------|------|------|
-| ECONNREFUSED | 服务未启动 | 检查 crontab、查看 `mcp-remote-agent.log` |
+| ECONNREFUSED | 服务未启动 | 检查 crontab、查看 `agentport.log` |
 | ETIMEDOUT | 网络不通 | `ping` 服务器 IP、检查防火墙 |
-| 401 / 403 | Token 不匹配 | 检查本地 `mcp-remote-agent.json` 与远端 `.env` |
+| 401 / 403 | Token 不匹配 | 检查本地 `agentport.json` 与远端 `.env` |
 | Access denied | 路径超出 WORKSPACE_ROOT | 使用工作区内路径或相对路径 |
 | ENOENT | 文件不存在 | 检查路径，注意 `WORKSPACE_ROOT` 限制 |
-| 500 | 服务端错误 | 查看 `mcp-remote-agent.log` |
+| 500 | 服务端错误 | 查看 `agentport.log` |
 | curl 卡住 | PowerShell 别名 + IPv6 | 用 `curl.exe -4` 替代 `curl` |
 
 ---
 
 ## 安全建议
 
-1. **不要提交真实 token**：`mcp-remote-agent.json` 含敏感信息，确保在 `.gitignore` 中排除
-2. **对外发布仅分享模板**：使用 `mcp-remote-agent.example.json`，不含真实地址和 token
+1. **不要提交真实 token**：`agentport.json` 含敏感信息，确保在 `.gitignore` 中排除
+2. **对外发布仅分享模板**：使用 `agentport.example.json`，不含真实地址和 token
 3. **工作区隔离**：远端通过 `WORKSPACE_ROOT` 限制文件访问范围，防止越权
 4. **PowerShell 传脚本到远端**：必须用 base64 编码（PS 会解析 `$` `$(...)` 等为变量）
 5. **多客户端隔离**：每个客户端使用不同的 `CLIENT_ID`，远端审计日志可追溯
@@ -985,7 +985,7 @@ Dashboard 功能：
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
-| v2.3.1 | 2026-04 | 安全修复：脚本解释器白名单、命令执行可配置限制；新增 Dashboard HTML UI；新增 setup-autostart.sh 自启动配置脚本；重构目录结构，配置文件移至 local/ 目录 |
+| v2.3.1 | 2026-04 | 安全修复：脚本解释器白名单、命令执行可配置限制；新增 Dashboard HTML UI；新增 setup-autostart-agentport.sh 自启动配置脚本；重构目录结构，配置文件移至 local/ 目录 |
 | v2.2.1 | 2026-04 | 新增 `remote_config` 配置热重载工具；niuma.json 升级为变量中心（客户端+服务端配置统一管理）；新增 sync.cjs 自动同步变量到所有下游文件；服务端文件纳入 skill 包 `server/` 目录；SKILL.md 全面重构 |
 | v2.2.0 | 2026-04 | 重构 `ensureHealthy()` 辅助函数消除重复代码；`remote_exec_async` 补全 base64 编码；`remote_task` duration 支持 timestamp 和 ISO string；`remote_script` interpreter 增加白名单安全校验；`remote_read` cacheMiss 统计修正；`remote_health` 补全 `recordOp` |
 | v2.1.0 | 2026-04 | 新增 `remote_script` 脚本执行、`remote_stat` 文件元信息；bash 命令自动 base64 转义；write 自动清理 CRLF/BOM；health 改用 /healthz；工具 description 中文化；健康检查失败返回 isError |
@@ -1000,7 +1000,7 @@ Dashboard 功能：
 安装完成后，运行测试脚本验证本地文件和远程连接是否正常：
 
 ```bash
-cd <skillDir>    # 即 mcp-remote-agent.json 中 skillDir 的值
+cd <skillDir>    # 即 agentport.json 中 skillDir 的值
 
 # 完整测试（本地检查 + 远程连接测试）
 node test.cjs
@@ -1016,11 +1016,11 @@ node test.cjs --verbose
 
 | 阶段 | 测试项 | 说明 |
 |------|--------|------|
-| **Phase 1: 本地检查** | 核心文件存在 | SKILL.md、index.js、package.json、mcp-remote-agent.json |
+| **Phase 1: 本地检查** | 核心文件存在 | SKILL.md、index.js、package.json、agentport.json |
 | | 依赖安装 | node_modules、@modelcontextprotocol/sdk、axios |
 | | index.js 关键代码 | ensureHealthy、ALLOWED_INTERPRETERS、base64 编码等 |
 | | 版本号 | package.json 版本匹配 |
-| | 配置完整性 | mcp-remote-agent.json 中 REMOTE_URL、AUTH_TOKEN 已配置 |
+| | 配置完整性 | agentport.json 中 REMOTE_URL、AUTH_TOKEN 已配置 |
 | **Phase 2: 远程连接** | 健康检查 | GET /healthz 返回 ok |
 | | 文件操作 | stat、glob、read（含 ETag）、write + 回读验证 + 清理 |
 | | 命令执行 | 简单命令、特殊字符（base64 编码）、管道 |
@@ -1048,8 +1048,8 @@ node test.cjs --verbose
 | 失败项 | 原因 | 解决 |
 |--------|------|------|
 | node_modules missing | 未安装依赖 | `cd <skillDir> && npm install` |
-| mcp-remote-agent.json not found | 配置文件未创建 | `cp mcp-remote-agent.example.json local/mcp-remote-agent.json` 并填写真实配置 |
-| REMOTE_URL missing | 环境变量未配置 | 编辑 mcp-remote-agent.json 填写 remoteUrl |
+| agentport.json not found | 配置文件未创建 | `cp agentport.example.json local/agentport.json` 并填写真实配置 |
+| REMOTE_URL missing | 环境变量未配置 | 编辑 agentport.json 填写 remoteUrl |
 | remote_health: ECONNREFUSED | 远端服务未启动 | 在远端执行一键启动命令 |
 | remote_health: HTTP 401 | Token 不匹配 | 检查 authToken 与远端 .env 一致 |
 | duration is NaN | 服务端返回 ISO 字符串而非时间戳 | v2.2.0 已修复，确认 index.js 已更新 |

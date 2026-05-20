@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>MCP Remote Agent 监控面板</title>
+  <title>AgentPort 监控面板</title>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <style>
     :root { --bg: #0a0a0f; --bg2: #12121a; --card: #1a1a24; --cardh: #22222e; --text: #f0f0f5; --text2: #8888a0; --muted: #555566; --cyan: #00d4ff; --green: #00ff88; --red: #ff4757; --orange: #ffa502; --purple: #a855f7; --border: #2a2a3a; }
@@ -25,6 +25,7 @@
     .time-btn { padding: 6px 14px; background: transparent; border: none; border-radius: 6px; color: var(--text2); cursor: pointer; font-size: 13px; transition: 0.2s; }
     .time-btn:hover { color: var(--text); }
     .time-btn.active { background: var(--cyan); color: #000; font-weight: 600; }
+
     .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
     .stat-card { background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 20px; transition: 0.3s; }
     .stat-card:hover { transform: translateY(-2px); border-color: var(--cyan); }
@@ -35,10 +36,11 @@
     .stat-card .value.red { color: var(--red); }
     .stat-card .value.orange { color: var(--orange); }
     .stat-card .detail { font-size: 12px; color: var(--muted); margin-top: 8px; }
-    .main-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 24px; }
+
     .card { background: var(--card); border: 1px solid var(--border); border-radius: 16px; overflow: hidden; margin-bottom: 24px; }
     .card-header { padding: 16px 20px; border-bottom: 1px solid var(--border); font-size: 16px; font-weight: 600; }
     .card-body { padding: 20px; }
+
     .perf-table { width: 100%; border-collapse: collapse; }
     .perf-table th, .perf-table td { padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--border); }
     .perf-table th { font-size: 12px; color: var(--text2); }
@@ -48,27 +50,32 @@
     .type-badge.write { background: rgba(0,255,136,0.15); color: var(--green); }
     .type-badge.exec { background: rgba(255,165,2,0.15); color: var(--orange); }
     .type-badge.fs { background: rgba(168,85,247,0.15); color: var(--purple); }
-    .error-list { max-height: 300px; overflow-y: auto; }
+
+    .channel-grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 12px; }
+    .channel-card { min-width: 0; background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+    .channel-head { padding: 12px 14px; border-bottom: 1px solid var(--border); font-size: 13px; color: var(--text2); font-weight: 600; letter-spacing: .2px; }
+    .channel-kpi { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; padding: 12px; border-bottom: 1px solid var(--border); }
+    .kpi-mini { min-width: 0; background: rgba(255,255,255,.01); border: 1px solid var(--border); border-radius: 10px; padding: 10px; }
+    .kpi-mini .k { font-size: 11px; color: var(--muted); text-transform: uppercase; }
+    .kpi-mini .v { margin-top: 6px; font-family: 'JetBrains Mono', monospace; font-size: 22px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .channel-list { max-height: 260px; overflow-y: auto; }
+    .channel-item { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+    .channel-item:last-child { border-bottom: none; }
+    .channel-main { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .channel-name { font-family: 'JetBrains Mono', monospace; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+    .channel-meta { margin-top: 4px; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .channel-badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; flex-shrink: 0; }
+    .channel-badge.online { background: rgba(0,255,136,0.15); color: var(--green); }
+    .channel-badge.offline { background: rgba(85,85,102,0.2); color: var(--muted); }
+    .channel-empty { text-align: center; color: var(--muted); padding: 26px 10px; font-size: 12px; }
+
+    .bottom-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; align-items: start; }
+    .error-list { max-height: 420px; overflow-y: auto; }
     .error-item { padding: 12px 16px; border-bottom: 1px solid var(--border); display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center; }
     .error-time { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted); }
     .error-msg { font-size: 13px; color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .error-type { font-size: 11px; padding: 3px 8px; border-radius: 4px; background: rgba(255,71,87,0.15); color: var(--red); white-space: nowrap; }
-    .client-list { display: flex; flex-direction: column; gap: 10px; }
-    .client-item { display: flex; align-items: center; gap: 12px; padding: 12px 16px; background: var(--bg2); border-radius: 10px; }
-    .client-avatar { width: 36px; height: 36px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 14px; }
-    .client-avatar.codex { background: linear-gradient(135deg, #6366f1, #8b5cf6); }
-    .client-avatar.mcp { background: linear-gradient(135deg, #06b6d4, #00d4ff); }
-    .client-avatar.workbuddy { background: linear-gradient(135deg, #f59e0b, #fbbf24); }
-    .client-info { flex: 1; }
-    .client-name { font-size: 14px; font-weight: 500; }
-    .client-meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
-    .client-status { padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; white-space: nowrap; }
-    .client-status.online { background: rgba(0,255,136,0.15); color: var(--green); }
-    .client-status.offline { background: rgba(85,85,102,0.2); color: var(--muted); }
-    .system-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
-    .sys-item { padding: 12px; background: var(--bg2); border-radius: 8px; }
-    .sys-label { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
-    .sys-value { font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 500; }
+
     .svc-item { display: flex; align-items: flex-start; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid var(--border); }
     .svc-item:last-child { border-bottom: none; }
     .svc-main { flex: 1; min-width: 0; }
@@ -88,22 +95,23 @@
     .svc-badge.ok { background: rgba(0,255,136,0.15); color: var(--green); }
     .svc-badge.warn { background: rgba(255,165,2,0.15); color: var(--orange); }
     .svc-badge.error { background: rgba(255,71,87,0.15); color: var(--red); }
+
     .loading { display: flex; align-items: center; justify-content: center; padding: 40px; color: var(--muted); }
     .spinner { width: 24px; height: 24px; border: 2px solid var(--border); border-top-color: var(--cyan); border-radius: 50%; animation: spin 1s linear infinite; margin-right: 12px; }
     @keyframes spin { to { transform: rotate(360deg); } }
     ::-webkit-scrollbar { width: 6px; }
     ::-webkit-scrollbar-track { background: var(--bg2); }
     ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-    @media (max-width:1200px){ .stats-grid{grid-template-columns:repeat(2,1fr)} .main-grid{grid-template-columns:1fr} }
+    @media (max-width:1200px){ .stats-grid{grid-template-columns:repeat(2,1fr)} .channel-grid{grid-template-columns:1fr} .bottom-grid{grid-template-columns:1fr} }
   </style>
 </head>
 <body>
   <div class="container">
     <header class="header">
       <div class="header-left">
-        <div class="logo">M</div>
+        <div class="logo">A</div>
         <div class="title">
-          <h1>MCP Remote Agent 监控面板</h1>
+          <h1>AgentPort 监控面板</h1>
           <p id="serverTime">加载中...</p>
         </div>
       </div>
@@ -117,6 +125,7 @@
         <button class="refresh-btn" onclick="loadData()">↻ 刷新</button>
       </div>
     </header>
+
     <div class="stats-grid">
       <div class="stat-card">
         <div class="label">总请求数</div>
@@ -136,110 +145,159 @@
       <div class="stat-card">
         <div class="label">活跃执行</div>
         <div class="value orange" id="activeExec">-</div>
-        <div class="detail" id="execDetail">/ 2 最大</div>
+        <div class="detail" id="execDetail">/ 4 最大</div>
       </div>
     </div>
-    <div class="main-grid">
-      <div>
-        <div class="card">
-          <div class="card-header">📈 操作类型统计</div>
-          <div class="card-body">
-            <table class="perf-table"><thead><tr><th>操作类型</th><th>中文注释</th><th>次数</th><th>成功/失败</th><th>成功率</th><th>占比</th></tr></thead>
-            <tbody id="perfTable"><tr><td colspan="6"><div class="loading"><div class="spinner"></div>加载中...</div></td></tr></tbody></table>
+
+    <div class="card">
+      <div class="card-header">📈 操作类型统计</div>
+      <div class="card-body">
+        <table class="perf-table"><thead><tr><th>操作类型</th><th>中文注释</th><th>次数</th><th>成功/失败</th><th>成功率</th><th>占比</th></tr></thead>
+        <tbody id="perfTable"><tr><td colspan="6"><div class="loading"><div class="spinner"></div>加载中...</div></td></tr></tbody></table>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">🔌 连接状态（SSH / MCP）</div>
+      <div class="card-body">
+        <div class="channel-grid">
+          <div class="channel-card">
+            <div class="channel-head">SSH 渠道</div>
+            <div class="channel-kpi">
+              <div class="kpi-mini"><div class="k">SSH Users</div><div class="v" id="kpiSshUsers">0</div></div>
+              <div class="kpi-mini"><div class="k">SSH Conn</div><div class="v" id="kpiSshConn">0</div></div>
+            </div>
+            <div class="channel-list" id="sshSessionsList"><div class="channel-empty">加载中...</div></div>
+          </div>
+          <div class="channel-card">
+            <div class="channel-head">MCP 渠道</div>
+            <div class="channel-kpi">
+              <div class="kpi-mini"><div class="k">MCP Online</div><div class="v" id="kpiMcpOnline">0</div></div>
+              <div class="kpi-mini"><div class="k">MCP Req 5m</div><div class="v" id="kpiMcpReq">0</div></div>
+            </div>
+            <div class="channel-list" id="mcpClientsConnList"><div class="channel-empty">加载中...</div></div>
+          </div>
+          <div class="channel-card">
+            <div class="channel-head">Process 渠道</div>
+            <div class="channel-kpi">
+              <div class="kpi-mini"><div class="k">MCP Conn</div><div class="v" id="kpiMcpConn">0</div></div>
+              <div class="kpi-mini"><div class="k">Proc / Threads</div><div class="v"><span id="kpiProc">0</span>/<span id="kpiThread">0</span></div></div>
+            </div>
+            <div class="channel-list" id="topProcList"><div class="channel-empty">加载中...</div></div>
           </div>
         </div>
-        <div class="card">
-          <div class="card-header">⚠️ 最近错误</div>
-          <div class="card-body"><div class="error-list" id="errorList"><div class="loading"><div class="spinner"></div>加载中...</div></div></div>
-        </div>
       </div>
-      <div>
-        <div class="card">
-          <div class="card-header">👥 客户端统计</div>
-          <div class="card-body"><div class="client-list" id="clientList"><div class="loading"><div class="spinner"></div>加载中...</div></div></div>
-        </div>
-        <div class="card">
-          <div class="card-header">🔧 服务状态</div>
-          <div class="card-body"><div id="serviceStatus"><div class="loading"><div class="spinner"></div>加载中...</div></div></div>
-        </div>
+    </div>
+
+    <div class="bottom-grid">
+      <div class="card">
+        <div class="card-header">⚠️ 最近错误</div>
+        <div class="card-body"><div class="error-list" id="errorList"><div class="loading"><div class="spinner"></div>加载中...</div></div></div>
+      </div>
+      <div class="card">
+        <div class="card-header">🔧 服务状态</div>
+        <div class="card-body"><div id="serviceStatus"><div class="loading"><div class="spinner"></div>加载中...</div></div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">🔌 连接断开日志</div>
+      <div class="card-body">
+        <div class="error-list" id="connectionErrorList"><div class="loading"><div class="spinner"></div>加载中...</div></div>
       </div>
     </div>
   </div>
+
   <script>
     const TOKEN=new URLSearchParams(location.search).get('token')||'';
     let currentDays=1;
     let refreshTimer=null;
+    function esc(v){return String(v??'').replace(/[&<>\"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[m]));}
     async function fetchJSON(url){return fetch(url+(TOKEN?(url.includes('?')?'&':'?')+'token='+encodeURIComponent(TOKEN):'')).then(r=>r.json())}
     function fmtTime(iso){return new Date(iso).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}
-    function fmtTimeAgo(iso){
-      if(!iso)return'从未';
-      const diff=Date.now()-new Date(iso).getTime();
-      if(diff<60000)return'刚刚';
-      if(diff<3600000)return Math.floor(diff/60000)+'分钟前';
-      if(diff<86400000)return Math.floor(diff/3600000)+'小时前';
-      return Math.floor(diff/86400000)+'天前';
-    }
-    function getClientType(n){if(n.includes('codex'))return'codex';if(n.includes('mcp')||n.includes('remote'))return'mcp';return'workbuddy'}
     function setDays(d,btn){
       currentDays=d;
       document.querySelectorAll('.time-btn').forEach(b=>b.classList.remove('active'));
       btn.classList.add('active');
       loadData();
     }
-    function isOnline(lastSeen){
-      if(!lastSeen)return false;
-      return(Date.now()-new Date(lastSeen).getTime())<300000;
-    }
-    function fmtUptime(sec){
-      const d=Math.floor(sec/86400),h=Math.floor(sec%86400/3600),m=Math.floor(sec%3600/60);
-      return(d>0?d+'天':'')+(h>0?h+'小时':'')+m+'分钟';
+    function renderConnections(conn){
+      const ssh=(conn&&conn.ssh)||{};
+      const mcp=(conn&&conn.mcp)||{};
+      const proc=(conn&&conn.processes)||{};
+      document.getElementById('kpiSshUsers').textContent=ssh.sessionsCount??0;
+      document.getElementById('kpiSshConn').textContent=ssh.establishedCount??0;
+      document.getElementById('kpiMcpOnline').textContent=mcp.activeClientsCount??0;
+      document.getElementById('kpiMcpReq').textContent=mcp.requestWindow??0;
+      document.getElementById('kpiMcpConn').textContent=mcp.establishedCount??0;
+      document.getElementById('kpiProc').textContent=proc.totalProcesses??0;
+      document.getElementById('kpiThread').textContent=proc.totalThreads??0;
+
+      const sshRows=Array.isArray(ssh.sessions)?ssh.sessions:[];
+      document.getElementById('sshSessionsList').innerHTML=sshRows.length
+        ?sshRows.map(s=>`<div class="channel-item"><div class="channel-main"><div class="channel-name">${esc(s.user)}@${esc(s.tty)}</div><span class="channel-badge online">SSH</span></div><div class="channel-meta">${esc(s.from)} · ${esc(s.loginAt)}</div></div>`).join('')
+        :'<div class="channel-empty">暂无 SSH 会话</div>';
+
+      const mcpRows=Array.isArray(mcp.activeClients)?mcp.activeClients:[];
+      document.getElementById('mcpClientsConnList').innerHTML=mcpRows.length
+        ?mcpRows.map(c=>`<div class="channel-item"><div class="channel-main"><div class="channel-name">${esc(c.clientId)}</div><span class="channel-badge ${c.online?'online':'offline'}">${c.online?'在线':'离线'}</span></div><div class="channel-meta">${c.requestWindow??0} req · ok ${c.ok??0} / fail ${c.fail??0} · ${c.avgMs==null?'-':c.avgMs+'ms'}</div></div>`).join('')
+        :'<div class="channel-empty">暂无 MCP 活跃数据</div>';
+
+      const procRows=Array.isArray(proc.topProcesses)?proc.topProcesses:[];
+      document.getElementById('topProcList').innerHTML=procRows.length
+        ?procRows.map(p=>`<div class="channel-item"><div class="channel-name">#${esc(p.pid)} ${esc(p.command)}</div><div class="channel-meta">CPU ${Number(p.cpu||0).toFixed(1)}% · MEM ${Number(p.mem||0).toFixed(1)}% · T ${esc(p.threads)}</div></div>`).join('')
+        :'<div class="channel-empty">暂无进程数据</div>';
     }
     async function loadData(){
       try{
-        const[h,st,err,svc]=await Promise.all([
+        const[h,st,err,svc,conn,connErr]=await Promise.all([
           fetchJSON('/healthz'),
           fetchJSON('/api/stats?days='+currentDays),
           fetchJSON('/api/errors?limit=15&days='+currentDays),
-          fetchJSON('/api/service-status')
+          fetchJSON('/api/service-status'),
+          fetchJSON('/api/connections?mcpWindowMin=5'),
+          fetchJSON('/api/connection-errors?limit=20&days='+currentDays)
         ]);
-        document.getElementById('serverTime').textContent='服务器: '+fmtTime(h.time)+' | '+h.workspaceRoot;
+        const workspace = h.workspaceRoot || '-';
+        const daemonDir = h.daemonDir || '-';
+        document.getElementById('serverTime').textContent='服务器: '+fmtTime(h.time)+' | 工作区: '+workspace+' | AgentPort: '+daemonDir;
         document.getElementById('totalRequests').textContent=st.total.toLocaleString();
         document.getElementById('avgResponse').textContent=st.avgMs.toFixed(0);
         document.getElementById('totalErrors').textContent=st.errors.toLocaleString();
         document.getElementById('errorRate').textContent=st.total?(st.errors/st.total*100).toFixed(1)+'% 失败率':'-';
         document.getElementById('activeExec').textContent=h.exec.running;
         document.getElementById('execDetail').textContent='/ '+h.exec.max+' 最大';
-        // Performance table
-        const typeLabels={'fs.read':'文件读取','fs.write':'文件写入','fs.glob':'文件搜索','exec':'命令执行','exec.async':'异步命令执行','exec.script':'脚本执行','batch':'批量操作'};
+        const typeLabels={'fs.read':'文件读取','fs.write':'文件写入','fs.glob':'文件搜索','fs.grep':'内容搜索','exec':'命令执行','exec.async':'异步命令执行','exec.script':'脚本执行','batch':'批量操作','job.start':'任务启动','job.cancel':'任务取消'};
         const pt=document.getElementById('perfTable'),total=st.byType.reduce((s,t)=>s+t.count,0);
         pt.innerHTML=st.byType.map(t=>{const rate=parseFloat(t.successRate);const color=rate>=95?'var(--green)':rate>=80?'var(--orange)':'var(--red)';return`<tr><td><span class="type-badge ${t.type.split('.')[0]}">${t.type}</span></td><td style="color:var(--text2)">${typeLabels[t.type]||t.type}</td><td>${t.count}</td><td style="color:var(--text2)">${t.ok}/${t.fail}</td><td style="color:${color};font-weight:600">${t.successRate}%</td><td>${total?(t.count/total*100).toFixed(1):'0'}%</td></tr>`}).join('');
-        // Client list
-        const cl=document.getElementById('clientList');
-        const clientEntries=Object.entries(st.byClient).sort((a,b)=>{
-          const aOn=isOnline(a[1].lastSeen)?0:1,bOn=isOnline(b[1].lastSeen)?0:1;
-          return aOn-bOn||b[1].count-a[1].count;
-        });
-        cl.innerHTML=clientEntries.map(([c,info])=>{
-          const on=isOnline(info.lastSeen);
-          return`<div class="client-item"><div class="client-avatar ${getClientType(c)}">${c.slice(0,2).toUpperCase()}</div><div class="client-info"><div class="client-name">${c}</div><div class="client-meta">${info.count} 次请求 · ${fmtTimeAgo(info.lastSeen)}</div></div><span class="client-status ${on?'online':'offline'}">${on?'在线':'离线'}</span></div>`;
-        }).join('');
-        // Errors
         const el=document.getElementById('errorList');
-        if(err.errors&&err.errors.length>0)el.innerHTML=err.errors.map(e=>`<div class="error-item"><span class="error-time">${fmtTime(e.ts)}</span><span class="error-msg" title="${e.error}">${e.error}</span><span class="error-type">${e.type}</span></div>`).join('');
+        if(err.errors&&err.errors.length>0)el.innerHTML=err.errors.map(e=>`<div class="error-item"><span class="error-time">${fmtTime(e.ts)}</span><span class="error-msg" title="${esc(e.error)}">${esc(e.error)}</span><span class="error-type">${esc(e.type)}</span></div>`).join('');
         else el.innerHTML='<div style="text-align:center;padding:20px;color:var(--green)">✓ 暂无错误</div>';
-        // Service status (all items, deps has collapsible sub-items)
+
+        const ce=document.getElementById('connectionErrorList');
+        if(connErr.errors&&connErr.errors.length>0){
+          ce.innerHTML=connErr.errors.map(e=>{
+            const cid=e.clientId?` · ${esc(e.clientId)}`:'';
+            const src=e.source?` · ${esc(e.source)}`:'';
+            return `<div class="error-item"><span class="error-time">${fmtTime(e.ts)}</span><span class="error-msg" title="${esc(e.error)}">${esc(e.error)}${cid}${src}</span><span class="error-type">${esc(e.type||'conn')}</span></div>`;
+          }).join('');
+        }else{
+          ce.innerHTML='<div style="text-align:center;padding:20px;color:var(--green)">✓ 暂无连接断开日志</div>';
+        }
+
         const ssEl=document.getElementById('serviceStatus');
         const svcItems=Object.entries(svc).filter(([k])=>k!=='disk').map(([,s])=>s);
         ssEl.innerHTML=svcItems.map((s,i)=>{
           const badge=s.status==='ok'||s.status==='running'?'ok':s.status==='warn'?'warn':'error';
           const label=s.status==='ok'||s.status==='running'?'正常':s.status==='warn'?'警告':'异常';
           if(s.deps){
-            const subHtml=s.deps.map(d=>`<div class="svc-sub-item"><span class="svc-dot ${badge}"></span>${d}</div>`).join('');
-            return`<div class="svc-item"><div class="svc-main"><div class="svc-name clickable" onclick="toggleDeps(this)"><span class="svc-arrow" id="arrow${i}">▸</span>${s.name}</div><div class="svc-detail">${s.detail||''}</div><div class="svc-sub" id="deps${i}">${subHtml}</div></div><span class="svc-badge ${badge}">${label}</span></div>`;
+            const subHtml=s.deps.map(d=>`<div class="svc-sub-item"><span class="svc-dot ${badge}"></span>${esc(d)}</div>`).join('');
+            return`<div class="svc-item"><div class="svc-main"><div class="svc-name clickable" onclick="toggleDeps(this)"><span class="svc-arrow" id="arrow${i}">▸</span>${esc(s.name)}</div><div class="svc-detail">${esc(s.detail||'')}</div><div class="svc-sub" id="deps${i}">${subHtml}</div></div><span class="svc-badge ${badge}">${label}</span></div>`;
           }
-          return`<div class="svc-item"><div class="svc-main"><div class="svc-name">${s.name}</div><div class="svc-detail">${s.detail||''}</div></div><span class="svc-badge ${badge}">${label}</span></div>`;
+          return`<div class="svc-item"><div class="svc-main"><div class="svc-name">${esc(s.name)}</div><div class="svc-detail">${esc(s.detail||'')}</div></div><span class="svc-badge ${badge}">${label}</span></div>`;
         }).join('');
-      }catch(e){document.body.innerHTML='<div style="padding:40px;text-align:center;color:var(--red)">加载失败: '+e.message+'</div>'}
+        renderConnections(conn);
+      }catch(e){document.body.innerHTML='<div style="padding:40px;text-align:center;color:var(--red)">加载失败: '+esc(e.message)+'</div>'}
     }
     loadData();
     refreshTimer=setInterval(loadData,5000);

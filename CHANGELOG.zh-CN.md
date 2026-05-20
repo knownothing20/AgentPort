@@ -43,7 +43,7 @@
 ## [2.3.1] - 2026-04
 
 ### 更名
-- **项目更名**：从 `niuma-ssh` 更名为 `mcp-remote-agent`，更准确反映定位（MCP Server for AI Agent Remote Development）
+- **项目更名**：从 `niuma-ssh` 更名为 `agentport`，更准确反映定位（MCP Server for AI Agent Remote Development）
 
 ### 安全修复
 - **脚本解释器白名单**：修复 `remote_script` 解释器未校验的安全漏洞，仅允许白名单内的解释器（bash, sh, python3, node 等）
@@ -51,7 +51,7 @@
 
 ### 新增功能
 - **Dashboard HTML UI**：新增 Web Dashboard，支持服务状态监控、审计统计、错误记录、配置管理
-- **自启动配置脚本**：新增 `setup-autostart.sh`，支持一键安装/卸载 crontab 自启动配置
+- **自启动配置脚本**：新增 `setup-autostart-agentport.sh`，支持一键安装/卸载 crontab 自启动配置
 - **目录结构重构**：配置文件移至 `local/` 目录，敏感信息不上传 Git
 
 ### 文档
@@ -76,7 +76,7 @@
 
 ### 新增
 - **配置热重载**：`remote_config` 工具支持读取/修改远端守护进程配置，修改后自动热重载，无需重启服务
-- `mcp-remote-agent.json` 升级为变量中心，统一管理客户端和服务端配置
+- `agentport.json` 升级为变量中心，统一管理客户端和服务端配置
 - `sync.cjs` 脚本自动同步变量到所有下游文件
 - 服务端文件纳入 skill 包的 `server/` 目录
 

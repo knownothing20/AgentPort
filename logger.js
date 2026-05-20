@@ -1,5 +1,5 @@
 /**
- * Local logging module for mcp-remote-agent
+ * Local logging module for agentport
  * - Daily rotation (one file per day)
  * - Auto-cleanup: keep last 7 days
  * - Logs stored in local/logs/
@@ -30,7 +30,7 @@ function ensureLogDir() {
 // Get today's log file path
 function getLogFilePath() {
   const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-  return path.join(LOG_DIR, `mcp-remote-agent-${today}.log`);
+  return path.join(LOG_DIR, `agentport-${today}.log`);
 }
 
 // Cleanup old log files (older than MAX_DAYS)
@@ -42,8 +42,11 @@ function cleanupOldLogs() {
     const cutoffStr = cutoff.toISOString().slice(0, 10);
 
     for (const file of files) {
-      if (file.startsWith("mcp-remote-agent-") && file.endsWith(".log")) {
-        const dateMatch = file.match(/mcp-remote-agent-(\d{4}-\d{2}-\d{2})\.log/);
+      if (
+        (file.startsWith("agentport-") || file.startsWith("agentport-"))
+        && file.endsWith(".log")
+      ) {
+        const dateMatch = file.match(/(?:agentport|agentport)-(\d{4}-\d{2}-\d{2})\.log/);
         if (dateMatch && dateMatch[1] < cutoffStr) {
           const filePath = path.join(LOG_DIR, file);
           fs.unlinkSync(filePath);

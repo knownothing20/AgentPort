@@ -25,7 +25,7 @@
 
 ### Changed
 - Added per-process `sessionId`, uptime, stdio state, transport state, memory/resource usage, recent diagnostic events, last tool call, and active tool call snapshots to failure/close logs.
-- Added a local process registry in `local/logs/mcp-remote-agent-processes.json` to flag recent sibling MCP client processes that may indicate repeated host restarts or duplicate stdio clients.
+- Added a local process registry in `local/logs/agentport-processes.json` to flag recent sibling MCP client processes that may indicate repeated host restarts or duplicate stdio clients.
 - Increased structured log payload retention from 500 characters to a configurable `MCP_REMOTE_LOG_DATA_MAX_BYTES` defaulting to 4000 characters, with circular object and `Error` serialization support.
 
 ---
@@ -100,7 +100,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1. Added `cli.js` so agents with Bash/terminal access can run `doctor`, `list`, `connect`, `health`, `read`, `write`, `stat`, `glob`, `bash`, `script`, and `batch` without native MCP injection.
   2. Added `AGENT_GUIDE.md` with the agent-side install, probe, and usage workflow: native MCP first, CLI fallback second, daemon before SSH, HTTP/manual last.
   3. Updated `SKILL.md` and README files so future agents know how to choose the correct integration path automatically instead of hard-coding one AI desktop app.
-  4. Added package entrypoints `npm run cli`, `npm run doctor`, and `bin.mcp-remote-agent`.
+  4. Added package entrypoints `npm run cli`, `npm run doctor`, and `bin.agentport`.
   5. Updated the sync whitelist so public repository sync includes the CLI, agent guide, and lockfile while excluding real local connection/token files.
 - **Risk**: CLI fallback shares the same local `connections.json` source as the MCP server, so each target AI app still needs a valid local config. Daemon mode remains preferred for long-running coding; SSH lacks async/config-management features.
 - **Verification**: Ran syntax checks, `node cli.js doctor`, daemon `health/read/bash/write`, SSH `bash`, privacy scans, repository sync, pre-commit privacy hook, and pushed commit `cb2c557`.
@@ -108,7 +108,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **CLI fallback adapter**: added `cli.js` for AI tools that cannot inject native MCP tools but can run Bash/terminal commands
 - **Agent install and usage guide**: added `AGENT_GUIDE.md` with the recommended priority order: native MCP first, CLI fallback second, HTTP/manual fallbacks only when needed
-- **Package CLI entrypoints**: added `npm run cli`, `npm run doctor`, and a `mcp-remote-agent` bin entry
+- **Package CLI entrypoints**: added `npm run cli`, `npm run doctor`, and a `agentport` bin entry
 
 ### Fixed
 - **Node 22+ SSH compatibility**: `ssh-client.js` now restores the legacy `util.isDate` helper before loading `ssh2`, fixing `remote_read`, `remote_write`, and daemon auto-deploy flows that were failing with `isDate is not a function`
@@ -153,7 +153,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [2.3.1] - 2026-04
 
 ### Renamed
-- **Project Renamed**: From `niuma-ssh` to `mcp-remote-agent`, better reflecting its positioning (MCP Server for AI Agent Remote Development)
+- **Project Renamed**: From `niuma-ssh` to `agentport`, better reflecting its positioning (MCP Server for AI Agent Remote Development)
 
 ### Security Fixes
 - **Script Interpreter Whitelist**: Fixed security vulnerability in `remote_script` interpreter validation, only whitelisted interpreters allowed (bash, sh, python3, node, etc.)
@@ -161,7 +161,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### New Features
 - **Dashboard HTML UI**: Added Web Dashboard for service status monitoring, audit statistics, error logging, and configuration management
-- **Autostart Configuration Script**: Added `setup-autostart.sh` for one-click install/uninstall of crontab autostart configuration
+- **Autostart Configuration Script**: Added `setup-autostart-agentport.sh` for one-click install/uninstall of crontab autostart configuration
 - **Directory Structure Refactoring**: Configuration files moved to `local/` directory, sensitive information excluded from Git
 
 ### Documentation
@@ -186,7 +186,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Configuration Hot Reload**: `remote_config` tool supports reading/modifying remote daemon configuration with automatic hot reload after changes
-- `mcp-remote-agent.json` upgraded to variable center, unified management of client and server configurations
+- `agentport.json` upgraded to variable center, unified management of client and server configurations
 - `sync.cjs` script for automatic variable synchronization to all downstream files
 - Server files included in skill package's `server/` directory
 

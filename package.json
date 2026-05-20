@@ -1,7 +1,7 @@
 {
-  "name": "mcp-remote-agent",
+  "name": "agentport",
   "version": "2.5.0",
-  "description": "AI Remote Development Gateway for MCP, CLI, SSH recovery, and persistent daemon jobs",
+  "description": "AgentPort remote development gateway for MCP, CLI, SSH recovery, and persistent daemon jobs",
   "main": "index.js",
   "type": "module",
   "scripts": {
@@ -15,7 +15,7 @@
     "sync:dry": "node sync.cjs --dry-run"
   },
   "bin": {
-    "mcp-remote-agent": "./cli.js"
+    "agentport": "./cli.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

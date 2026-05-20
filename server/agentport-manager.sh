@@ -5,7 +5,7 @@ DAEMON_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DAEMON_DIR"
 
 LOG_DIR="$DAEMON_DIR"
-LOG_FILE="$LOG_DIR/mcp-remote-agent.log"
+LOG_FILE="$LOG_DIR/agentport.log"
 AUDIT_LOG="$LOG_DIR/audit.log"
 MAX_LOG_SIZE=10485760  # 10MB
 MAX_LOG_COPIES=5
@@ -29,19 +29,19 @@ rotate_log() {
   fi
 }
 
-echo "[mcp-remote-agent] checking runtime"
+echo "[agentport] checking runtime"
 command -v node >/dev/null
 command -v npm >/dev/null
 
-echo "[mcp-remote-agent] installing dependencies"
+echo "[agentport] installing dependencies"
 npm install express cors fast-glob dotenv --no-fund --no-audit >/dev/null 2>&1
 
 if [ ! -f "server.js" ]; then
-  echo "[mcp-remote-agent] server.js not found, aborting"
+  echo "[agentport] server.js not found, aborting"
   exit 1
 fi
 
-echo "[mcp-remote-agent] stopping old daemon"
+echo "[agentport] stopping old daemon"
 # Only kill node server.js processes running from this directory
 for pid in $(ss -tlnp 2>/dev/null | grep ":${PORT:-3183} " | grep -oP 'pid=\K[0-9]+'); do
   kill "$pid" 2>/dev/null || true
@@ -54,10 +54,12 @@ for pid in $(pgrep -f "node server.js" 2>/dev/null); do
 done
 sleep 1
 
-# Unset env vars so dotenv reads fresh .env on restart
-unset AUTH_TOKENS ADMIN_TOKENS
+# Unset runtime env vars so dotenv reads fresh .env on restart
+unset PORT BIND_HOST WORKSPACE_ROOT ENABLE_DASHBOARD
+unset EXEC_TIMEOUT_MS EXEC_MAX_CONCURRENCY EXEC_QUEUE_TIMEOUT_MS
+unset AUDIT_LOG_PATH JOBS_DIR AUTH_TOKENS ADMIN_TOKENS
 
-echo "[mcp-remote-agent] starting daemon with auto-restart guard"
+echo "[agentport] starting daemon with auto-restart guard"
 while true; do
   # Rotate logs before each start if they've grown too large
   rotate_log "$LOG_FILE"
@@ -65,6 +67,6 @@ while true; do
 
   node server.js >> "$LOG_FILE" 2>&1
   EXIT_CODE=$?
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] mcp-remote-agent exited with code ${EXIT_CODE}, restarting in 5s..." >> "$LOG_FILE"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] agentport exited with code ${EXIT_CODE}, restarting in 5s..." >> "$LOG_FILE"
   sleep 5
 done
