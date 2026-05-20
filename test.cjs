@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * mcp-remote-agent Post-Installation Test Suite
+ * AgentPort Post-Installation Test Suite
  *
  * Usage:
  *   cd <skillDir>
@@ -39,7 +39,12 @@ function section(title) { console.log(`\n${C.bold}${C.cyan}${title}${C.reset}\n$
 
 const SKILL_DIR = __dirname;
 const LOCAL_DIR = path.join(SKILL_DIR, "local");
-const MAIN_CONFIG_PATH = path.join(LOCAL_DIR, "mcp-remote-agent.json");
+const PRIMARY_MAIN_CONFIG_PATH = path.join(LOCAL_DIR, "agentport.json");
+function resolveMainConfigPath() {
+  if (fs.existsSync(PRIMARY_MAIN_CONFIG_PATH)) return PRIMARY_MAIN_CONFIG_PATH;
+  return PRIMARY_MAIN_CONFIG_PATH;
+}
+const MAIN_CONFIG_PATH = resolveMainConfigPath();
 const RUNTIME_MODE_PATH = path.join(LOCAL_DIR, "runtime-mode.json");
 
 function readJsonSafe(filePath) {
@@ -83,7 +88,7 @@ function decideDetectedMode(requestedMode, nativeReady, executableReady) {
 
 function detectMode(config, runtimeModeObj) {
   const vars = config?.variables || {};
-  const mcpServerName = vars.mcpServerName || config?.name || "mcp-remote-agent";
+  const mcpServerName = vars.mcpServerName || config?.name || "agentport";
   const mcpConfigPath = vars.mcpConfigPath || "";
   const requestedMode = resolveRequestedMode(runtimeModeObj);
 
@@ -158,7 +163,7 @@ async function runPreflight(config) {
   push("file: SKILL.md", fs.existsSync(path.join(SKILL_DIR, "SKILL.md")));
   push("file: index.js", fs.existsSync(path.join(SKILL_DIR, "index.js")));
   push("file: package.json", fs.existsSync(path.join(SKILL_DIR, "package.json")));
-  push("file: local/mcp-remote-agent.json", fs.existsSync(MAIN_CONFIG_PATH));
+  push("file: local/agentport.json", fs.existsSync(MAIN_CONFIG_PATH));
 
   const nm = path.join(SKILL_DIR, "node_modules");
   push("dep: node_modules", fs.existsSync(nm));
@@ -272,8 +277,10 @@ async function localTests() {
   for (const f of ["SKILL.md", "index.js", "package.json"]) {
     fs.existsSync(path.join(SKILL_DIR, f)) ? pass(`File: ${f}`) : fail(`File missing: ${f}`);
   }
-  // Check local/mcp-remote-agent.json
-  fs.existsSync(path.join(SKILL_DIR, "local", "mcp-remote-agent.json")) ? pass("File: local/mcp-remote-agent.json") : fail("File missing: local/mcp-remote-agent.json", "cp mcp-remote-agent.example.json local/mcp-remote-agent.json");
+  // Check local config
+  fs.existsSync(MAIN_CONFIG_PATH)
+    ? pass(`File: ${path.relative(SKILL_DIR, MAIN_CONFIG_PATH).replace(/\\/g, "/")}`)
+    : fail("File missing: local/agentport.json", "cp agentport.example.json local/agentport.json");
 
   // Dependencies
   const nm = path.join(SKILL_DIR, "node_modules");
@@ -295,8 +302,8 @@ async function localTests() {
     }
   } catch (e) { fail("index.js read error", e.message); }
 
-  // Version — read from local/mcp-remote-agent.json (single source of truth)
-  const cfgPath = path.join(SKILL_DIR, "local", "mcp-remote-agent.json");
+  // Version — read from local config (single source of truth, with legacy fallback)
+  const cfgPath = MAIN_CONFIG_PATH;
   try {
     const config = JSON.parse(fs.readFileSync(cfgPath, "utf-8").replace(/^\uFEFF/, ""));
     const expectedVersion = config.version || "?";
@@ -308,12 +315,12 @@ async function localTests() {
   let config = null;
   try {
     config = JSON.parse(fs.readFileSync(cfgPath, "utf-8").replace(/^\uFEFF/, ""));
-    pass("local/mcp-remote-agent.json: OK");
+    pass(`${path.relative(SKILL_DIR, cfgPath).replace(/\\/g, "/")}: OK`);
     const env = config.mcp?.server?.env || {};
     // Support both new (MCP_REMOTE_*) and legacy (NIUMA_SSH_*) env var names
     (env.MCP_REMOTE_URL || env.NIUMA_SSH_REMOTE_URL) ? pass("REMOTE_URL configured") : fail("REMOTE_URL missing");
     (env.MCP_REMOTE_AUTH_TOKEN || env.NIUMA_SSH_AUTH_TOKEN) ? pass("AUTH_TOKEN configured") : fail("AUTH_TOKEN missing");
-  } catch (e) { fail("local/mcp-remote-agent.json error", e.message); }
+  } catch (e) { fail("local config error", e.message); }
 
   return config;
 }
@@ -371,8 +378,8 @@ async function remoteTests(remoteUrl, authToken) {
   } catch (e) { fail(`remote_stat: ${e.message}`); }
 
   // Create deterministic markdown file for glob/read checks
-  const rf = ".mcp-remote-agent-read-test.md";
-  const rc = `# mcp-remote-agent read test\nts: ${new Date().toISOString()}\n`;
+  const rf = ".agentport-read-test.md";
+  const rc = `# agentport read test\nts: ${new Date().toISOString()}\n`;
   try {
     const wr = await api(remoteUrl, "/api/fs/write", authToken, { path: rf, content: rc });
     if (wr.status === 200) {
@@ -386,7 +393,7 @@ async function remoteTests(remoteUrl, authToken) {
 
   // glob — server returns {success, files:[...]} or {entries:[...]}
   try {
-    const r = await api(remoteUrl, "/api/fs/glob", authToken, { pattern: ".mcp-remote-agent-*.md" });
+    const r = await api(remoteUrl, "/api/fs/glob", authToken, { pattern: ".agentport-*.md" });
     const d = JSON.parse(r.body);
     const files = d.files || d.entries || (Array.isArray(d) ? d : []);
     const okGlob = r.status === 200 && Array.isArray(files) && files.some((f) => String(f).includes(rf));
@@ -400,7 +407,7 @@ async function remoteTests(remoteUrl, authToken) {
     const r = await api(remoteUrl, "/api/fs/read", authToken, { path: rf });
     if (r.status === 200) {
       const d = JSON.parse(r.body);
-      typeof d.content === "string" && d.content.includes("mcp-remote-agent read test")
+      typeof d.content === "string" && d.content.includes("agentport read test")
         ? pass("remote_read: content", `${(d.content.length / 1024).toFixed(1)}KB`)
         : fail("remote_read: no/invalid content");
       d.etag ? pass("remote_read: ETag", d.etag.slice(0, 16) + "...") : fail("remote_read: no ETag");
@@ -410,8 +417,8 @@ async function remoteTests(remoteUrl, authToken) {
   } catch (e) { fail(`remote_read: ${e.message}`); }
 
   // write + verify + cleanup
-  const tf = ".mcp-remote-agent-test.txt";
-  const tc = `mcp-remote-agent test\nts: ${new Date().toISOString()}\n`;
+  const tf = ".agentport-test.txt";
+  const tc = `agentport test\nts: ${new Date().toISOString()}\n`;
   try {
     const wr = await api(remoteUrl, "/api/fs/write", authToken, { path: tf, content: tc });
     if (wr.status === 200) {
@@ -420,7 +427,7 @@ async function remoteTests(remoteUrl, authToken) {
       if (rr.status === 200) {
         JSON.parse(rr.body).content === tc ? pass("remote_write: read-back match") : fail("remote_write: content mismatch");
       }
-      await api(remoteUrl, "/api/exec", authToken, { command: `rm -f ${tf} .mcp-remote-agent-read-test.md` });
+      await api(remoteUrl, "/api/exec", authToken, { command: `rm -f ${tf} .agentport-read-test.md` });
       pass("remote_write: cleaned up");
     } else { fail(`remote_write: HTTP ${wr.status}`); }
   } catch (e) { fail(`remote_write: ${e.message}`); }
@@ -547,7 +554,7 @@ async function remoteTests(remoteUrl, authToken) {
 
   // Test: write to /tmp should fail
   try {
-    const r = await api(remoteUrl, "/api/fs/write", authToken, { path: "/tmp/mcp-remote-agent-boundary-test.txt", content: "test" });
+    const r = await api(remoteUrl, "/api/fs/write", authToken, { path: "/tmp/agentport-boundary-test.txt", content: "test" });
     const d = JSON.parse(r.body);
     d?.error || r.status !== 200
       ? pass("path boundary: write /tmp denied")
@@ -590,7 +597,7 @@ async function remoteTests(remoteUrl, authToken) {
 
 // ─── Main ────────────────────────────────────────────────────────────
 async function main() {
-  let pkgName = "mcp-remote-agent", pkgVersion = "?";
+  let pkgName = "agentport", pkgVersion = "?";
   let config = null;
   try {
     config = readJsonSafe(MAIN_CONFIG_PATH);
@@ -646,7 +653,7 @@ async function main() {
     }
   } else if (!LOCAL_ONLY) {
     section("Phase 2: Remote Connection");
-    skip("All remote tests", "local/mcp-remote-agent.json not found");
+    skip("All remote tests", "local config not found (expected local/agentport.json)");
   }
 
   const total = results.pass + results.fail;

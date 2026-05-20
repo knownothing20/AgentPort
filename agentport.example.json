@@ -1,21 +1,18 @@
 {
-  "name": "mcp-remote-agent",
-  "version": "0.0.0",
-  "description": "MCP Server for AI Agent Remote Development - 让 AI Agent 通过 MCP 协议操作远程 Linux 服务器",
+  "name": "agentport",
+  "version": "2.5.0",
+  "description": "AgentPort remote development gateway for MCP, CLI, SSH recovery, and persistent daemon jobs",
   "author": "YOUR_NAME",
-
   "variables": {
     "remoteUrl": "http://YOUR_SERVER_IP:3183",
     "authToken": "YOUR_CLIENT_TOKEN",
     "clientId": "YOUR_CLIENT_NAME",
     "timeoutMs": "120000",
-    "sharedConnectionsPath": "~/.mcp-remote-agent/connections.shared.json",
+    "sharedConnectionsPath": "~/.agentport/connections.shared.json",
     "skillDir": "ABSOLUTE_PATH_TO_SKILL_DIR",
     "nodePath": "node",
-
     "mcpConfigPath": "PATH_TO_YOUR_AI_TOOL_MCP_CONFIG",
-    "mcpServerName": "mcp-remote-agent",
-
+    "mcpServerName": "agentport",
     "serverPort": "3183",
     "serverBindHost": "0.0.0.0",
     "serverWorkspaceRoot": "/home/YOUR_USER/YOUR_WORKSPACE",
@@ -23,16 +20,17 @@
     "serverExecTimeoutMs": "120000",
     "serverExecMaxConcurrency": "4",
     "serverExecQueueTimeoutMs": "15000",
-    "serverDaemonDir": "/home/YOUR_USER/.mcp-remote-agent/daemon",
-    "serverAuditLogPath": "/home/YOUR_USER/.mcp-remote-agent/daemon/audit.log",
+    "serverDaemonDir": "/home/YOUR_USER/.agentport/daemon",
+    "serverAuditLogPath": "/home/YOUR_USER/.agentport/daemon/audit.log",
     "serverAuthTokens": "client1=token1,client2=token2",
     "serverAdminTokens": "token1,token2"
   },
-
   "mcp": {
     "server": {
       "command": "${nodePath}",
-      "args": ["${skillDir}/index.js"],
+      "args": [
+        "${skillDir}/index.js"
+      ],
       "env": {
         "MCP_REMOTE_URL": "${remoteUrl}",
         "MCP_REMOTE_AUTH_TOKEN": "${authToken}",

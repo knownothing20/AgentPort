@@ -1,5 +1,5 @@
 /**
- * SSH Client Module for mcp-remote-agent
+ * SSH Client Module for agentport
  * 
  * Supports both password and key-based authentication via ssh2 library.
  * Also supports ssh.exe fallback for key-based auth (leverages OS SSH agent).

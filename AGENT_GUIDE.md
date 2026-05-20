@@ -1,19 +1,19 @@
 # Agent Install And Usage Guide
 
 This guide is for AI agents and AI desktop tools that need remote Linux
-development access through `mcp-remote-agent`.
+development access through `agentport`.
 
 ## Capability Priority
 
 Always choose the most stable available runtime for the task:
 
-1. CLI daemon gateway for long-running development.
-   Use `node cli.js status` and `node cli.js job ...` for tests, builds,
-   polling, and work that must survive native MCP transport failures.
-2. Native MCP tools for quick structured operations.
+1. Native MCP tools for quick structured operations.
    If `remote_*` tools are visible and stable, use `remote_connect`,
    `remote_health`, `remote_read`, `remote_write`, `remote_bash`, and the other
    `remote_*` tools directly.
+2. CLI daemon gateway for long-running development.
+   Use `node cli.js status` and `node cli.js job ...` for tests, builds,
+   polling, and work that must survive native MCP transport failures.
 3. SSH recovery inside the CLI.
    Use SSH when the daemon is unavailable or needs restart/diagnosis.
 4. HTTP/manual fallback.
@@ -34,7 +34,7 @@ node cli.js doctor
 Expected result: at least one connection reports `"ok": true`.
 
 If the target AI tool supports native MCP registration, also create
-`local/mcp-remote-agent.json` from `mcp-remote-agent.example.json`, set
+`local/agentport.json` from `agentport.example.json`, set
 `skillDir` and `mcpConfigPath`, then run `node sync.cjs`.
 
 ## Native MCP Usage

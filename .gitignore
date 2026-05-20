@@ -1,5 +1,5 @@
 # Local runtime config (never commit real secrets)
-local/mcp-remote-agent.json
+local/agentport.json
 local/connections.json
 local/cli-state.json
 local/runtime-mode.json
@@ -10,6 +10,7 @@ local/server/
 connections.json
 SYNC.md
 sync-to-github.ps1
+WHITEPAPER.md
 
 # Generated
 server/.env

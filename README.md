@@ -1,4 +1,4 @@
-# mcp-remote-agent
+# agentport
 
 AI Remote Development Gateway for MCP, CLI, SSH, and persistent daemon jobs
 
@@ -7,9 +7,9 @@ available channel: native MCP tools, CLI fallback, daemon HTTP APIs, SSH
 recovery, and persistent remote jobs.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-2.5.0-blue)](https://github.com/knownothing20/mcp-remote-agent)
+[![Version](https://img.shields.io/badge/version-2.5.0-blue)](https://github.com/knownothing20/agentport)
 
-[中文文档](./README_CN.md) | [Whitepaper](./WHITEPAPER.md)
+[中文文档](./README_CN.md)
 
 ---
 
@@ -19,19 +19,19 @@ Give AI Agents a stable remote development gateway: direct file operations,
 command execution, diagnostics, long-running job control, and recovery paths
 when a desktop tool's native MCP transport is unavailable or unstable.
 
-**Analogy**: VS Code Remote SSH is for humans; mcp-remote-agent is for AI.
+**Analogy**: VS Code Remote SSH is for humans; agentport is for AI.
 
 ---
 
 ## Architecture Overview
 
-`mcp-remote-agent` is split into a local agent gateway and a remote Linux
+`agentport` is split into a local agent gateway and a remote Linux
 daemon:
 
 ```text
 AI desktop tool
   -> CLI daemon gateway, native MCP tools, or SSH recovery
-  -> local mcp-remote-agent gateway
+  -> local agentport gateway
   -> remote daemon HTTP API
   -> remote Linux workspace
 ```
@@ -43,8 +43,8 @@ auth, safe path checks, file operations, command execution, persistent
 development jobs, audit logging, health checks, Dashboard responses, and hot
 config reload.
 
-For the design rationale, deployment model, security boundaries, and current
-operational defaults, see [WHITEPAPER.md](./WHITEPAPER.md).
+For design rationale, deployment model, and security boundaries, see
+the project documentation in this repository.
 
 ---
 
@@ -70,18 +70,15 @@ operational defaults, see [WHITEPAPER.md](./WHITEPAPER.md).
 
 ## Agent Integration Priority
 
-`mcp-remote-agent` is no longer only a native MCP server. It is a remote
-development gateway that chooses the most reliable runtime available to the AI
-tool.
+`agentport` is a remote development gateway with multiple runtime channels.
+Choose by task type:
 
-Use this priority order:
-
-1. **CLI daemon gateway for long-running development**: use `node cli.js status`
-   and persistent `job` commands for tests, builds, polling, and recovery from
-   native MCP transport failures.
-2. **Native MCP for quick structured operations**: if `remote_*` tools are
+1. **Native MCP first for quick structured operations**: if `remote_*` tools are
    visible and stable, use `remote_connect()` -> `remote_health()` -> normal
    `remote_*` operations.
+2. **CLI daemon gateway for long-running development**: use `node cli.js status`
+   and persistent `job` commands for tests, builds, polling, and recovery from
+   native MCP transport failures.
 3. **SSH recovery inside the CLI**: use SSH when the daemon is unavailable or
    needs restart/diagnosis.
 4. **HTTP/manual last**: only use direct REST calls or manual commands when MCP
@@ -156,8 +153,8 @@ disconnects from an overloaded execution queue.
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/knownothing20/mcp-remote-agent.git
-cd mcp-remote-agent
+git clone https://github.com/knownothing20/agentport.git
+cd agentport
 ```
 
 ### 2. Install dependencies
@@ -174,15 +171,15 @@ For a new computer or another AI desktop tool, see
 Short version:
 
 ```bash
-git clone https://github.com/knownothing20/mcp-remote-agent.git
-cd mcp-remote-agent
+git clone https://github.com/knownothing20/agentport.git
+cd agentport
 npm install
 cp local/connections.json.example local/connections.json
 npm run doctor
 ```
 
 Then copy your private `local/connections.json`, optional
-`local/mcp-remote-agent.json`, and SSH keys from the old computer through a
+`local/agentport.json`, and SSH keys from the old computer through a
 secure channel. Update any absolute key paths for the new machine.
 
 ### 3. CLI Guided Setup (Recommended)
@@ -205,8 +202,8 @@ The wizard will:
 If you prefer not to use the guided wizard:
 
 ```bash
-cp mcp-remote-agent.example.json local/mcp-remote-agent.json
-# Edit local/mcp-remote-agent.json, fill in all variables
+cp agentport.example.json local/agentport.json
+# Edit local/agentport.json, fill in all variables
 ```
 
 Key variables:
@@ -220,20 +217,20 @@ Key variables:
 | `serverExecMaxConcurrency` | Remote daemon command concurrency limit, default `4` |
 | `serverExecQueueTimeoutMs` | Queue wait timeout before HTTP `429`, default `15000` |
 
-### 4. Sync configuration
+### 5. Sync configuration
 
 ```bash
 node sync.cjs
 ```
 
-### 5. Deploy remote daemon
+### 6. Deploy remote daemon
 
 ```bash
 # Create daemon directory on remote server
 ssh USER@SERVER "mkdir -p /path/to/daemon"
 
 # Upload server files to remote server
-scp server/server.js server/mcp-remote-agent-manager.sh server/package.json USER@SERVER:/path/to/daemon/
+scp server/server.js server/agentport-manager.sh server/package.json USER@SERVER:/path/to/daemon/
 
 # Upload generated .env config (created by sync.cjs in step 4)
 scp local/server/.env USER@SERVER:/path/to/daemon/
@@ -242,14 +239,14 @@ scp local/server/.env USER@SERVER:/path/to/daemon/
 ssh USER@SERVER
 cd /path/to/daemon
 npm install
-nohup bash mcp-remote-agent-manager.sh >> boot.log 2>&1 &
+nohup bash agentport-manager.sh >> boot.log 2>&1 &
 ```
 
-### 6. Restart AI tool
+### 7. Restart AI tool
 
 After configuration takes effect, restart your AI tool to activate MCP registration.
 
-### 7. Verify fallback mode
+### 8. Verify fallback mode
 
 If your AI tool does not expose native `remote_*` MCP tools, verify the CLI
 fallback:
@@ -301,8 +298,7 @@ For detailed usage, see [SKILL.md](./SKILL.md)
 ## Directory Structure
 
 ```
-mcp-remote-agent/
-|-- WHITEPAPER.md                    # Architecture and operations whitepaper
+agentport/
 |-- SKILL.md                         # Complete agent documentation
 |-- README.md                        # This file (English)
 |-- README_CN.md                     # Chinese documentation
@@ -310,7 +306,7 @@ mcp-remote-agent/
 |-- index.js                         # MCP server main program
 |-- cli.js                           # CLI fallback for tools without native MCP
 |-- package.json                     # Client dependencies
-|-- mcp-remote-agent.example.json    # Public config template
+|-- agentport.example.json    # Public config template
 |-- sync.cjs                         # Variable sync script
 |-- test.cjs                         # Test script
 |-- LICENSE                          # MIT License
@@ -322,8 +318,8 @@ mcp-remote-agent/
 |       `-- .env                     # Server config generated by sync.cjs
 `-- server/
     |-- server.js                    # Remote daemon process
-    |-- mcp-remote-agent-manager.sh  # Process guardian script
-    |-- setup-autostart.sh           # Autostart config script
+    |-- agentport-manager.sh  # Process guardian script
+    |-- setup-autostart-agentport.sh           # Autostart config script
     |-- dashboard.html               # Web Dashboard UI
     |-- .env.example                 # Server config template
     `-- package.json                 # Server dependencies
@@ -333,7 +329,7 @@ mcp-remote-agent/
 
 | File | Location | Description |
 |------|----------|-------------|
-| `mcp-remote-agent.json` | `local/` | Main configuration (copy from `mcp-remote-agent.example.json`) |
+| `agentport.json` | `local/` | Main configuration (copy from `agentport.example.json`) |
 | `connections.json` | `local/` | Multi-server connections (optional, see `connections.json.example`) |
 | `.env` | `server/` | Server configuration (auto-generated by `sync.cjs`) |
 
@@ -343,11 +339,11 @@ See [`local/config-guide.md`](./local/config-guide.md) for detailed configuratio
 
 ## Dashboard
 
-mcp-remote-agent provides a Web Dashboard for monitoring and management:
+agentport provides a Web Dashboard for monitoring and management:
 
 ### Enable Dashboard
 
-Set in `local/mcp-remote-agent.json`:
+Set in `local/agentport.json`:
 
 ```json
 {
@@ -376,7 +372,7 @@ After starting the service, visit:
 
 ## Autostart Configuration
 
-### Method 1: Using setup-autostart.sh (Recommended)
+### Method 1: Using setup-autostart-agentport.sh (Recommended)
 
 ```bash
 # SSH to remote server
@@ -384,13 +380,13 @@ ssh USER@SERVER
 cd /path/to/daemon
 
 # Install autostart
-bash setup-autostart.sh install
+bash setup-autostart-agentport.sh install
 
 # Check status
-bash setup-autostart.sh status
+bash setup-autostart-agentport.sh status
 
 # Uninstall autostart
-bash setup-autostart.sh uninstall
+bash setup-autostart-agentport.sh uninstall
 ```
 
 ### Method 2: Manual crontab configuration
@@ -400,23 +396,23 @@ bash setup-autostart.sh uninstall
 crontab -e
 
 # Add the following line
-@reboot /path/to/daemon/mcp-remote-agent-manager.sh # mcp-remote-agent autostart
+@reboot /path/to/daemon/agentport-manager.sh # agentport autostart
 ```
 
 ### Method 3: Using systemd (Optional)
 
-Create `/etc/systemd/system/mcp-remote-agent.service`:
+Create `/etc/systemd/system/agentport.service`:
 
 ```ini
 [Unit]
-Description=mcp-remote-agent daemon
+Description=agentport daemon
 After=network.target
 
 [Service]
 Type=simple
 User=your-user
 WorkingDirectory=/path/to/daemon
-ExecStart=/bin/bash /path/to/daemon/mcp-remote-agent-manager.sh
+ExecStart=/bin/bash /path/to/daemon/agentport-manager.sh
 Restart=always
 RestartSec=5
 
@@ -427,8 +423,8 @@ WantedBy=multi-user.target
 Then enable:
 
 ```bash
-sudo systemctl enable mcp-remote-agent
-sudo systemctl start mcp-remote-agent
+sudo systemctl enable agentport
+sudo systemctl start agentport
 ```
 
 ---

@@ -48,6 +48,7 @@ let runtimeConfig = loadRuntimeConfig();
 const AUDIT_LOG_PATH = process.env.AUDIT_LOG_PATH || path.join(__dirname, 'audit.log');
 const JOBS_DIR = process.env.JOBS_DIR || path.join(__dirname, 'jobs');
 const JOB_LOG_TAIL_BYTES = parseRuntimeInt(process.env.JOB_LOG_TAIL_BYTES, 64 * 1024, 1024);
+const MANAGER_LOG_PATH = path.join(__dirname, 'agentport.log');
 
 // 命令执行限制配置 (v2.3.1)
 const ALLOW_BASH_EXEC = !/^false$/i.test(String(process.env.ALLOW_BASH_EXEC || 'true'));
@@ -583,17 +584,70 @@ async function audit(event) {
   } catch (_) {}
 }
 
+function redactSensitive(text) {
+  if (!text) return '';
+  let out = String(text);
+  out = out.replace(/(token|password|passphrase|authorization|x-mcp-token|x-auth-token)\s*[:=]\s*([^\s,;]+)/ig, '$1=***');
+  out = out.replace(/(--data-urlencode\s+['"]?token=)([^'"\s]+)/ig, '$1***');
+  out = out.replace(/(sshpass\s+-p\s+)(['"]?)([^'"\s]+)\2/ig, '$1$2***$2');
+  out = out.replace(/(Bearer\s+)[A-Za-z0-9._-]+/ig, '$1***');
+  out = out.replace(/\b(sk|tok|key|secret)-[a-z0-9_\-]{12,}\b/ig, '$1-***');
+  return out;
+}
+
+function clientIp(req) {
+  const xff = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  return xff || req.ip || req.socket?.remoteAddress || '-';
+}
+
+async function auditConnEvent(event) {
+  try {
+    await audit({
+      type: event.type || 'conn.event',
+      ok: event.ok !== false,
+      clientId: event.clientId || null,
+      path: event.path || null,
+      ip: event.ip || null,
+      error: event.error ? redactSensitive(event.error) : undefined,
+      detail: event.detail ? redactSensitive(event.detail) : undefined,
+    });
+  } catch {}
+}
+
 function authApi(req, res, next) {
   if (tokenClientMap.size === 0) {
+    auditConnEvent({
+      type: 'conn.auth',
+      ok: false,
+      path: req.path,
+      ip: clientIp(req),
+      error: 'Server auth not configured',
+    });
     return res.status(500).json({ error: 'Server auth not configured' });
   }
   const token = extractToken(req);
   const clientId = tokenClientMap.get(token);
   if (!clientId) {
+    auditConnEvent({
+      type: 'conn.auth',
+      ok: false,
+      path: req.path,
+      ip: clientIp(req),
+      error: 'Unauthorized',
+    });
     return res.status(401).json({ error: 'Unauthorized' });
   }
   const requestedClientId = getRequestedClientId(req);
   if (requestedClientId && requestedClientId !== clientId) {
+    auditConnEvent({
+      type: 'conn.auth',
+      ok: false,
+      path: req.path,
+      ip: clientIp(req),
+      clientId,
+      error: 'Client ID mismatch',
+      detail: `requested=${requestedClientId}`,
+    });
     return res.status(403).json({ error: 'Client ID mismatch' });
   }
   req.mcpClientId = clientId;
@@ -606,6 +660,13 @@ function authAdmin(req, res, next) {
   }
   const token = extractToken(req);
   if (!token || !adminTokens.has(token)) {
+    auditConnEvent({
+      type: 'conn.adminAuth',
+      ok: false,
+      path: req.path,
+      ip: clientIp(req),
+      error: 'Unauthorized',
+    });
     return res.status(401).json({ error: 'Unauthorized' });
   }
   return next();
@@ -622,6 +683,7 @@ app.get('/healthz', async (_req, res) => {
     node: process.version,
     platform: process.platform,
     workspaceRoot: WORKSPACE_ROOT,
+    daemonDir: __dirname,
     workspace: {
       root: WORKSPACE_ROOT,
       exists: workspaceExists,
@@ -648,7 +710,7 @@ app.get('/', authAdmin, async (_req, res) => {
     return res.send(dashboardHtml);
   } catch {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.send(`<html><body><h3>MCP Remote Agent daemon</h3><p>workspace: ${WORKSPACE_ROOT}</p></body></html>`);
+    res.send(`<html><body><h3>AgentPort daemon</h3><p>workspace: ${WORKSPACE_ROOT}</p></body></html>`);
   }
 });
 
@@ -1159,7 +1221,7 @@ app.post("/api/exec/script", authApi, async (req, res) => {
     return res.status(statusCode).json(execErrorPayload(e));
   }
 
-  const tmpFile = path.join(os.tmpdir(), "mcp-remote-agent-script-" + Date.now() + ".sh");
+  const tmpFile = path.join(os.tmpdir(), "agentport-script-" + Date.now() + ".sh");
   const scriptStart = Date.now();
 
   try {
@@ -1237,6 +1299,299 @@ app.get('/api/errors', authAdmin, async (req, res) => {
   res.json({errors});
 });
 
+function clampMcpWindowMinutes(raw) {
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed)) return 5;
+  return Math.min(Math.max(parsed, 1), 1440);
+}
+
+async function safeExecStdout(command, timeout = 5000) {
+  try {
+    const { stdout } = await execAsync(command, {
+      timeout,
+      maxBuffer: 1024 * 1024,
+    });
+    return stdout || '';
+  } catch {
+    return '';
+  }
+}
+
+function parseWhoSessions(stdout) {
+  const lines = String(stdout || '').split('\n').map((line) => line.trim()).filter(Boolean);
+  const sessions = [];
+  for (const line of lines) {
+    const parts = line.split(/\s+/);
+    if (parts.length < 2) continue;
+    const fromMatch = line.match(/\(([^)]+)\)/);
+    sessions.push({
+      user: parts[0],
+      tty: parts[1],
+      loginAt: [parts[2], parts[3]].filter(Boolean).join(' ') || '-',
+      from: fromMatch ? fromMatch[1] : '-',
+    });
+  }
+  return sessions;
+}
+
+function parseTopProcesses(stdout) {
+  const rows = String(stdout || '').split('\n').map((line) => line.trim()).filter(Boolean);
+  if (!rows.length) return [];
+  const dataRows = rows.slice(1);
+  const parsed = [];
+  for (const row of dataRows) {
+    const parts = row.split(/\s+/);
+    if (parts.length < 5) continue;
+    parsed.push({
+      pid: Number.parseInt(parts[0], 10) || 0,
+      command: parts[1] || '-',
+      cpu: Number.parseFloat(parts[2]) || 0,
+      mem: Number.parseFloat(parts[3]) || 0,
+      threads: Number.parseInt(parts[4], 10) || 0,
+    });
+  }
+  return parsed;
+}
+
+async function readAuditEntriesSince(sinceMs) {
+  const raw = await readIfExists(AUDIT_LOG_PATH);
+  if (!raw) return [];
+  const lines = raw.split('\n').filter((line) => line.trim());
+  const entries = [];
+  for (const line of lines) {
+    try {
+      const parsed = JSON.parse(line);
+      const tsMs = Date.parse(parsed.ts);
+      if (!Number.isFinite(tsMs) || tsMs < sinceMs) continue;
+      entries.push(parsed);
+    } catch {}
+  }
+  return entries;
+}
+
+const CONNECTION_ERROR_REGEX = /(transport closed|econnreset|econnrefused|socket hang up|unauthorized|client id mismatch|timed out|timeout|connection refused|network is unreachable|ehostunreach|enotfound|broken pipe|epipe)/i;
+
+function isConnectionErrorEntry(entry) {
+  if (!entry || typeof entry !== 'object') return false;
+  const type = String(entry.type || '');
+  const err = String(entry.error || '');
+  if (type.startsWith('conn.')) return true;
+  if (entry.ok === false && CONNECTION_ERROR_REGEX.test(err)) return true;
+  return false;
+}
+
+function parseManagerTsToIso(raw) {
+  const m = String(raw || '').match(/\[(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})\]/);
+  if (!m) return null;
+  const iso = `${m[1]}T${m[2]}Z`;
+  return Number.isFinite(Date.parse(iso)) ? iso : null;
+}
+
+async function readDaemonRestartEvents(limit) {
+  const raw = await readIfExists(MANAGER_LOG_PATH);
+  if (!raw) return [];
+  const lines = raw.split('\n').filter((line) => line.trim());
+  const out = [];
+  for (let i = lines.length - 1; i >= 0 && out.length < limit; i--) {
+    const line = lines[i];
+    if (!/exited with code|NotFoundError|EADDRINUSE|ECONNRESET|ECONNREFUSED|transport closed/i.test(line)) continue;
+    out.push({
+      ts: parseManagerTsToIso(line) || nowIso(),
+      type: 'conn.daemon',
+      ok: false,
+      source: 'manager.log',
+      error: redactSensitive(line.trim()),
+    });
+  }
+  return out;
+}
+
+async function collectConnectionsSnapshot(windowMinutes) {
+  const sinceMs = Date.now() - windowMinutes * 60 * 1000;
+  const [whoOut, sshEstablishedOut, mcpEstablishedOut, topProcOut, auditEntries] = await Promise.all([
+    safeExecStdout('who --ips 2>/dev/null'),
+    safeExecStdout("ss -Htn state established '( dport = :22 or sport = :22 )' 2>/dev/null | wc -l"),
+    safeExecStdout(`ss -Htn state established '( dport = :${PORT} or sport = :${PORT} )' 2>/dev/null | wc -l`),
+    safeExecStdout("ps -eo pid,comm,pcpu,pmem,nlwp --sort=-pcpu 2>/dev/null | head -n 11"),
+    readAuditEntriesSince(sinceMs),
+  ]);
+
+  const byClient = new Map();
+  for (const entry of auditEntries) {
+    const id = entry.clientId || 'unknown';
+    if (!byClient.has(id)) {
+      byClient.set(id, {
+        clientId: id,
+        requestWindow: 0,
+        ok: 0,
+        fail: 0,
+        totalMs: 0,
+        msCount: 0,
+        lastSeen: null,
+      });
+    }
+    const next = byClient.get(id);
+    next.requestWindow += 1;
+    if (entry.ok) next.ok += 1;
+    else next.fail += 1;
+    if (typeof entry.ms === 'number' && Number.isFinite(entry.ms)) {
+      next.totalMs += entry.ms;
+      next.msCount += 1;
+    }
+    if (entry.ts && (!next.lastSeen || entry.ts > next.lastSeen)) next.lastSeen = entry.ts;
+  }
+
+  const activeClients = [...byClient.values()]
+    .map((c) => {
+      const successRate = c.requestWindow ? (c.ok / c.requestWindow) * 100 : 0;
+      return {
+        clientId: c.clientId,
+        requestWindow: c.requestWindow,
+        ok: c.ok,
+        fail: c.fail,
+        successRate: Number(successRate.toFixed(1)),
+        avgMs: c.msCount ? Math.round(c.totalMs / c.msCount) : null,
+        lastSeen: c.lastSeen,
+        online: !!c.lastSeen && (Date.now() - Date.parse(c.lastSeen) <= 5 * 60 * 1000),
+      };
+    })
+    .sort((a, b) => b.requestWindow - a.requestWindow || String(a.clientId).localeCompare(String(b.clientId)));
+
+  const tokenClients = Object.keys(clientTokenMap);
+  const knownOnlineCount = tokenClients.filter((id) => {
+    const match = activeClients.find((c) => c.clientId === id);
+    return !!(match && match.online);
+  }).length;
+
+  return {
+    ts: nowIso(),
+    ssh: {
+      sessionsCount: parseWhoSessions(whoOut).length,
+      establishedCount: Number.parseInt(String(sshEstablishedOut).trim(), 10) || 0,
+      sessions: parseWhoSessions(whoOut),
+    },
+    mcp: {
+      windowMinutes,
+      activeClientsCount: knownOnlineCount,
+      requestWindow: activeClients.reduce((sum, c) => sum + c.requestWindow, 0),
+      establishedCount: Number.parseInt(String(mcpEstablishedOut).trim(), 10) || 0,
+      activeClients,
+    },
+    processes: {
+      totalProcesses: Number.parseInt(String(await safeExecStdout('ps -e --no-headers 2>/dev/null | wc -l')).trim(), 10) || 0,
+      totalThreads: Number.parseInt(String(await safeExecStdout("ps -eLo nlwp --no-headers 2>/dev/null | awk '{s+=$1} END{print s+0}'")).trim(), 10) || 0,
+      topProcesses: parseTopProcesses(topProcOut),
+    },
+  };
+}
+
+app.get('/api/connections', authAdmin, async (req, res) => {
+  try {
+    const windowMinutes = clampMcpWindowMinutes(req.query.mcpWindowMin || req.query.windowMinutes);
+    const snapshot = await collectConnectionsSnapshot(windowMinutes);
+    res.json(snapshot);
+  } catch (error) {
+    await auditConnEvent({
+      type: 'conn.collect',
+      ok: false,
+      path: req.path,
+      ip: clientIp(req),
+      error: error.message || 'failed to collect connections',
+    });
+    res.status(500).json({ error: error.message || 'failed to collect connections' });
+  }
+});
+
+app.get('/api/connections/stream', authAdmin, async (req, res) => {
+  const windowMinutes = clampMcpWindowMinutes(req.query.mcpWindowMin || req.query.windowMinutes);
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  let closed = false;
+  await auditConnEvent({
+    type: 'conn.stream.open',
+    ok: true,
+    path: req.path,
+    ip: clientIp(req),
+  });
+  const send = async () => {
+    if (closed) return;
+    try {
+      const snapshot = await collectConnectionsSnapshot(windowMinutes);
+      res.write(`event: connections\n`);
+      res.write(`data: ${JSON.stringify(snapshot)}\n\n`);
+    } catch (error) {
+      await auditConnEvent({
+        type: 'conn.stream',
+        ok: false,
+        path: req.path,
+        ip: clientIp(req),
+        error: error.message || 'collect failed',
+      });
+      res.write(`event: connections\n`);
+      res.write(`data: ${JSON.stringify({ error: error.message || 'collect failed' })}\n\n`);
+    }
+  };
+
+  await send();
+  const timer = setInterval(send, 5000);
+
+  req.on('close', () => {
+    closed = true;
+    clearInterval(timer);
+    auditConnEvent({
+      type: 'conn.stream.close',
+      ok: true,
+      path: req.path,
+      ip: clientIp(req),
+    });
+  });
+});
+
+app.get('/api/connection-errors', authAdmin, async (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit, 10) || 30, 200);
+  const days = Math.min(Math.max(parseInt(req.query.days, 10) || 1, 1), 365);
+  const since = new Date();
+  since.setDate(since.getDate() - days);
+  since.setHours(0, 0, 0, 0);
+  const sinceMs = since.getTime();
+
+  const raw = await readIfExists(AUDIT_LOG_PATH);
+  const lines = raw ? raw.split('\n').filter((line) => line.trim()) : [];
+  const items = [];
+
+  for (let i = lines.length - 1; i >= 0 && items.length < limit; i--) {
+    try {
+      const entry = JSON.parse(lines[i]);
+      const tsMs = Date.parse(entry.ts || '');
+      if (!Number.isFinite(tsMs) || tsMs < sinceMs) continue;
+      if (!isConnectionErrorEntry(entry)) continue;
+      items.push({
+        ts: entry.ts,
+        type: entry.type || 'conn.event',
+        clientId: entry.clientId || null,
+        source: 'audit',
+        error: redactSensitive(entry.error || entry.detail || 'connection event'),
+      });
+    } catch {}
+  }
+
+  if (items.length < limit) {
+    const managerEvents = await readDaemonRestartEvents(limit - items.length);
+    for (const event of managerEvents) {
+      const tsMs = Date.parse(event.ts || '');
+      if (!Number.isFinite(tsMs) || tsMs < sinceMs) continue;
+      items.push(event);
+      if (items.length >= limit) break;
+    }
+  }
+
+  items.sort((a, b) => (b.ts || '').localeCompare(a.ts || ''));
+  res.json({ errors: items.slice(0, limit) });
+});
+
 app.get('/api/service-status', authAdmin, async (req, res) => {
   const results = {};
   // Node.js running
@@ -1256,7 +1611,7 @@ app.get('/api/service-status', authAdmin, async (req, res) => {
   // Autostart (cron)
   try {
     const { stdout } = await execAsync('crontab -l 2>/dev/null', { timeout: 5000 });
-    const hasAutostart = stdout.includes('mcp-remote-agent-manager');
+    const hasAutostart = stdout.includes('agentport-manager');
     results.autostart = { name: '开机自启动', status: hasAutostart ? 'ok' : 'warn', detail: hasAutostart ? '已配置 (cron @reboot)' : '未配置' };
   } catch {
     results.autostart = { name: '开机自启动', status: 'warn', detail: '未配置' };
@@ -1335,19 +1690,33 @@ app.put('/api/config', authAdmin, async (req, res) => {
 if (ENABLE_DASHBOARD) {
   const dashboardPath = path.join(__dirname, 'dashboard.html');
   
-  app.get('/', (req, res) => {
-    res.sendFile(dashboardPath);
+  app.get('/', authAdmin, async (_req, res) => {
+    try {
+      const dashboardHtml = await fs.readFile(dashboardPath, 'utf-8');
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      return res.send(dashboardHtml);
+    } catch {
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      return res.send(`<html><body><h3>AgentPort daemon</h3><p>workspace: ${WORKSPACE_ROOT}</p></body></html>`);
+    }
   });
   
-  app.get('/dashboard', (req, res) => {
-    res.sendFile(dashboardPath);
+  app.get('/dashboard', authAdmin, async (_req, res) => {
+    try {
+      const dashboardHtml = await fs.readFile(dashboardPath, 'utf-8');
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      return res.send(dashboardHtml);
+    } catch {
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      return res.send(`<html><body><h3>AgentPort daemon</h3><p>workspace: ${WORKSPACE_ROOT}</p></body></html>`);
+    }
   });
   
   console.log('Dashboard enabled at / and /dashboard');
 }
 
 app.listen(PORT, HOST, () => {
-  console.log(`mcp-remote-agent daemon running on ${HOST}:${PORT}`);
+  console.log(`agentport daemon running on ${HOST}:${PORT}`);
   console.log(`workspace=${WORKSPACE_ROOT}`);
   console.log(`clients=${Object.keys(clientTokenMap).join(',')}`);
   console.log(`dashboard=${ENABLE_DASHBOARD ? 'enabled' : 'disabled'}`);

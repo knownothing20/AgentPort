@@ -1,15 +1,14 @@
 # Install On Another Machine
 
-This guide explains how to install `mcp-remote-agent` on a new computer or in a
+This guide explains how to install `agentport` on a new computer or in a
 different AI desktop tool.
 
 ## What Installs From GitHub
 
 ```bash
-git clone https://github.com/knownothing20/mcp-remote-agent.git
-cd mcp-remote-agent
+git clone https://github.com/knownothing20/agentport.git
+cd agentport
 npm install
-npm run doctor
 ```
 
 The GitHub repository contains code, docs, examples, and dependency lockfiles.
@@ -21,7 +20,7 @@ files.
 Copy these only through a private channel:
 
 - `local/connections.json`: saved daemon and SSH connection list.
-- `local/mcp-remote-agent.json`: MCP registration and daemon deployment config, if the target AI tool supports MCP.
+- `local/agentport.json`: MCP registration and daemon deployment config, if the target AI tool supports MCP.
 - SSH private keys referenced by `local/connections.json`, for example `~/.ssh/id_ed25519`.
 - SSH config entries from `~/.ssh/config`, if your connections depend on them.
 
@@ -42,7 +41,7 @@ home directory.
 For tools that support custom MCP servers, use native MCP first:
 
 1. Place this repo in the tool's skill/plugin directory.
-2. Copy or create `local/mcp-remote-agent.json`.
+2. Copy or create `local/agentport.json`.
 3. Set `skillDir` to this repo's absolute path.
 4. Set `mcpConfigPath` to the target AI tool's MCP config file.
 5. Run:
@@ -80,7 +79,19 @@ is unavailable.
 2. Run `npm install`.
 3. Create `local/` if needed.
 4. Copy `local/connections.json`.
-5. Copy `local/mcp-remote-agent.json` only if MCP registration is needed.
+5. Copy `local/agentport.json` only if MCP registration is needed.
 6. Copy SSH keys and update key paths.
 7. Run `npm run doctor`.
 8. If using MCP, run `node sync.cjs` and restart the AI tool.
+
+## Recommended Validation Order
+
+Run checks only after your local config files are ready:
+
+```bash
+npm run doctor
+node cli.js list
+node cli.js health
+```
+
+Expected result: at least one connection reports `"ok": true`.

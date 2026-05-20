@@ -165,7 +165,7 @@ function daemonClient(conn) {
     timeout: Number(conn.timeoutMs || TIMEOUT_MS),
     headers: {
       Authorization: `Bearer ${conn.authToken}`,
-      "X-Client-ID": conn.clientId || "mcp-remote-agent-cli",
+      "X-Client-ID": conn.clientId || "agentport-cli",
       "Content-Type": "application/json",
     },
   });
@@ -691,7 +691,7 @@ async function commandScript(args) {
   const content = fs.readFileSync(file, "utf8");
   await withConnection(args, async ({ type, http, ssh }) => {
     if (type === "ssh") {
-      const remoteFile = `/tmp/mcp-remote-agent-cli-${Date.now()}.${interpreter === "python3" ? "py" : "sh"}`;
+      const remoteFile = `/tmp/agentport-cli-${Date.now()}.${interpreter === "python3" ? "py" : "sh"}`;
       await ssh.writeFile(remoteFile, content);
       const result = await ssh.exec(`${interpreter} ${JSON.stringify(remoteFile)}`, { cwd: args.cwd });
       await ssh.rm(remoteFile);
@@ -736,7 +736,7 @@ async function commandBatch(args) {
 }
 
 function usage() {
-  print(`mcp-remote-agent CLI fallback
+  print(`agentport CLI fallback
 
 Priority for agents:
   1. Use native remote_* MCP tools when they are visible.

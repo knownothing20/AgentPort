@@ -14,31 +14,33 @@ import logger from "./logger.js";
 process.on("unhandledRejection", (reason) => {
   const message = reason instanceof Error ? reason.stack || reason.message : String(reason);
   logger.error("process", "Unhandled rejection", message);
-  console.error("[mcp-remote-agent] unhandled rejection:", message);
+  console.error("[agentport] unhandled rejection:", message);
 });
 
 process.on("uncaughtException", (error) => {
   const message = error instanceof Error ? error.stack || error.message : String(error);
   logger.error("process", "Uncaught exception", message);
-  console.error("[mcp-remote-agent] uncaught exception:", message);
+  console.error("[agentport] uncaught exception:", message);
 });
 
-// Read version from local/mcp-remote-agent.json (single source of truth)
+// Read version from local config
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+const APP_SLUG = "agentport";
+const CONFIG_CANDIDATES = [join(__dirname, "local", `${APP_SLUG}.json`)];
 let PKG_VERSION = "0.0.0";
-let PKG_NAME = "mcp-remote-agent";
-try {
-  const configJson = JSON.parse(
-    await import("fs").then((fs) =>
-      fs.readFileSync(join(__dirname, "local", "mcp-remote-agent.json"), "utf-8").replace(/^\uFEFF/, "")
-    )
-  );
-  PKG_VERSION = configJson.version || PKG_VERSION;
-  PKG_NAME = configJson.name || PKG_NAME;
-} catch (_) {}
+let PKG_NAME = APP_SLUG;
+for (const configPath of CONFIG_CANDIDATES) {
+  try {
+    if (!fs.existsSync(configPath)) continue;
+    const configJson = JSON.parse(fs.readFileSync(configPath, "utf-8").replace(/^\uFEFF/, ""));
+    PKG_VERSION = configJson.version || PKG_VERSION;
+    PKG_NAME = configJson.name || PKG_NAME;
+    break;
+  } catch (_) {}
+}
 
 // Support both new (MCP_REMOTE_*) and legacy (NIUMA_SSH_*) env var names
 const REMOTE_URL = (process.env.MCP_REMOTE_URL || process.env.NIUMA_SSH_REMOTE_URL || "http://127.0.0.1:3183").replace(/\/+$/, "");
@@ -277,7 +279,7 @@ function writeProcessRegistry() {
   try {
     const logDir = path.join(__dirname, "local", "logs");
     fs.mkdirSync(logDir, { recursive: true });
-    const registryPath = path.join(logDir, "mcp-remote-agent-processes.json");
+    const registryPath = path.join(logDir, "agentport-processes.json");
     const now = Date.now();
     let entries = [];
     try {
@@ -1279,7 +1281,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // /healthz failed, fall through to POST echo probe
         }
         // Fallback: execute echo command to verify daemon is reachable
-        await postWithFallback(["/api/exec", "/api/cmd/execute", "/bash"], { command: "echo mcp-remote-agent-ok" });
+        await postWithFallback(["/api/exec", "/api/cmd/execute", "/bash"], { command: "echo agentport-ok" });
         markHealthy(); // No workspaceRoot from echo fallback
         return toTextResult(
           JSON.stringify(
@@ -1664,7 +1666,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (isSSHConnection()) {
           try {
             const sshClient = getSSHClient();
-            const tmpFile = `/tmp/mcp-remote-agent-script-${Date.now()}.sh`;
+            const tmpFile = `/tmp/agentport-script-${Date.now()}.sh`;
             // Write script to temp file
             await sshClient.writeFile(tmpFile, scriptContent);
             // Execute the script
@@ -1691,13 +1693,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // If server doesn't support /api/exec/script yet, fallback to write + bash
           if (error?.response?.status === 404 || error?.response?.status === 405) {
             const tmpFile = _workspaceRoot
-              ? `${_workspaceRoot}/.mcp-remote-agent-tmp/script-${Date.now()}.sh`
-              : `/tmp/mcp-remote-agent-script-${Date.now()}.sh`;
+              ? `${_workspaceRoot}/.agentport-tmp/script-${Date.now()}.sh`
+              : `/tmp/agentport-script-${Date.now()}.sh`;
             try {
               // Ensure temp directory exists (workspace mode)
               if (_workspaceRoot) {
                 await postWithFallback(["/api/exec", "/bash"], {
-                  command: `mkdir -p ${_workspaceRoot}/.mcp-remote-agent-tmp`,
+                  command: `mkdir -p ${_workspaceRoot}/.agentport-tmp`,
                 }).catch(() => {});
               }
               // Write script to temp file
@@ -2096,32 +2098,32 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           if (autoDeploy) {
             try {
               // Check if daemon already exists
-              const daemonCheck = await testClient.exec('test -d ~/.mcp-remote-agent/daemon && echo "exists" || echo "not exists"');
+              const daemonCheck = await testClient.exec('test -d ~/.agentport/daemon && echo "exists" || echo "not exists"');
               const daemonExists = daemonCheck.stdout.includes('exists');
               
               if (!daemonExists) {
                 // Upload server files
                 const serverDir = path.join(__dirname, 'server');
-                const files = ['server.js', 'package.json', 'mcp-remote-agent-manager.sh', 'setup-autostart.sh', 'dashboard.html'];
+                const files = ['server.js', 'package.json', 'agentport-manager.sh', 'setup-autostart-agentport.sh', 'dashboard.html'];
                 
-                await testClient.exec('mkdir -p ~/.mcp-remote-agent/daemon');
+                await testClient.exec('mkdir -p ~/.agentport/daemon');
                 // Clean up leftover temp files from previous deployments
-                await testClient.exec('rm -f ~/.mcp-remote-agent/daemon/*.clobbered ~/.mcp-remote-agent/daemon/*.tmp ~/.mcp-remote-agent/daemon/*.bak 2>/dev/null; true');
+                await testClient.exec('rm -f ~/.agentport/daemon/*.clobbered ~/.agentport/daemon/*.tmp ~/.agentport/daemon/*.bak 2>/dev/null; true');
                 
                 for (const file of files) {
                   const localPath = path.join(serverDir, file);
                   if (fs.existsSync(localPath)) {
                     const content = fs.readFileSync(localPath, 'utf-8');
-                    await testClient.writeFile(`~/.mcp-remote-agent/daemon/${file}`, content);
+                    await testClient.writeFile(`~/.agentport/daemon/${file}`, content);
                   }
                 }
                 
                 // Install dependencies
-                await testClient.exec('cd ~/.mcp-remote-agent/daemon && npm install --production 2>&1');
+                await testClient.exec('cd ~/.agentport/daemon && npm install --production 2>&1');
               }
               
               // Generate secure auth token (auto-generated, no user input needed)
-              const token = `mcp-${host.replace(/\./g, '-')}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 14)}`;
+              const token = `agentport-${host.replace(/\./g, '-')}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 14)}`;
               const clientId = args.clientId || `client-${username}-${host.replace(/\./g, '-')}`;
               
               // Create .env file
@@ -2129,17 +2131,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 `PORT=3183`,
                 `BIND_HOST=0.0.0.0`,
                 `WORKSPACE_ROOT=/home/${username}`,
-                `AUTH_TOKEN=${token}`,
-                `CLIENT_IDS=${clientId}`,
+                `AUTH_TOKENS=${clientId}=${token}`,
+                `ADMIN_TOKENS=${token}`,
                 `EXEC_TIMEOUT_MS=120000`,
                 `EXEC_MAX_CONCURRENCY=2`,
               ].join('\n');
-              await testClient.writeFile(`~/.mcp-remote-agent/daemon/.env`, envContent);
+              await testClient.writeFile(`~/.agentport/daemon/.env`, envContent);
               
               // Start daemon (check if already running)
               const runningCheck = await testClient.exec('pgrep -f "node server.js" || echo "not running"');
               if (runningCheck.stdout.includes('not running')) {
-                await testClient.exec('cd ~/.mcp-remote-agent/daemon && nohup node server.js > daemon.log 2>&1 &');
+                await testClient.exec('cd ~/.agentport/daemon && nohup node server.js > daemon.log 2>&1 &');
                 await testClient.exec('sleep 2');
               }
               
@@ -2538,7 +2540,7 @@ async function main() {
     : (_currentConnection ? _connections[_currentConnection]?.url : REMOTE_URL);
   
   console.error(
-    `MCP Remote Agent v${PKG_VERSION} running on stdio (name=${PKG_NAME}, type=${connType}, remote=${connInfo}, auth=${AUTH_TOKEN ? "on" : "off"}, timeout=${REQUEST_TIMEOUT_MS}ms, runtimeMode=${_runtimeMode.mode}, modeSource=${_runtimeMode.source})`
+    `AgentPort v${PKG_VERSION} running on stdio (name=${PKG_NAME}, type=${connType}, remote=${connInfo}, auth=${AUTH_TOKEN ? "on" : "off"}, timeout=${REQUEST_TIMEOUT_MS}ms, runtimeMode=${_runtimeMode.mode}, modeSource=${_runtimeMode.source})`
   );
 }
 
