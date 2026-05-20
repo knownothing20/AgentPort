@@ -1,5 +1,23 @@
 # Changelog
 
+## [2026-05-20] feat | Connection trace diagnostics for Transport closed
+
+### Added
+- Added end-to-end connection trace fields in daemon audit events: `traceId`, `sessionId`, `callId`, `toolName`, `method`, `statusCode`, `durationMs`, and `phase`.
+- Added request lifecycle connection events (`conn.req.start`, `conn.req.end`, `conn.req.fail`) for key paths (`/healthz`, connection APIs, exec/job APIs).
+- Added daemon API `GET /api/connection-diagnostics` to aggregate recent connection events with:
+  - totals and by-type counters
+  - top error signatures
+  - recent trace groups (per traceId) for root-cause analysis
+  - recent raw events snapshot
+- Added dashboard diagnostics panel `断链诊断摘要` that surfaces the aggregated diagnosis API directly in UI.
+
+### Changed
+- Updated dashboard connection troubleshooting flow to include machine-readable diagnosis output in addition to raw error lists.
+- Updated MCP client transport requests to attach trace headers (`x-agentport-trace-id`, `x-agentport-session-id`, `x-agentport-call-id`, `x-agentport-tool`) so daemon and client logs can be correlated.
+
+---
+
 ## [2026-05-20] feat | SSH-first CLI route and diagnostics
 
 ### Added
