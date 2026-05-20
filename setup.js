@@ -385,10 +385,14 @@ async function main() {
       console.log(colorize(YELLOW, "  Existing remote daemon detected."));
       console.log("  Recommendation: do NOT redeploy from this computer.");
       console.log(`  Token check command: ssh ${details.username}@${details.host} "grep '^AUTH_TOKENS=' ~/.agentport/daemon/.env"`);
+      console.log("  Create a NEW token for this computer/software. Do not reuse other machine tokens.");
+      console.log("  Dashboard URL format: http://<server>:3183/?token=<admin-token>");
+      console.log("  If dashboard is needed, ensure this token is also in ADMIN_TOKENS.");
     } else if (daemonState?.ok && !daemonState.hasDir) {
       console.log(colorize(YELLOW, "  Remote daemon directory not found."));
       console.log("  This looks like first-time bootstrap server.");
       console.log("  If needed, run remote_setup with deploy=true.");
+      console.log("  Bootstrap will generate token; then save clientId/authToken locally.");
     } else {
       console.log(colorize(YELLOW, "  Remote daemon state unknown."));
       console.log("  Run manual read-only checks before any deployment.");

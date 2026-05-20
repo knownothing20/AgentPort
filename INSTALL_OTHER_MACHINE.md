@@ -11,6 +11,18 @@ different AI desktop tool.
 - In `remote_setup`, deployment is now opt-in: `deploy=false` by default.
   Existing daemon directories are never overwritten unless `forceDeploy=true`.
 
+## Token Policy (Must Follow)
+
+1. Different computers must use different `clientId=token` pairs, even for the same software.
+2. Do not share one token across multiple computers.
+3. Recommended `clientId` format:
+   - `<machine>-<software>`
+   - examples: `win11-codex`, `win11-workbuddy`, `macbook-codex`
+4. `local/connections.json` daemon `authToken` must match the server-side
+   `AUTH_TOKENS` entry for that `clientId`.
+5. Dashboard access requires token in `ADMIN_TOKENS`.
+   - simplest policy: put the same token into both `AUTH_TOKENS` and `ADMIN_TOKENS`.
+
 ## Mandatory Onboarding Order
 
 Use this exact order to avoid accidental overwrite:
@@ -78,8 +90,73 @@ node cli.js ssh-health
 
 8. For the next new computer:
    - do local install only
-   - reuse existing token
+   - create a new token pair for this computer
    - do not deploy again
+
+## Existing Server: Add New Token For New Computer
+
+When daemon already exists and a new computer/software needs access, add a new
+token pair instead of reusing old ones:
+
+1. Backup remote `.env`:
+
+```bash
+ssh YOUR_USER@192.0.2.10 "cp ~/.agentport/daemon/.env ~/.agentport/daemon/.env.bak.$(date +%Y%m%d-%H%M%S)"
+```
+
+2. Add a new `clientId=token` pair (example):
+
+```bash
+ssh YOUR_USER@192.0.2.10 "python3 - <<'PY'
+from pathlib import Path
+import secrets
+
+env = Path.home()/'.agentport/daemon/.env'
+text = env.read_text(encoding='utf-8')
+lines = text.splitlines()
+
+client_id = 'win11-codex'
+token = 'agentport-' + secrets.token_hex(16)
+
+def getv(k):
+    for line in lines:
+        if line.startswith(k + '='):
+            return line.split('=',1)[1].strip()
+    return ''
+
+def setv(k,v):
+    for i,line in enumerate(lines):
+        if line.startswith(k + '='):
+            lines[i] = f'{k}={v}'
+            return
+    lines.append(f'{k}={v}')
+
+auth = getv('AUTH_TOKENS')
+admin = getv('ADMIN_TOKENS')
+auth_pairs = [x for x in auth.split(',') if x]
+auth_pairs = [x for x in auth_pairs if not x.startswith(client_id + '=')]
+auth_pairs.append(f'{client_id}={token}')
+setv('AUTH_TOKENS', ','.join(auth_pairs))
+
+admins = [x for x in admin.split(',') if x]
+if token not in admins:
+    admins.append(token)
+setv('ADMIN_TOKENS', ','.join(admins))
+
+env.write_text('\\n'.join(lines) + '\\n', encoding='utf-8')
+print('clientId=', client_id)
+print('token=', token)
+PY"
+```
+
+3. Restart daemon process (or use config hot reload API if available), then test:
+
+```bash
+node cli.js health
+node cli.js ssh-health
+```
+
+4. Put returned `clientId/token` in new computer `local/connections.json`.
 
 ## What Installs From GitHub
 
