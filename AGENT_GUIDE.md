@@ -11,16 +11,18 @@ Always choose the most stable available runtime for the task:
    If `remote_*` tools are visible and stable, use `remote_connect`,
    `remote_health`, `remote_read`, `remote_write`, `remote_bash`, and the other
    `remote_*` tools directly.
-2. CLI daemon gateway for long-running development.
+2. SSH-first CLI for baseline stability.
+   Use `node cli.js ssh-health`, `node cli.js read|write|bash --route ssh`, and
+   `node cli.js job ... --route ssh` when MCP transport closes or daemon health
+   is unknown.
+3. CLI daemon gateway for long-running development.
    Use `node cli.js status` and `node cli.js job ...` for tests, builds,
    polling, and work that must survive native MCP transport failures.
-3. SSH recovery inside the CLI.
-   Use SSH when the daemon is unavailable or needs restart/diagnosis.
 4. HTTP/manual fallback.
    If none of the above are available, print exact commands for the user to run.
 
-For long-term coding, prefer daemon connections and persistent jobs. SSH is a
-recovery path, not the default long-running development channel.
+For long-term coding, prefer daemon jobs when healthy. If daemon or native MCP
+transport is unstable, keep working through `--route ssh` instead of stopping.
 
 ## Installation Check
 
@@ -69,6 +71,7 @@ node <skill-dir>/cli.js doctor
 node <skill-dir>/cli.js list
 node <skill-dir>/cli.js connect <connection-name>
 node <skill-dir>/cli.js health
+node <skill-dir>/cli.js ssh-health
 ```
 
 Use the actual skill path for the current AI tool. Examples:
@@ -91,6 +94,7 @@ node cli.js job status <job-id>
 node cli.js job logs <job-id> --tail 200
 node cli.js job cancel <job-id>
 node cli.js job list --limit 20
+node cli.js job start "sleep 30" --route ssh
 ```
 
 The CLI reads `local/connections.json` and stores only the selected connection
@@ -103,8 +107,8 @@ name in `local/cli-state.json`. It does not copy or print full tokens.
 - For file writes, use native `remote_write` first. If using CLI fallback, use
   `node cli.js write ... --content` or `--file`.
 - Run `doctor` or `health` before the first read/write/bash operation.
-- If daemon and SSH are both available, use daemon for long-running coding work.
-- If daemon fails, switch to an SSH connection and rerun `health`.
+- If daemon and SSH are both available, use daemon jobs for long-running coding work.
+- If daemon fails or MCP reports `Transport closed`, switch to `--route ssh` and continue.
 
 ## Minimal Agent Bootstrap Prompt
 
@@ -122,6 +126,6 @@ node <skill-dir>/cli.js doctor
 node <skill-dir>/cli.js health
 node <skill-dir>/cli.js read|write|bash|glob ...
 
-Prefer daemon connections for long-term coding; use SSH only as fallback.
+Prefer daemon jobs for long-term coding; when transport is unstable, switch to `--route ssh` and continue.
 Never use shell redirection to write non-ASCII file content.
 ```

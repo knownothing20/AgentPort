@@ -73,16 +73,14 @@ the project documentation in this repository.
 `agentport` is a remote development gateway with multiple runtime channels.
 Choose by task type:
 
-1. **Native MCP first for quick structured operations**: if `remote_*` tools are
-   visible and stable, use `remote_connect()` -> `remote_health()` -> normal
-   `remote_*` operations.
+1. **SSH-first CLI for stable base operations**: use `--route ssh` for health,
+   read/write, stat, glob, grep, and one-off command execution.
 2. **CLI daemon gateway for long-running development**: use `node cli.js status`
-   and persistent `job` commands for tests, builds, polling, and recovery from
-   native MCP transport failures.
-3. **SSH recovery inside the CLI**: use SSH when the daemon is unavailable or
-   needs restart/diagnosis.
-4. **HTTP/manual last**: only use direct REST calls or manual commands when MCP
-   and CLI are both unavailable.
+   and persistent `job` commands for tests, builds, polling, and durable logs.
+3. **Native MCP for convenience when available**: if `remote_*` tools are visible
+   and stable, use them for quick structured operations.
+4. **HTTP/manual last**: only use direct REST calls or manual commands when SSH,
+   daemon, and native MCP are all unavailable.
 
 CLI fallback examples:
 
@@ -91,8 +89,11 @@ node cli.js doctor
 node cli.js list
 node cli.js connect <connection-name>
 node cli.js health
+node cli.js ssh-health
+node cli.js health --route ssh
 node cli.js read /path/to/workspace/AGENTS.md
 node cli.js bash "pwd && ls -la" --cwd /path/to/workspace
+node cli.js bash "pwd && ls -la" --route ssh --json
 node cli.js write /path/to/workspace/tmp.txt --content "hello"
 ```
 
@@ -110,6 +111,15 @@ node cli.js job list --limit 20
 The job gateway is designed for AI tools whose native MCP stdio transport may
 disconnect during long work. Jobs continue inside the remote daemon, and the AI
 can reconnect through the CLI to inspect status and logs.
+
+When daemon transport is unhealthy, use lightweight SSH jobs as a recovery path:
+
+```bash
+node cli.js job start "sleep 30" --route ssh
+node cli.js job status <job-id> --route ssh
+node cli.js job logs <job-id> --route ssh --json
+node cli.js job cancel <job-id> --route ssh
+```
 
 See [AGENT_GUIDE.md](./AGENT_GUIDE.md) for the full install and agent bootstrap
 workflow.

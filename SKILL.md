@@ -18,11 +18,12 @@ AI Remote Development Gateway for MCP, CLI, SSH, and persistent daemon jobs
 
 Use this order in every AI desktop tool:
 
-1. **CLI daemon gateway for long-running development**: use `node <skill-dir>/cli.js status`
-   and persistent `job` commands for tests, builds, polling, and recovery from native MCP transport failures.
-2. **Native MCP for quick structured operations**: if `remote_*` tools are visible and stable,
+1. **SSH-first CLI baseline**: use `node <skill-dir>/cli.js ssh-health` and `--route ssh`
+   for read/write/bash/script and SSH job recovery when transport is unstable.
+2. **CLI daemon gateway for long-running development**: use `node <skill-dir>/cli.js status`
+   and persistent `job` commands for tests, builds, polling, and durable logs.
+3. **Native MCP for quick structured operations**: if `remote_*` tools are visible and stable,
    use `remote_connect()` -> `remote_health()` -> normal `remote_*` operations.
-3. **SSH recovery inside the CLI**: use SSH when the daemon is unavailable or needs restart/diagnosis.
 4. **HTTP/manual last**: only use direct HTTP/curl or manual commands when the
    AI tool cannot use native MCP or the CLI.
 
@@ -33,7 +34,10 @@ node cli.js doctor
 node cli.js list
 node cli.js connect <connection-name>
 node cli.js health
+node cli.js ssh-health
 node cli.js status
+node cli.js read /path/to/file --route ssh --json
+node cli.js bash "pwd && ls -la" --route ssh --json
 node cli.js read /path/to/file
 node cli.js write /path/to/file --content "..."
 node cli.js bash "pwd && ls -la" --cwd /path/to/workspace
@@ -41,6 +45,7 @@ node cli.js job start "npm test" --cwd /path/to/workspace
 node cli.js job status <job-id>
 node cli.js job logs <job-id> --tail 200
 node cli.js job cancel <job-id>
+node cli.js job list --route ssh --limit 20
 ```
 
 For full installation and agent bootstrap guidance, read `AGENT_GUIDE.md`.
