@@ -28,6 +28,59 @@ Use this exact order to avoid accidental overwrite:
 5. If daemon does not exist:
    - first-time bootstrap is allowed (`deploy=true`)
 
+## First-Time Local + First-Time Server (Detailed)
+
+Use this when both sides are new.
+
+1. Install local client:
+
+```bash
+git clone https://github.com/knownothing20/agentport.git
+cd agentport
+npm install
+```
+
+2. Confirm target server explicitly (example: `192.0.2.10`) and verify SSH:
+
+```bash
+ssh YOUR_USER@192.0.2.10 "echo connected"
+```
+
+3. Run read-only detection first:
+
+```bash
+ssh YOUR_USER@192.0.2.10 "test -d ~/.agentport/daemon && echo DAEMON_DIR=1 || echo DAEMON_DIR=0; test -f ~/.agentport/daemon/.env && echo ENV=1 || echo ENV=0; pgrep -f 'node server.js' >/dev/null && echo PROC=1 || echo PROC=0; ss -lntp 2>/dev/null | grep ':3183' >/dev/null && echo PORT3183=1 || echo PORT3183=0"
+```
+
+4. If output shows `DAEMON_DIR=0`, this is first bootstrap:
+   - run `remote_setup(..., deploy=true)` once from one operator computer.
+   - this generates `clientId + token` and writes remote `.env`.
+
+5. After bootstrap, validate token from remote:
+
+```bash
+ssh YOUR_USER@192.0.2.10 "grep '^AUTH_TOKENS=' ~/.agentport/daemon/.env"
+```
+
+6. Save daemon connection locally in `local/connections.json`:
+   - `url`: `http://192.0.2.10:3183`
+   - `clientId`: one key from `AUTH_TOKENS`
+   - `authToken`: matching token value
+
+7. Verify from local machine:
+
+```bash
+node cli.js doctor
+node cli.js connect 183-agentport-daemon
+node cli.js health
+node cli.js ssh-health
+```
+
+8. For the next new computer:
+   - do local install only
+   - reuse existing token
+   - do not deploy again
+
 ## What Installs From GitHub
 
 ```bash

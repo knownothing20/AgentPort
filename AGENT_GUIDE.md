@@ -60,6 +60,13 @@ Token guidance:
   existing `clientId=token` pair in local `connections.json`.
 - Do not generate/replace remote tokens unless deployment was explicitly approved.
 
+First-time token flow (both local + server are new):
+1. Detect remote daemon state first (read-only).
+2. If daemon is missing, run `remote_setup(..., deploy=true)` once.
+3. Read back `AUTH_TOKENS` from remote `.env`.
+4. Save `clientId/authToken` in local daemon connection.
+5. Validate with `remote_health` and `ssh-health`.
+
 If the target AI tool supports native MCP registration, also create
 `local/agentport.json` from `agentport.example.json`, set
 `skillDir` and `mcpConfigPath`, then run `node sync.cjs`.

@@ -54,6 +54,9 @@ Remote setup safety policy:
 - Overwrite requires explicit `deploy=true` and `forceDeploy=true`.
 - For existing servers, read `AUTH_TOKENS` from remote `.env` and reuse token
   pairs instead of regenerating/replacing server credentials.
+- For first-time server bootstrap, run read-only detection first, then deploy
+  once from one operator computer, then reuse generated token pairs on all
+  other client computers.
 
 For design rationale, deployment model, and security boundaries, see
 the project documentation in this repository.
