@@ -294,6 +294,50 @@ function stepSaveConfig(details) {
 }
 
 // ============================================
+// Step 5.5: Detect remote daemon state (read-only)
+// ============================================
+
+async function stepDetectRemoteDaemon(details) {
+  console.log(colorize(BOLD + CYAN, "\n[Step 5.5] Detect remote daemon status (read-only)\n"));
+
+  const { SSHClient } = await import("./ssh-client.js");
+  const sshConfig = {
+    host: details.host,
+    port: details.port,
+    username: details.username,
+  };
+  if (details.password) sshConfig.password = details.password;
+  if (details.privateKey) sshConfig.privateKey = details.privateKey;
+  if (details.passphrase) sshConfig.passphrase = details.passphrase;
+
+  const client = new SSHClient(sshConfig);
+  try {
+    await client.connect();
+    const cmd = [
+      "test -d ~/.agentport/daemon && echo DAEMON_DIR=1 || echo DAEMON_DIR=0",
+      "test -f ~/.agentport/daemon/.env && echo ENV_FILE=1 || echo ENV_FILE=0",
+      "pgrep -f \"node server.js\" >/dev/null && echo PROC=1 || echo PROC=0",
+      "ss -lntp 2>/dev/null | grep ':3183' >/dev/null && echo PORT3183=1 || echo PORT3183=0",
+    ].join(" ; ");
+    const result = await client.exec(cmd);
+    client.disconnect();
+
+    const text = String(result.stdout || "");
+    const hasDir = /DAEMON_DIR=1/.test(text);
+    const hasEnv = /ENV_FILE=1/.test(text);
+    const running = /PROC=1/.test(text);
+    const listening3183 = /PORT3183=1/.test(text);
+
+    console.log(colorize(DIM, `  daemon_dir=${hasDir} env=${hasEnv} running=${running} port3183=${listening3183}`));
+    return { ok: true, hasDir, hasEnv, running, listening3183 };
+  } catch (error) {
+    try { client.disconnect(); } catch {}
+    console.log(colorize(YELLOW, `  Could not detect daemon status: ${error.message}`));
+    return { ok: false, error: error.message };
+  }
+}
+
+// ============================================
 // Step 6: Show next steps
 // ============================================
 
@@ -330,8 +374,30 @@ async function main() {
       process.exit(1);
     }
 
+    const daemonState = await stepDetectRemoteDaemon(details);
     const connResult = stepSaveConfig(details);
-    stepShowNextSteps(details, connResult);
+
+    console.log(colorize(BOLD + CYAN, "\n[Done] Local setup finished\n"));
+    console.log(`  ${colorize(BOLD, "Connection name:")} ${connResult.connName}`);
+    console.log(`  ${colorize(BOLD, "Verify now:")} remote_connect(connection="${connResult.connName}") -> remote_health()`);
+    console.log("");
+    if (daemonState?.ok && daemonState.hasDir) {
+      console.log(colorize(YELLOW, "  Existing remote daemon detected."));
+      console.log("  Recommendation: do NOT redeploy from this computer.");
+      console.log(`  Token check command: ssh ${details.username}@${details.host} "grep '^AUTH_TOKENS=' ~/.agentport/daemon/.env"`);
+    } else if (daemonState?.ok && !daemonState.hasDir) {
+      console.log(colorize(YELLOW, "  Remote daemon directory not found."));
+      console.log("  This looks like first-time bootstrap server.");
+      console.log("  If needed, run remote_setup with deploy=true.");
+    } else {
+      console.log(colorize(YELLOW, "  Remote daemon state unknown."));
+      console.log("  Run manual read-only checks before any deployment.");
+    }
+    console.log("");
+    console.log("  Safety policy:");
+    console.log("  - remote_setup default is client-only (deploy=false)");
+    console.log("  - deploy=true only for first bootstrap or planned upgrade");
+    console.log("  - forceDeploy=true only for intentional overwrite");
   } finally {
     rl.close();
   }

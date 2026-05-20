@@ -45,6 +45,21 @@ When using `remote_setup`:
 - If remote daemon already exists, overwrite is skipped by default.
 - Use `forceDeploy=true` only for intentional replacement after confirmation.
 
+## Required Questions Before Setup
+
+Before guiding installation, always ask:
+
+1. Which server should this computer connect to (for example `192.0.2.10`)?
+2. Is this an existing daemon server or first-time bootstrap?
+3. Should this computer run client-only mode or perform server deployment?
+
+Then enforce read-only detection before any deployment action.
+
+Token guidance:
+- For existing daemon servers, read `AUTH_TOKENS` from remote `.env` and use an
+  existing `clientId=token` pair in local `connections.json`.
+- Do not generate/replace remote tokens unless deployment was explicitly approved.
+
 If the target AI tool supports native MCP registration, also create
 `local/agentport.json` from `agentport.example.json`, set
 `skillDir` and `mcpConfigPath`, then run `node sync.cjs`.

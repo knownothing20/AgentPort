@@ -11,6 +11,23 @@ different AI desktop tool.
 - In `remote_setup`, deployment is now opt-in: `deploy=false` by default.
   Existing daemon directories are never overwritten unless `forceDeploy=true`.
 
+## Mandatory Onboarding Order
+
+Use this exact order to avoid accidental overwrite:
+
+1. Install local client (`git clone` + `npm install`).
+2. Ask target server IP/host explicitly.
+3. Run remote read-only detection first:
+   - daemon dir exists?
+   - daemon `.env` exists?
+   - daemon process running?
+   - port `3183` listening?
+4. If daemon already exists:
+   - do **not** deploy
+   - read `AUTH_TOKENS` and configure local `authToken/clientId`
+5. If daemon does not exist:
+   - first-time bootstrap is allowed (`deploy=true`)
+
 ## What Installs From GitHub
 
 ```bash
