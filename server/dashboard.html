@@ -51,30 +51,25 @@
     .type-badge.exec { background: rgba(255,165,2,0.15); color: var(--orange); }
     .type-badge.fs { background: rgba(168,85,247,0.15); color: var(--purple); }
 
-    .channel-grid { display: grid; grid-template-columns: repeat(3, minmax(260px,1fr)); gap: 14px; align-items: start; }
+    .channel-grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 12px; }
     .channel-card { min-width: 0; background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
     .channel-head { padding: 12px 14px; border-bottom: 1px solid var(--border); font-size: 13px; color: var(--text2); font-weight: 600; letter-spacing: .2px; }
     .channel-kpi { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; padding: 12px; border-bottom: 1px solid var(--border); }
     .kpi-mini { min-width: 0; background: rgba(255,255,255,.01); border: 1px solid var(--border); border-radius: 10px; padding: 10px; }
     .kpi-mini .k { font-size: 11px; color: var(--muted); text-transform: uppercase; }
     .kpi-mini .v { margin-top: 6px; font-family: 'JetBrains Mono', monospace; font-size: 22px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .channel-list-head { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 11px; color: var(--muted); letter-spacing: .2px; text-transform: uppercase; }
-    .channel-list { max-height: 290px; overflow-y: auto; }
-    .channel-item { padding: 12px; border-bottom: 1px solid var(--border); }
+    .channel-list { max-height: 260px; overflow-y: auto; }
+    .channel-item { padding: 10px 12px; border-bottom: 1px solid var(--border); }
     .channel-item:last-child { border-bottom: none; }
     .channel-main { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
     .channel-name { font-family: 'JetBrains Mono', monospace; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-    .channel-meta { margin-top: 6px; font-size: 12px; color: var(--muted); line-height: 1.45; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .channel-meta .tag { color: var(--text2); margin-right: 4px; }
+    .channel-meta { margin-top: 4px; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .channel-badge { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; flex-shrink: 0; }
     .channel-badge.online { background: rgba(0,255,136,0.15); color: var(--green); }
     .channel-badge.offline { background: rgba(85,85,102,0.2); color: var(--muted); }
     .channel-empty { text-align: center; color: var(--muted); padding: 26px 10px; font-size: 12px; }
 
-    .bottom-grid { display: grid; grid-template-columns: minmax(0,2.2fr) minmax(280px,1fr); gap: 16px; align-items: start; }
-    .bottom-grid > .card { margin-bottom: 0; }
-    .bottom-grid .card-body { height: 100%; }
-    #serviceStatus { max-height: 420px; overflow-y: auto; }
+    .bottom-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; align-items: start; }
     .error-list { max-height: 420px; overflow-y: auto; }
     .error-item { padding: 12px 16px; border-bottom: 1px solid var(--border); display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center; }
     .error-time { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted); }
@@ -145,9 +140,51 @@
     ::-webkit-scrollbar { width: 6px; }
     ::-webkit-scrollbar-track { background: var(--bg2); }
     ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-    @media (max-width:1400px){ .channel-grid{grid-template-columns:repeat(2,minmax(0,1fr));} .diag-channels{grid-template-columns:repeat(2,minmax(0,1fr));} }
-    @media (max-width:1200px){ .stats-grid{grid-template-columns:repeat(2,1fr)} .diag-grid{grid-template-columns:1fr} .bottom-grid{grid-template-columns:1fr} }
-    @media (max-width:900px){ .channel-grid{grid-template-columns:1fr} .diag-channels{grid-template-columns:1fr} .channel-list-head{display:none;} .bottom-grid > .card { margin-bottom: 24px; } }
+
+
+    .view-tabs { display: flex; gap: 8px; margin: -12px 0 18px 0; }
+    .view-tab { padding: 8px 14px; border: 1px solid var(--border); background: var(--card); color: var(--text2); border-radius: 999px; cursor: pointer; font-size: 13px; }
+    .view-tab:hover { border-color: var(--cyan); color: var(--text); }
+    .view-tab.active { background: var(--cyan); color: #000; border-color: var(--cyan); font-weight: 600; }
+    .view-section { display: none; }
+    .view-section.active { display: block; }
+    .job-create { display: grid; grid-template-columns: 1.7fr 1.2fr 140px auto auto; gap: 10px; margin-bottom: 12px; }
+    .job-input { width: 100%; background: var(--bg2); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 10px 12px; font-size: 13px; font-family: 'JetBrains Mono', monospace; }
+    .job-input:focus { outline: none; border-color: var(--cyan); }
+    .job-primary { background: rgba(0,212,255,0.2); border-color: var(--cyan); color: var(--cyan); }
+    .job-primary:hover { background: rgba(0,212,255,0.28); }
+    .job-hint { min-height: 20px; font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+    .job-hint.error { color: var(--red); }
+    .job-hint.ok { color: var(--green); }
+    .job-layout { display: grid; grid-template-columns: 1.4fr 1fr; gap: 12px; }
+    .job-list-wrap, .job-log-wrap { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+    .job-list-wrap { overflow-x: auto; overflow-y: hidden; }
+    .job-table { margin: 0; min-width: 980px; }
+    .job-row { cursor: pointer; }
+    .job-row:hover { background: rgba(0,212,255,0.06); }
+    .job-row.selected { background: rgba(0,212,255,0.10); }
+    .job-table th, .job-table td { font-size: 12px; padding: 10px; }
+    .job-actions { display: flex; gap: 6px; }
+    .job-actions .cmd-btn { padding: 3px 8px; font-size: 11px; }
+    .job-status { font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight: 600; white-space: nowrap; }
+    .job-status.running { background: rgba(0,212,255,0.15); color: var(--cyan); }
+    .job-status.completed { background: rgba(0,255,136,0.15); color: var(--green); }
+    .job-status.error, .job-status.timeout { background: rgba(255,71,87,0.15); color: var(--red); }
+    .job-status.cancelled, .job-status.orphaned, .job-status.cancelling { background: rgba(255,165,2,0.15); color: var(--orange); }
+    .job-proc { font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight: 600; white-space: nowrap; }
+    .job-proc.alive { background: rgba(0,255,136,0.15); color: var(--green); }
+    .job-proc.dead { background: rgba(255,71,87,0.15); color: var(--red); }
+    .job-cmd { max-width: 360px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text2); font-family: "JetBrains Mono", monospace; font-size: 12px; }
+    .job-log-head { padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 12px; color: var(--text2); }
+    .job-log-text { margin: 0; padding: 12px; max-height: 280px; overflow: auto; font-size: 12px; line-height: 1.45; font-family: 'JetBrains Mono', monospace; color: var(--text); background: transparent; white-space: pre-wrap; word-break: break-word; }
+    .job-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+    .job-filter { display: flex; align-items: center; gap: 8px; }
+    .job-filter-label { font-size: 12px; color: var(--text2); }
+    .job-select { min-width: 180px; padding: 8px 10px; }
+    .job-meta { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+
+
+    @media (max-width:1200px){ .stats-grid{grid-template-columns:repeat(2,1fr)} .channel-grid{grid-template-columns:1fr} .diag-grid{grid-template-columns:1fr} .diag-channels{grid-template-columns:1fr} .bottom-grid{grid-template-columns:1fr} }
   </style>
 </head>
 <body>
@@ -171,6 +208,12 @@
       </div>
     </header>
 
+    <div class="view-tabs" id="viewTabs">
+      <button class="view-tab active" data-view="overview" onclick="switchView('overview', this)">总览</button>
+      <button class="view-tab" data-view="maintenance" onclick="switchView('maintenance', this)">维护</button>
+    </div>
+
+    <section id="view-overview" class="view-section active">
     <div class="stats-grid">
       <div class="stat-card">
         <div class="label">总请求数</div>
@@ -234,6 +277,55 @@
       </div>
     </div>
 
+    </section>
+
+    <section id="view-maintenance" class="view-section">
+    <div class="card">
+      <div class="card-header">🗂️ 任务管理</div>
+      <div class="card-body">
+        <div class="job-create">
+          <input id="jobCommandInput" class="job-input" type="text" placeholder="命令，例如: tail -f /var/log/syslog" />
+          <input id="jobCwdInput" class="job-input" type="text" placeholder="工作目录，默认 /home/YOUR_USER/.openclaw" />
+          <input id="jobTimeoutSecInput" class="job-input" type="number" min="0" step="1" value="0" placeholder="超时秒(0=不超时)" />
+          <button class="cmd-btn job-primary" onclick="createJob()">新建任务</button>
+          <button class="cmd-btn" onclick="createHeartbeatJob()">心跳任务(无超时)</button>
+          <button class="cmd-btn" onclick="loadJobs()">刷新任务</button>
+        </div>
+        <div id="jobActionMsg" class="job-hint"></div>
+        <div class="job-toolbar">
+          <div class="job-filter">
+            <span class="job-filter-label">状态筛选</span>
+            <select id="jobStatusFilter" class="job-input job-select" onchange="onJobFilterChange(this.value)">
+              <option value="">全部</option>
+              <option value="running">running</option>
+              <option value="completed">completed</option>
+              <option value="error">error</option>
+              <option value="cancelled">cancelled</option>
+              <option value="timeout">timeout</option>
+              <option value="orphaned">orphaned</option>
+            </select>
+          </div>
+          <button class="cmd-btn" onclick="setRunningFilter()">只看运行中</button>
+          <button class="cmd-btn" onclick="cleanupFinishedJobs()">清理已完成</button>
+        </div>
+        <div id="jobListMeta" class="job-meta"></div>
+        <div class="job-layout">
+          <div class="job-list-wrap">
+            <table class="perf-table job-table">
+              <thead>
+                <tr><th>ID</th><th>命令摘要</th><th>状态</th><th>进程</th><th>超时</th><th>持续</th><th>创建时间</th><th>操作</th></tr>
+              </thead>
+              <tbody id="jobTableBody"><tr><td colspan="8"><div class="loading"><div class="spinner"></div>加载中...</div></td></tr></tbody>
+            </table>
+          </div>
+          <div class="job-log-wrap">
+            <div class="job-log-head">任务日志：<span id="jobLogTitle">未选择</span></div>
+            <pre id="jobLogText" class="job-log-text">点击行或“日志”加载输出...</pre>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-header">🧭 连接诊断与恢复</div>
       <div class="card-body">
@@ -292,6 +384,8 @@
       </div>
     </div>
 
+    </section>
+
   </div>
 
   
@@ -299,8 +393,241 @@
     const TOKEN=new URLSearchParams(location.search).get('token')||'';
     let currentDays=1;
     let refreshTimer=null;
+    let currentView='overview';
+    function switchView(view,btn){
+      currentView=view;
+      document.querySelectorAll('.view-tab').forEach(b=>b.classList.remove('active'));
+      if(btn) btn.classList.add('active');
+      document.querySelectorAll('.view-section').forEach(s=>s.classList.remove('active'));
+      const target=document.getElementById(view==='maintenance'?'view-maintenance':'view-overview');
+      if(target) target.classList.add('active');
+      if(view==='maintenance'){
+        const sel=document.getElementById('jobStatusFilter');
+        if(sel) sel.value=currentJobStatus;
+        loadJobs().catch(()=>{});
+      }
+      if(history && history.replaceState){
+        const u=new URL(window.location.href);
+        u.hash=view==='maintenance'?'#maintenance':'';
+        history.replaceState(null,'',u.toString());
+      }
+    }
     function esc(v){return String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
-    async function fetchJSON(url){return fetch(url+(TOKEN?(url.includes('?')?'&':'?')+'token='+encodeURIComponent(TOKEN):'')).then(r=>r.json())}
+    function apiUrl(url){
+      return url + (TOKEN ? (url.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN) : '');
+    }
+    async function fetchJSON(url){
+      return fetch(apiUrl(url)).then(async r=>{
+        const data=await r.json().catch(()=>({}));
+        if(!r.ok) throw new Error(data.error||('HTTP '+r.status));
+        return data;
+      });
+    }
+    async function requestJSON(method,url,body){
+      const res=await fetch(apiUrl(url),{
+        method,
+        headers:{'Content-Type':'application/json'},
+        body:body?JSON.stringify(body):undefined,
+      });
+      const data=await res.json().catch(()=>({}));
+      if(!res.ok) throw new Error(data.error||('HTTP '+res.status));
+      return data;
+    }
+    function setJobMsg(msg,type){
+      const el=document.getElementById('jobActionMsg');
+      if(!el) return;
+      el.className='job-hint'+(type==='error'?' error':(type==='ok'?' ok':''));
+      el.textContent=msg||'';
+    }
+    let selectedJobId='';
+    let currentJobStatus='running';
+    let lastJobs=[];
+    function onJobFilterChange(v){
+      currentJobStatus = String(v || '');
+      loadJobs(false).catch(()=>{});
+    }
+    function setRunningFilter(){
+      currentJobStatus='running';
+      const sel=document.getElementById('jobStatusFilter');
+      if(sel) sel.value='running';
+      loadJobs(false).catch(()=>{});
+    }
+    async function cleanupFinishedJobs(){
+      const doneStatuses = new Set(['completed','error','cancelled','timeout','orphaned']);
+      const candidates = (Array.isArray(lastJobs)?lastJobs:[]).filter(j=>doneStatuses.has(String(j.status||'')));
+      if(!candidates.length){
+        setJobMsg('当前筛选下没有可清理任务','ok');
+        return;
+      }
+      if(!confirm('确认清理 '+candidates.length+' 个已完成任务?')) return;
+      let ok=0, fail=0;
+      for(const j of candidates){
+        try{
+          await requestJSON('DELETE','/api/jobs/'+encodeURIComponent(j.id));
+          ok++;
+        }catch(_e){
+          fail++;
+        }
+      }
+      if(fail===0) setJobMsg('清理完成: '+ok+' 个','ok');
+      else setJobMsg('清理完成: 成功 '+ok+'，失败 '+fail,'error');
+      await loadJobs(false);
+    }
+    async function loadJobs(preserveSelected=true){
+      try{
+        const q=currentJobStatus?('&status='+encodeURIComponent(currentJobStatus)):'';
+        const data=await fetchJSON('/api/jobs?limit=40'+q);
+        const rows=Array.isArray(data.jobs)?data.jobs:[];
+        lastJobs=rows;
+        if(!preserveSelected) selectedJobId='';
+        if(selectedJobId && !rows.find(j=>j.id===selectedJobId)) selectedJobId='';
+        const body=document.getElementById('jobTableBody');
+        if(!body) return;
+        const meta=document.getElementById('jobListMeta');
+        if(meta){
+          const scope=currentJobStatus?('筛选: '+currentJobStatus):'筛选: 全部';
+          meta.textContent='任务数: '+rows.length+' · '+scope;
+        }
+        if(!rows.length){
+          body.innerHTML='<tr><td colspan="8" style="color:var(--muted)">暂无任务</td></tr>';
+          const title=document.getElementById('jobLogTitle');
+          const text=document.getElementById('jobLogText');
+          if(title) title.textContent='未选择';
+          if(text) text.textContent='点击行或“日志”加载输出...';
+          return;
+        }
+        if(!selectedJobId && rows.length){ selectedJobId = rows[0].id; }
+        body.innerHTML=rows.map(j=>{
+          const status=String(j.status||'unknown');
+          const isRunning=(j.processAlive===true)||(status==='running'||status==='cancelling');
+          const proc = (j.processAlive===true) ? 'alive' : 'dead';
+          const cmd = String(j.commandPreview || '').trim();
+          const timeoutMs=Number(j.timeoutMs||0);
+          const timeoutText=timeoutMs===0?'∞':(Math.round(timeoutMs/1000)+'s');
+          const startMs=Date.parse(j.startedAt||j.createdAt||'');
+          const endMs=Date.parse(j.finishedAt||'');
+          const durMs=Number.isFinite(startMs)?((Number.isFinite(endMs)?endMs:Date.now())-startMs):0;
+          const durText=fmtDurationMs(durMs);
+          const selected = (selectedJobId===j.id);
+          return `<tr class="job-row ${selected?'selected':''}" onclick="viewJobLogs('${esc(j.id)}')">
+            <td title="${esc(j.id)}">${esc(j.id)}</td>
+            <td><div class="job-cmd" title="${esc(cmd||'-')}">${esc(cmd||'-')}</div></td>
+            <td><span class="job-status ${esc(status)}">${esc(status)}</span></td>
+            <td><span class="job-proc ${proc}">${proc}</span></td>
+            <td>${esc(timeoutText)}</td>
+            <td>${esc(durText)}</td>
+            <td>${fmtWhen(j.createdAt)}</td>
+            <td>
+              <div class="job-actions">
+                <button class="cmd-btn" onclick="event.stopPropagation();viewJobLogs('${esc(j.id)}')">日志</button>
+                <button class="cmd-btn" ${isRunning?'':'disabled'} onclick="event.stopPropagation();cancelJob('${esc(j.id)}')">停止</button>
+                <button class="cmd-btn" ${isRunning?'disabled':''} onclick="event.stopPropagation();deleteJob('${esc(j.id)}')">删除</button>
+              </div>
+            </td>
+          </tr>`;
+        }).join('');
+      }catch(e){
+        setJobMsg('任务列表加载失败: '+e.message,'error');
+      }
+    }
+    function createHeartbeatJob(){
+      const cmdEl=document.getElementById('jobCommandInput');
+      const cwdEl=document.getElementById('jobCwdInput');
+      const tEl=document.getElementById('jobTimeoutSecInput');
+      if(cmdEl && !String(cmdEl.value||'').trim()){
+        cmdEl.value='while true; do echo monitor-heartbeat $(date +%F_%T); sleep 5; done';
+      }
+      if(cwdEl && !String(cwdEl.value||'').trim()){
+        cwdEl.value='/home/YOUR_USER/.openclaw';
+      }
+      if(tEl){ tEl.value='0'; }
+      createJob();
+    }
+    function fmtDurationMs(ms){
+      const v=Math.max(0,Number(ms)||0);
+      const sec=Math.floor(v/1000);
+      const h=Math.floor(sec/3600);
+      const m=Math.floor((sec%3600)/60);
+      const s=sec%60;
+      if(h>0) return h+'h '+m+'m';
+      if(m>0) return m+'m '+s+'s';
+      return s+'s';
+    }
+    async function createJob(){
+      const cmd=(document.getElementById('jobCommandInput')||{}).value||'';
+      const cwd=(document.getElementById('jobCwdInput')||{}).value||'';
+      const timeoutSecRaw=(document.getElementById('jobTimeoutSecInput')||{}).value||'';
+      if(!cmd.trim()){
+        setJobMsg('请先输入命令','error');
+        return;
+      }
+      const timeoutSec = Number.parseInt(String(timeoutSecRaw||'').trim(),10);
+      const payload={command:cmd,cwd:cwd||undefined};
+      if(Number.isFinite(timeoutSec) && timeoutSec>=0){
+        payload.timeoutMs = timeoutSec * 1000;
+      }
+      try{
+        const data=await requestJSON('POST','/api/jobs/start',payload);
+        selectedJobId=data.jobId||'';
+        const tm=((data.job&&data.job.timeoutMs)||payload.timeoutMs||0);
+        setJobMsg('任务已创建: '+(data.jobId||'-')+(tm===0?' · 无超时':(' · 超时 '+Math.round(tm/1000)+'s')),'ok');
+        await loadJobs(false);
+        if(selectedJobId) await viewJobLogs(selectedJobId);
+      }catch(e){
+        setJobMsg('创建失败: '+e.message,'error');
+      }
+    }
+    async function cancelJob(jobId){
+      try{
+        await requestJSON('POST','/api/jobs/'+encodeURIComponent(jobId)+'/cancel');
+        setJobMsg('已发送停止: '+jobId,'ok');
+        await loadJobs();
+        if(selectedJobId===jobId) await viewJobLogs(jobId);
+      }catch(e){
+        setJobMsg('停止失败: '+e.message,'error');
+      }
+    }
+    async function deleteJob(jobId){
+      if(!confirm('确认删除任务 '+jobId+' ?')) return;
+      try{
+        await requestJSON('DELETE','/api/jobs/'+encodeURIComponent(jobId));
+      }catch(e){
+        if(String(e.message||'').includes('running')){
+          await new Promise(r=>setTimeout(r,1200));
+          await requestJSON('DELETE','/api/jobs/'+encodeURIComponent(jobId));
+        }else{
+          throw e;
+        }
+      }
+      try{
+        if(selectedJobId===jobId){
+          selectedJobId='';
+          const t=document.getElementById('jobLogTitle');
+          const c=document.getElementById('jobLogText');
+          if(t) t.textContent='未选择';
+          if(c) c.textContent='点击“查看日志”加载输出...';
+        }
+        setJobMsg('已删除: '+jobId,'ok');
+        await loadJobs();
+      }catch(e){
+        setJobMsg('删除后刷新失败: '+e.message,'error');
+      }
+    }
+    async function viewJobLogs(jobId){
+      try{
+        const data=await fetchJSON('/api/jobs/'+encodeURIComponent(jobId)+'/logs?tailBytes=131072');
+        selectedJobId=jobId;
+        const title=document.getElementById('jobLogTitle');
+        const text=document.getElementById('jobLogText');
+        if(title) title.textContent=jobId;
+        const out=(data.stdout&&data.stdout.content)||'';
+        const err=(data.stderr&&data.stderr.content)||'';
+        if(text){ const merged='[STDOUT]\n'+out+'\n\n[STDERR]\n'+err; text.textContent=((out||err)?merged:'暂无输出（命令可能未产生日志，或已异常结束）'); }
+        await loadJobs(true);
+      }catch(e){
+        setJobMsg('日志加载失败: '+e.message,'error');
+      }
+    }
     function fmtTime(iso){if(!iso)return '-';const d=new Date(iso);if(Number.isNaN(d.getTime()))return '-';return d.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}
     function fmtWhen(iso){if(!iso)return '无';const d=new Date(iso);if(Number.isNaN(d.getTime()))return '无';return d.toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'})}
     function setDays(d,btn){
@@ -320,22 +647,6 @@
       document.getElementById('kpiMcpConn').textContent=mcp.establishedCount??0;
       document.getElementById('kpiProc').textContent=proc.totalProcesses??0;
       document.getElementById('kpiThread').textContent=proc.totalThreads??0;
-      const ensureListHead=(listId,leftLabel,rightLabel)=>{
-        const listEl=document.getElementById(listId);
-        if(!listEl || !listEl.parentElement) return;
-        const prev=listEl.previousElementSibling;
-        if(prev && prev.classList && prev.classList.contains('channel-list-head')){
-          prev.innerHTML=`<span>${esc(leftLabel)}</span><span>${esc(rightLabel)}</span>`;
-          return;
-        }
-        const head=document.createElement('div');
-        head.className='channel-list-head';
-        head.innerHTML=`<span>${esc(leftLabel)}</span><span>${esc(rightLabel)}</span>`;
-        listEl.parentElement.insertBefore(head,listEl);
-      };
-      ensureListHead('sshSessionsList','session','state');
-      ensureListHead('mcpClientsConnList','client','state');
-      ensureListHead('topProcList','process','usage');
 
       const sshRows=Array.isArray(ssh.sessions)?ssh.sessions:[];
       document.getElementById('sshSessionsList').innerHTML=sshRows.length
@@ -496,7 +807,15 @@
         renderConnections(conn);
         renderDiagnostics(h, conn, connErr);
         renderConnectionDiagnostics(connDiag);
+        if(currentView==='maintenance'){
+          loadJobs().catch(()=>{});
+          if(selectedJobId) viewJobLogs(selectedJobId).catch(()=>{});
+        }
       }catch(e){document.body.innerHTML='<div style="padding:40px;text-align:center;color:var(--red)">加载失败: '+esc(e.message)+'</div>'}
+    }
+    if(window.location.hash==='#maintenance'){
+      const btn=document.querySelector('.view-tab[data-view="maintenance"]');
+      switchView('maintenance',btn);
     }
     loadData();
     refreshTimer=setInterval(loadData,5000);
