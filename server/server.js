@@ -45,6 +45,7 @@ function loadRuntimeConfig() {
 }
 
 let runtimeConfig = loadRuntimeConfig();
+const MAX_JOB_TIMEOUT_MS = parseRuntimeInt(process.env.MAX_JOB_TIMEOUT_MS, 7 * 24 * 60 * 60 * 1000, 1000);
 const AUDIT_LOG_PATH = process.env.AUDIT_LOG_PATH || path.join(__dirname, 'audit.log');
 const JOBS_DIR = process.env.JOBS_DIR || path.join(__dirname, 'jobs');
 const JOB_LOG_TAIL_BYTES = parseRuntimeInt(process.env.JOB_LOG_TAIL_BYTES, 64 * 1024, 1024);
@@ -66,6 +67,25 @@ const activeJobs = new Map();
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function resolveJobTimeoutMs(inputTimeoutMs) {
+  if (inputTimeoutMs === undefined || inputTimeoutMs === null || inputTimeoutMs === '') {
+    return runtimeConfig.execTimeoutMs;
+  }
+  const parsed = Number.parseInt(inputTimeoutMs, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    const error = new Error('timeoutMs must be an integer >= 0');
+    error.statusCode = 400;
+    throw error;
+  }
+  if (parsed === 0) return 0; // 0 means no timeout
+  if (parsed < 1000) {
+    const error = new Error('timeoutMs must be 0 or >= 1000');
+    error.statusCode = 400;
+    throw error;
+  }
+  return Math.min(parsed, MAX_JOB_TIMEOUT_MS);
 }
 
 function parseTokenMap() {
@@ -269,11 +289,23 @@ function jobStderrPath(jobId) {
   return path.join(jobDir(jobId), 'stderr.log');
 }
 
+function isPidAlive(pid) {
+  const n = Number(pid);
+  if (!Number.isInteger(n) || n <= 0) return false;
+  try {
+    process.kill(n, 0);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 function publicJob(job) {
   const { command, ...rest } = job;
   return {
     ...rest,
     commandPreview: typeof command === 'string' ? command.slice(0, 300) : '',
+    processAlive: isPidAlive(job.pid),
   };
 }
 
@@ -288,6 +320,24 @@ async function readJobMeta(jobId) {
   return JSON.parse(raw.replace(/^\uFEFF/, ''));
 }
 
+async function reconcileJobState(job) {
+  const status = String(job.status || '');
+  const alive = isPidAlive(job.pid);
+  if ((status === 'running' || status === 'cancelling') && !alive) {
+    return await updateJob(job.id, {
+      status: 'orphaned',
+      timedOut: false,
+      finishedAt: job.finishedAt || nowIso(),
+    });
+  }
+  if ((status === 'timeout' || status === 'cancelled' || status === 'error' || status === 'orphaned') && !job.finishedAt && !alive) {
+    return await updateJob(job.id, {
+      finishedAt: nowIso(),
+    });
+  }
+  return job;
+}
+
 async function listJobs(limit = 50) {
   await fs.mkdir(JOBS_DIR, { recursive: true });
   const entries = await fs.readdir(JOBS_DIR, { withFileTypes: true });
@@ -295,7 +345,8 @@ async function listJobs(limit = 50) {
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     try {
-      jobs.push(await readJobMeta(entry.name));
+      const rawJob = await readJobMeta(entry.name);
+      jobs.push(await reconcileJobState(rawJob));
     } catch (_) {}
   }
   jobs.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
@@ -354,7 +405,7 @@ async function updateJob(jobId, updates) {
   return next;
 }
 
-async function startPersistentJob({ command, cwd, clientId }) {
+async function startPersistentJob({ command, cwd, clientId, timeoutMs }) {
   if (!command.trim()) {
     const error = new Error('command is required');
     error.statusCode = 400;
@@ -375,6 +426,7 @@ async function startPersistentJob({ command, cwd, clientId }) {
   }
 
   const jobCwd = typeof cwd === 'string' && cwd.trim() ? safePath(cwd) : WORKSPACE_ROOT;
+  const resolvedTimeoutMs = resolveJobTimeoutMs(timeoutMs);
   await acquireExecSlot();
 
   const id = makeJobId();
@@ -393,7 +445,7 @@ async function startPersistentJob({ command, cwd, clientId }) {
     finishedAt: null,
     pid: null,
     timedOut: false,
-    timeoutMs: runtimeConfig.execTimeoutMs,
+    timeoutMs: resolvedTimeoutMs,
     stdoutPath: jobStdoutPath(id),
     stderrPath: jobStderrPath(id),
   };
@@ -425,27 +477,29 @@ async function startPersistentJob({ command, cwd, clientId }) {
   child.stdout.pipe(stdoutStream);
   child.stderr.pipe(stderrStream);
 
-  const timeout = setTimeout(() => {
-    const active = activeJobs.get(id);
-    if (!active) return;
-    try {
-      if (process.platform !== 'win32') {
-        process.kill(-child.pid, 'SIGTERM');
-      } else {
-        child.kill('SIGTERM');
-      }
-    } catch (_) {
-      try { child.kill('SIGTERM'); } catch (_) {}
-    }
-    updateJob(id, { status: 'timeout', timedOut: true }).catch(() => {});
-  }, runtimeConfig.execTimeoutMs);
+  const timeout = resolvedTimeoutMs > 0
+    ? setTimeout(() => {
+        const active = activeJobs.get(id);
+        if (!active) return;
+        try {
+          if (process.platform !== 'win32') {
+            process.kill(-child.pid, 'SIGTERM');
+          } else {
+            child.kill('SIGTERM');
+          }
+        } catch (_) {
+          try { child.kill('SIGTERM'); } catch (_) {}
+        }
+        updateJob(id, { status: 'timeout', timedOut: true }).catch(() => {});
+      }, resolvedTimeoutMs)
+    : null;
 
   child.on('error', (error) => {
     stderrStream.write(`\n[spawn error] ${error.stack || error.message}\n`);
   });
 
   child.on('close', async (code, signal) => {
-    clearTimeout(timeout);
+    if (timeout) clearTimeout(timeout);
     activeJobs.delete(id);
     releaseSlotOnce();
     let existing = job;
@@ -470,7 +524,8 @@ async function startPersistentJob({ command, cwd, clientId }) {
 }
 
 async function jobWithLogs(jobId, tailBytes) {
-  const job = await readJobMeta(jobId);
+  const rawJob = await readJobMeta(jobId);
+  const job = await reconcileJobState(rawJob);
   const stdout = await pathExists(job.stdoutPath) ? await readLogTail(job.stdoutPath, tailBytes) : { content: '', size: 0, truncated: false };
   const stderr = await pathExists(job.stderrPath) ? await readLogTail(job.stderrPath, tailBytes) : { content: '', size: 0, truncated: false };
   return {
@@ -522,6 +577,35 @@ async function cancelPersistentJob(jobId) {
     finishedAt: nowIso(),
   });
   return { cancelled: true, job: publicJob(cancelled) };
+}
+
+async function deletePersistentJob(jobId) {
+  const id = safeJobId(jobId);
+  const job = await readJobMeta(id);
+  const active = activeJobs.get(id);
+
+  // Guard by real process liveness instead of only in-memory state.
+  const processAlive = isPidAlive(job.pid) || (active?.child?.pid ? isPidAlive(active.child.pid) : false);
+  if (processAlive) {
+    const error = new Error('Job is running. Cancel it before delete.');
+    error.statusCode = 409;
+    throw error;
+  }
+
+  if (active) {
+    try { active.releaseSlotOnce?.(); } catch (_) {}
+    try { active.stdoutStream?.end?.(); } catch (_) {}
+    try { active.stderrStream?.end?.(); } catch (_) {}
+    activeJobs.delete(id);
+  }
+
+  await fs.rm(jobDir(id), { recursive: true, force: true });
+  asyncTasks.delete(id);
+  return {
+    deleted: true,
+    jobId: id,
+    previousStatus: job.status || 'unknown',
+  };
 }
 
 function execQueueError() {
@@ -789,16 +873,7 @@ app.get('/healthz', async (_req, res) => {
   });
 });
 
-app.get('/', authAdmin, async (_req, res) => {
-  try {
-    const dashboardHtml = await fs.readFile(path.join(__dirname, 'dashboard.html'), 'utf-8');
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    return res.send(dashboardHtml);
-  } catch {
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.send(`<html><body><h3>AgentPort daemon</h3><p>workspace: ${WORKSPACE_ROOT}</p></body></html>`);
-  }
-});
+// root dashboard route is defined at bottom in ENABLE_DASHBOARD block
 
 app.post('/update-workspace', authAdmin, async (req, res) => {
   const newWorkspace = typeof req.body.new_workspace === 'string' ? req.body.new_workspace.trim() : '';
@@ -1194,6 +1269,7 @@ app.post(['/api/jobs', '/api/jobs/start'], authApi, async (req, res) => {
       command,
       cwd: req.body.cwd,
       clientId: req.mcpClientId,
+      timeoutMs: req.body.timeoutMs,
     });
     await audit({ type: 'job.start', clientId: req.mcpClientId, command: command.slice(0, 300), cwd: job.cwd, jobId: job.id, ms: Date.now() - start, ok: true });
     return res.json({ success: true, jobId: job.id, taskId: job.id, status: job.status, job: publicJob(job), createdAt: job.createdAt });
@@ -1206,7 +1282,8 @@ app.post(['/api/jobs', '/api/jobs/start'], authApi, async (req, res) => {
 
 app.get('/api/jobs/:jobId', authApi, async (req, res) => {
   try {
-    const job = await readJobMeta(req.params.jobId);
+    const rawJob = await readJobMeta(req.params.jobId);
+    const job = await reconcileJobState(rawJob);
     return res.json({ success: true, job: publicJob(job), ...publicJob(job) });
   } catch (error) {
     const statusCode = error.code === 'ENOENT' ? 404 : Number(error.statusCode) || 500;
@@ -1236,6 +1313,22 @@ app.post('/api/jobs/:jobId/cancel', authApi, async (req, res) => {
   }
 });
 
+async function handleDeleteJob(req, res) {
+  try {
+    const result = await deletePersistentJob(req.params.jobId);
+    await audit({ type: 'job.delete', clientId: req.mcpClientId, jobId: req.params.jobId, ok: true, previousStatus: result.previousStatus });
+    return res.json({ success: true, ...result });
+  } catch (error) {
+    await audit({ type: 'job.delete', clientId: req.mcpClientId, jobId: req.params.jobId, ok: false, error: error.message });
+    const statusCode = error.code === 'ENOENT' ? 404 : Number(error.statusCode) || 500;
+    const message = statusCode === 404 ? 'Job not found' : error.message;
+    return res.status(statusCode).json({ error: message });
+  }
+}
+
+app.delete('/api/jobs/:jobId', authApi, handleDeleteJob);
+app.post('/api/jobs/:jobId/delete', authApi, handleDeleteJob);
+
 app.post('/api/exec/async', authApi, async (req, res) => {
   const command = typeof req.body.command === 'string' ? req.body.command : '';
   if (!command.trim()) return res.status(400).json({ error: 'command is required' });
@@ -1245,6 +1338,7 @@ app.post('/api/exec/async', authApi, async (req, res) => {
       command,
       cwd: req.body.cwd,
       clientId: req.mcpClientId,
+      timeoutMs: req.body.timeoutMs,
     });
     asyncTasks.set(job.id, { id: job.id, command, cwd: job.cwd, status: job.status, stdout: '', stderr: '', exitCode: null, createdAt: Date.parse(job.createdAt), finishedAt: null });
     await audit({ type: 'exec.async', clientId: req.mcpClientId, command: command.slice(0, 300), taskId: job.id, ok: true });
@@ -1927,14 +2021,22 @@ app.put('/api/config', authAdmin, async (req, res) => {
 // --- Dashboard UI (v2.3.1) ---
 if (ENABLE_DASHBOARD) {
   const dashboardPath = path.join(__dirname, 'dashboard.html');
+  const setNoCache = (res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.setHeader('Surrogate-Control', 'no-store');
+  };
   
   app.get('/', authAdmin, async (_req, res) => {
     try {
       const dashboardHtml = await fs.readFile(dashboardPath, 'utf-8');
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      setNoCache(res);
       return res.send(dashboardHtml);
     } catch {
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      setNoCache(res);
       return res.send(`<html><body><h3>AgentPort daemon</h3><p>workspace: ${WORKSPACE_ROOT}</p></body></html>`);
     }
   });
@@ -1943,9 +2045,11 @@ if (ENABLE_DASHBOARD) {
     try {
       const dashboardHtml = await fs.readFile(dashboardPath, 'utf-8');
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      setNoCache(res);
       return res.send(dashboardHtml);
     } catch {
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      setNoCache(res);
       return res.send(`<html><body><h3>AgentPort daemon</h3><p>workspace: ${WORKSPACE_ROOT}</p></body></html>`);
     }
   });
