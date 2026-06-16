@@ -33,16 +33,88 @@ function resolvePath(p) {
 }
 
 /**
+ * Normalize a path to POSIX form for remote boundary checks.
+ * Strips Windows drive letters and backslashes so the same boundary
+ * check works regardless of how the caller expressed the path.
+ */
+function toPosix(p) {
+  return String(p || '').replace(/\\/g, '/').replace(/^[a-zA-Z]:/, '').replace(/^\/+/, '/');
+}
+
+/**
+ * Check whether a resolved remote path is the workspace root or lives under it.
+ * Mirrors server.js isPathUnderRoot so SSH and daemon channels enforce the
+ * same workspace boundary. POSIX semantics, since the remote host is Linux.
+ *
+ * Path traversal (..) is normalized away via path.posix.resolve BEFORE the
+ * prefix comparison, so "/root/../../etc/passwd" cannot slip through by
+ * matching the root prefix lexically.
+ *
+ * Returns true when no root is configured (unconstrained / legacy behavior),
+ * so existing connections without a `workspaceRoot` keep working unchanged.
+ */
+function isPathUnderRoot(remotePath, rootPath) {
+  if (!rootPath) return true;
+  const root = String(rootPath).replace(/\/+$/, '');
+  if (!root) return true;
+  // Normalize the candidate: posix.resolve collapses ".." so a path that
+  // lexically starts with root but escapes it via ".." is reduced first.
+  const target = path.posix.resolve('/', toPosix(remotePath));
+  if (target === root) return true;
+  return target.startsWith(root + '/');
+}
+
+/**
  * SSH Client class - supports password and key auth
+ *
+ * config.workspaceRoot (optional): absolute POSIX path on the remote host that
+ * bounds file operations (read/write/stat/mkdir/rm). When set, paths outside
+ * the root are rejected with a clear error, matching daemon-channel isolation.
+ * When unset, behavior is unchanged (legacy). `exec` cannot be path-bounded
+ * because it runs arbitrary commands; isolation then depends on the SSH user.
  */
 export class SSHClient {
   constructor(config) {
     this.config = config;
+    this.workspaceRoot = config?.workspaceRoot
+      ? toPosix(config.workspaceRoot).replace(/\/+$/, '')
+      : '';
     this.client = null;
     this.sftp = null;
     this.connected = false;
     this.connectionPromise = null;
     this.remoteHome = null;
+  }
+
+  /**
+   * Resolve a path against the workspace root and enforce the boundary.
+   * Relative paths are joined to the root (matching daemon safePath);
+   * absolute paths must already be under the root. ~ and ~/x are expanded
+   * by resolveRemotePath upstream. No-op when workspaceRoot is empty.
+   * Returns the normalized POSIX path to use.
+   */
+  enforceWorkspace(remotePath, op) {
+    if (!this.workspaceRoot) return remotePath;
+    const posix = toPosix(remotePath);
+    let candidate;
+    if (posix.startsWith('/')) {
+      candidate = posix;
+    } else {
+      // Relative: join to root like server.js safePath
+      candidate = `${this.workspaceRoot}/${posix}`.replace(/\/+/g, '/');
+    }
+    // Normalize away ".." before the boundary check; also return the cleaned
+    // path so downstream SFTP/exec never see a traversal sequence.
+    const normalized = path.posix.resolve('/', candidate);
+    if (!isPathUnderRoot(normalized, this.workspaceRoot)) {
+      const err = new Error(
+        `Access denied: path '${remotePath}' is outside workspace root '${this.workspaceRoot}'` +
+        (op ? ` (${op})` : '')
+      );
+      err.code = 'EWORKSPACE';
+      throw err;
+    }
+    return normalized;
   }
 
   /**
@@ -154,6 +226,33 @@ export class SSHClient {
     return this.remoteHome;
   }
 
+  /**
+   * Best-effort detection of the remote workspace root.
+   * Reads WORKSPACE_ROOT from the agentport daemon .env if present.
+   * Returns '' when the daemon config is absent or unreadable, so callers
+   * can decide whether to leave the client unconstrained (legacy mode).
+   * Never throws.
+   */
+  async detectWorkspaceRoot() {
+    if (this.workspaceRoot) return this.workspaceRoot;
+    try {
+      await this.connect();
+      const envPath = await this.getRemoteHome() + '/.agentport/daemon/.env';
+      // Read via exec + grep to avoid touching SFTP boundary checks; this
+      // runs before workspaceRoot is set, so SFTP reads would be unconstrained
+      // anyway, but exec keeps it self-contained.
+      const result = await this.exec(
+        `grep -E '^WORKSPACE_ROOT=' ${JSON.stringify(envPath)} 2>/dev/null || true`
+      );
+      const match = /WORKSPACE_ROOT=(.*)/.exec(result.stdout || '');
+      const root = match ? match[1].replace(/^["']|["']$/g, '').trim() : '';
+      if (root) this.workspaceRoot = toPosix(root).replace(/\/+$/, '');
+      return this.workspaceRoot || '';
+    } catch {
+      return '';
+    }
+  }
+
   async resolveRemotePath(remotePath) {
     if (typeof remotePath !== 'string') return remotePath;
     if (remotePath === '~') return this.getRemoteHome();
@@ -217,9 +316,10 @@ export class SSHClient {
   async readFile(remotePath) {
     await this.connect();
     const resolvedPath = await this.resolveRemotePath(remotePath);
+    const safePath = this.enforceWorkspace(resolvedPath, 'read');
 
     return new Promise((resolve, reject) => {
-      this.sftp.readFile(resolvedPath, 'utf-8', (err, data) => {
+      this.sftp.readFile(safePath, 'utf-8', (err, data) => {
         if (err) {
           reject(new Error(`读取文件失败: ${err.message}`));
           return;
@@ -235,11 +335,12 @@ export class SSHClient {
   async writeFile(remotePath, content) {
     await this.connect();
     const resolvedPath = await this.resolveRemotePath(remotePath);
+    const safePath = this.enforceWorkspace(resolvedPath, 'write');
 
     return new Promise((resolve, reject) => {
-      const dir = path.posix.dirname(resolvedPath);
+      const dir = path.posix.dirname(safePath);
       this.exec(`mkdir -p ${JSON.stringify(dir)}`).then(() => {
-        this.sftp.writeFile(resolvedPath, content, 'utf-8', (err) => {
+        this.sftp.writeFile(safePath, content, 'utf-8', (err) => {
           if (err) {
             reject(new Error(`写入文件失败: ${err.message}`));
             return;
@@ -256,9 +357,10 @@ export class SSHClient {
   async stat(remotePath) {
     await this.connect();
     const resolvedPath = await this.resolveRemotePath(remotePath);
+    const safePath = this.enforceWorkspace(resolvedPath, 'stat');
 
     return new Promise((resolve, reject) => {
-      this.sftp.stat(resolvedPath, (err, stats) => {
+      this.sftp.stat(safePath, (err, stats) => {
         if (err) {
           reject(new Error(`获取文件信息失败: ${err.message}`));
           return;
@@ -279,14 +381,25 @@ export class SSHClient {
   async glob(pattern, cwd) {
     await this.connect();
 
-    const findCmd = cwd 
-      ? `find ${JSON.stringify(cwd)} -type f -name ${JSON.stringify(pattern)} 2>/dev/null`
+    // When a workspace root is configured, constrain the search base to it.
+    // Relative cwd is joined to root (matching daemon safePath semantics);
+    // absolute cwd must already live under root.
+    let searchBase = cwd;
+    if (cwd) {
+      const resolved = await this.resolveRemotePath(cwd);
+      searchBase = this.enforceWorkspace(resolved, 'glob.cwd');
+    } else if (this.workspaceRoot) {
+      searchBase = this.workspaceRoot;
+    }
+
+    const findCmd = searchBase
+      ? `find ${JSON.stringify(searchBase)} -type f -name ${JSON.stringify(pattern)} 2>/dev/null`
       : `find . -type f -name ${JSON.stringify(pattern)} 2>/dev/null`;
 
     const result = await this.exec(findCmd);
     if (result.code !== 0) {
-      const lsCmd = cwd 
-        ? `ls -1 ${JSON.stringify(cwd + '/' + pattern)} 2>/dev/null`
+      const lsCmd = searchBase
+        ? `ls -1 ${JSON.stringify(searchBase + '/' + pattern)} 2>/dev/null`
         : `ls -1 ${pattern} 2>/dev/null`;
       const lsResult = await this.exec(lsCmd);
       return lsResult.stdout.split('\n').filter(f => f.trim());
@@ -302,7 +415,9 @@ export class SSHClient {
     try {
       await this.stat(remotePath);
       return true;
-    } catch {
+    } catch (err) {
+      // A workspace-boundary rejection means "does not exist (in workspace)".
+      if (err?.code === 'EWORKSPACE') return false;
       return false;
     }
   }
@@ -312,7 +427,8 @@ export class SSHClient {
    */
   async mkdir(remotePath) {
     const resolvedPath = await this.resolveRemotePath(remotePath);
-    await this.exec(`mkdir -p ${JSON.stringify(resolvedPath)}`);
+    const safePath = this.enforceWorkspace(resolvedPath, 'mkdir');
+    await this.exec(`mkdir -p ${JSON.stringify(safePath)}`);
   }
 
   /**
@@ -320,7 +436,8 @@ export class SSHClient {
    */
   async rm(remotePath) {
     const resolvedPath = await this.resolveRemotePath(remotePath);
-    await this.exec(`rm -f ${JSON.stringify(resolvedPath)}`);
+    const safePath = this.enforceWorkspace(resolvedPath, 'rm');
+    await this.exec(`rm -f ${JSON.stringify(safePath)}`);
   }
 
   /**
@@ -328,7 +445,8 @@ export class SSHClient {
    */
   async rmdir(remotePath) {
     const resolvedPath = await this.resolveRemotePath(remotePath);
-    await this.exec(`rm -rf ${JSON.stringify(resolvedPath)}`);
+    const safePath = this.enforceWorkspace(resolvedPath, 'rmdir');
+    await this.exec(`rm -rf ${JSON.stringify(safePath)}`);
   }
 }
 
