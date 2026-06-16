@@ -1268,14 +1268,15 @@ async function commandGrep(args) {
   if (!pattern) throw new Error("Usage: node cli.js grep <pattern> [--cwd path] [--include \"*.js,*.ts\"] [--regex] [--case-sensitive]");
   await withConnection(args, async ({ type, http, ssh }) => {
     if (type === "ssh") {
-      const { command, maxResults } = buildSshGrepCommand({ ...args, pattern });
+      const safeCwd = ssh.resolveWorkspaceCwd(args.cwd);
+      const { command, maxResults } = buildSshGrepCommand({ ...args, pattern, cwd: safeCwd || args.cwd });
       const result = await ssh.exec(command);
       const matches = parseGrepOutput(result.stdout);
       printJson({
         success: true,
         engine: "grep",
         pattern,
-        cwd: args.cwd || ".",
+        cwd: safeCwd || args.cwd || ".",
         maxResults,
         matches,
         truncated: matches.length >= maxResults,
@@ -1884,7 +1885,8 @@ async function commandBatch(args) {
         } else if (op.type === "stat") results.push({ ...op, status: 200, ...(await ssh.stat(op.path)) });
         else if (op.type === "glob") results.push({ ...op, status: 200, entries: await ssh.glob(op.pattern, op.cwd) });
         else if (op.type === "grep") {
-          const { command, maxResults } = buildSshGrepCommand(op);
+          const safeCwd = ssh.resolveWorkspaceCwd(op.cwd);
+          const { command, maxResults } = buildSshGrepCommand({ ...op, cwd: safeCwd || op.cwd });
           const result = await ssh.exec(command);
           const matches = parseGrepOutput(result.stdout);
           results.push({ ...op, status: 200, engine: "grep", matches, truncated: matches.length >= maxResults });

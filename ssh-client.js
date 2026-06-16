@@ -118,6 +118,24 @@ export class SSHClient {
   }
 
   /**
+   * Resolve a cwd-like path against the workspace boundary.
+   * Returns a POSIX-safe path string, or '' when workspaceRoot is unset
+   * (legacy: caller should pass cwd through unmodified).
+   *
+   * Rules mirror daemon safePath + grepWorkspace:
+   *   - null / undefined / '' → workspaceRoot (search from root)
+   *   - absolute path → enforceWorkspace (reject if outside root)
+   *   - relative path  → join to workspaceRoot, then normalize
+   */
+  resolveWorkspaceCwd(rawCwd) {
+    if (!this.workspaceRoot) return '';
+    if (!rawCwd || typeof rawCwd !== 'string' || !rawCwd.trim()) {
+      return this.workspaceRoot;
+    }
+    return this.enforceWorkspace(rawCwd.trim(), 'cwd');
+  }
+
+  /**
    * Connect to SSH server
    */
   async connect() {
