@@ -296,10 +296,13 @@ export class SSHClient {
    */
   async exec(command, options = {}) {
     await this.connect();
+    const safeCwd = this.workspaceRoot
+      ? this.resolveWorkspaceCwd(options.cwd)
+      : options.cwd;
 
     return new Promise((resolve, reject) => {
       const execOptions = {};
-      if (options.cwd) execOptions.cwd = options.cwd;
+      if (safeCwd) execOptions.cwd = safeCwd;
 
       this.client.exec(command, execOptions, (err, stream) => {
         if (err) {
