@@ -1791,8 +1791,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (isSSHConnection()) {
           try {
             const sshClient = getSSHClient();
+            // Best-effort workspace root detection so the SSH channel can
+            // enforce the same boundary as the daemon channel. Never throws;
+            // absence leaves the client unconstrained (legacy behavior).
+            try { await sshClient.detectWorkspaceRoot(); } catch {}
+            const wsRoot = sshClient.workspaceRoot || null;
+            if (wsRoot) markHealthy(wsRoot); else markHealthy();
             if (sshClient.isConnected()) {
-              markHealthy();
               return toTextResult(
                 JSON.stringify({
                   ok: true,
@@ -1801,6 +1806,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   host: _connections[_currentConnection]?.host,
                   port: _connections[_currentConnection]?.port || 22,
                   username: _connections[_currentConnection]?.username,
+                  workspaceRoot: wsRoot,
+                  workspaceRootEnforced: Boolean(wsRoot),
                   runtimeMode: _runtimeMode.mode,
                   modeSource: _runtimeMode.source,
                 }, null, 2)
@@ -1808,7 +1815,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             } else {
               // Try to connect
               await sshClient.connect();
-              markHealthy();
               return toTextResult(
                 JSON.stringify({
                   ok: true,
@@ -1817,6 +1823,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   host: _connections[_currentConnection]?.host,
                   port: _connections[_currentConnection]?.port || 22,
                   username: _connections[_currentConnection]?.username,
+                  workspaceRoot: wsRoot,
+                  workspaceRootEnforced: Boolean(wsRoot),
                   message: 'Connected successfully',
                   runtimeMode: _runtimeMode.mode,
                   modeSource: _runtimeMode.source,
