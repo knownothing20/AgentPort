@@ -12,7 +12,8 @@
     "test": "node test.cjs",
     "sync": "node sync.cjs",
     "sync:check": "node sync.cjs --check",
-    "sync:dry": "node sync.cjs --dry-run"
+    "sync:dry": "node sync.cjs --dry-run",
+    "sync:skills": "node sync.cjs --skills"
   },
   "bin": {
     "agentport": "./cli.js"

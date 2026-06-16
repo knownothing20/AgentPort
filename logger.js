@@ -1,6 +1,6 @@
 /**
  * Local logging module for agentport
- * - Daily rotation (one file per day)
+ * - Daily rotation with size-based segments to keep diagnostics visible without filling the disk
  * - Auto-cleanup: keep last 7 days
  * - Logs stored in local/logs/
  */
@@ -15,10 +15,20 @@ const __dirname = path.dirname(__filename);
 const LOG_DIR = path.join(__dirname, "local", "logs");
 const MAX_DAYS = 7;
 const DEFAULT_DATA_MAX_BYTES = 4000;
+const DEFAULT_LOG_SEGMENT_MAX_BYTES = 50 * 1024 * 1024;
+const DEFAULT_LOG_MAX_SEGMENTS_PER_DAY = 20;
 const rawDataMaxBytes = Number(process.env.MCP_REMOTE_LOG_DATA_MAX_BYTES || DEFAULT_DATA_MAX_BYTES);
 const DATA_MAX_BYTES = Number.isFinite(rawDataMaxBytes) && rawDataMaxBytes > 200
   ? rawDataMaxBytes
   : DEFAULT_DATA_MAX_BYTES;
+const rawSegmentMaxBytes = Number(process.env.MCP_REMOTE_LOG_SEGMENT_MAX_BYTES || process.env.MCP_REMOTE_LOG_MAX_BYTES || DEFAULT_LOG_SEGMENT_MAX_BYTES);
+const LOG_SEGMENT_MAX_BYTES = Number.isFinite(rawSegmentMaxBytes) && rawSegmentMaxBytes >= 1024 * 1024
+  ? rawSegmentMaxBytes
+  : DEFAULT_LOG_SEGMENT_MAX_BYTES;
+const rawMaxSegmentsPerDay = Number(process.env.MCP_REMOTE_LOG_MAX_SEGMENTS_PER_DAY || DEFAULT_LOG_MAX_SEGMENTS_PER_DAY);
+const LOG_MAX_SEGMENTS_PER_DAY = Number.isFinite(rawMaxSegmentsPerDay) && rawMaxSegmentsPerDay >= 2
+  ? Math.floor(rawMaxSegmentsPerDay)
+  : DEFAULT_LOG_MAX_SEGMENTS_PER_DAY;
 
 // Ensure log directory exists
 function ensureLogDir() {
@@ -27,10 +37,48 @@ function ensureLogDir() {
   }
 }
 
-// Get today's log file path
-function getLogFilePath() {
+function todayLogPrefix() {
   const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-  return path.join(LOG_DIR, `agentport-${today}.log`);
+  return `agentport-${today}`;
+}
+
+function segmentPath(prefix, index) {
+  return path.join(LOG_DIR, index === 0 ? `${prefix}.log` : `${prefix}.${index}.log`);
+}
+
+function segmentIndex(file, prefix) {
+  if (file === `${prefix}.log`) return 0;
+  const match = file.match(new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.(\\d+)\\.log$`));
+  return match ? Number(match[1]) : null;
+}
+
+// Get a log file path that can accept this entry, rotating by size when needed.
+function getLogFilePath(bytesToWrite) {
+  const prefix = todayLogPrefix();
+  const files = fs.readdirSync(LOG_DIR)
+    .map((file) => {
+      const index = segmentIndex(file, prefix);
+      const filePath = index === null ? null : segmentPath(prefix, index);
+      const stat = filePath ? fs.statSync(filePath) : null;
+      return { file, index, mtimeMs: stat?.mtimeMs || 0, size: stat?.size || 0 };
+    })
+    .filter((entry) => Number.isInteger(entry.index))
+    .sort((a, b) => a.index - b.index);
+
+  for (const { index, size } of files) {
+    if (size + bytesToWrite <= LOG_SEGMENT_MAX_BYTES) return segmentPath(prefix, index);
+  }
+
+  if (files.length < LOG_MAX_SEGMENTS_PER_DAY) {
+    const nextIndex = files.length ? Math.max(...files.map((entry) => entry.index)) + 1 : 0;
+    return segmentPath(prefix, nextIndex);
+  }
+
+  const oldest = [...files].sort((a, b) => a.mtimeMs - b.mtimeMs)[0];
+  try {
+    fs.unlinkSync(segmentPath(prefix, oldest.index));
+  } catch {}
+  return segmentPath(prefix, oldest.index);
 }
 
 // Cleanup old log files (older than MAX_DAYS)
@@ -43,10 +91,10 @@ function cleanupOldLogs() {
 
     for (const file of files) {
       if (
-        (file.startsWith("agentport-") || file.startsWith("agentport-"))
+        file.startsWith("agentport-")
         && file.endsWith(".log")
       ) {
-        const dateMatch = file.match(/(?:agentport|agentport)-(\d{4}-\d{2}-\d{2})\.log/);
+        const dateMatch = file.match(/^agentport-(\d{4}-\d{2}-\d{2})(?:\.\d+)?\.log$/);
         if (dateMatch && dateMatch[1] < cutoffStr) {
           const filePath = path.join(LOG_DIR, file);
           fs.unlinkSync(filePath);
@@ -97,8 +145,9 @@ function write(level, tool, message, data = null) {
       }
     }
 
-    const logFile = getLogFilePath();
-    fs.appendFileSync(logFile, logLine + "\n");
+    const encoded = Buffer.from(logLine + "\n", "utf8");
+    const logFile = getLogFilePath(encoded.length);
+    fs.appendFileSync(logFile, encoded);
   } catch (e) {
     // Silently fail - don't break main functionality
   }

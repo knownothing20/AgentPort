@@ -10,6 +10,7 @@
     "timeoutMs": "120000",
     "sharedConnectionsPath": "~/.agentport/connections.shared.json",
     "skillDir": "ABSOLUTE_PATH_TO_SKILL_DIR",
+    "skillTargets": [],
     "nodePath": "node",
     "mcpConfigPath": "PATH_TO_YOUR_AI_TOOL_MCP_CONFIG",
     "mcpServerName": "agentport",

@@ -17,7 +17,7 @@ app.use(express.urlencoded({ extended: true }));
 
 const execAsync = promisify(exec);
 
-// 脚本解释器白名单 (v2.3.1 安全修复)
+// 鑴氭湰瑙ｉ噴鍣ㄧ櫧鍚嶅崟 (v2.3.1 瀹夊叏淇)
 const ALLOWED_INTERPRETERS = new Set([
   'bash', 'sh', 'dash',
   'python3', 'python', 'python2',
@@ -51,7 +51,7 @@ const JOBS_DIR = process.env.JOBS_DIR || path.join(__dirname, 'jobs');
 const JOB_LOG_TAIL_BYTES = parseRuntimeInt(process.env.JOB_LOG_TAIL_BYTES, 64 * 1024, 1024);
 const MANAGER_LOG_PATH = path.join(__dirname, 'agentport.log');
 
-// 命令执行限制配置 (v2.3.1)
+// 鍛戒护鎵ц闄愬埗閰嶇疆 (v2.3.1)
 const ALLOW_BASH_EXEC = !/^false$/i.test(String(process.env.ALLOW_BASH_EXEC || 'true'));
 const ALLOWED_COMMANDS = new Set(
   (process.env.ALLOWED_COMMANDS || '')
@@ -405,7 +405,16 @@ async function updateJob(jobId, updates) {
   return next;
 }
 
-async function startPersistentJob({ command, cwd, clientId, timeoutMs }) {
+function normalizeJobConnection(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const out = {};
+  for (const key of ['connection', 'route', 'type', 'host', 'port', 'username', 'url', 'target']) {
+    if (value[key] !== undefined && value[key] !== null && value[key] !== '') out[key] = value[key];
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+async function startPersistentJob({ command, cwd, clientId, timeoutMs, connection }) {
   if (!command.trim()) {
     const error = new Error('command is required');
     error.statusCode = 400;
@@ -436,6 +445,7 @@ async function startPersistentJob({ command, cwd, clientId, timeoutMs }) {
     command,
     cwd: jobCwd,
     clientId: clientId || 'unknown',
+    connection: normalizeJobConnection(connection),
     status: 'running',
     exitCode: null,
     signal: null,
@@ -1131,7 +1141,7 @@ app.post(bashRoutes, authApi, async (req, res) => {
   const command = typeof req.body.command === 'string' ? req.body.command : '';
   if (!command.trim()) return res.status(400).json({ error: 'command is required' });
 
-  // 安全校验：命令执行限制 (v2.3.1)
+  // 瀹夊叏鏍￠獙锛氬懡浠ゆ墽琛岄檺鍒?(v2.3.1)
   if (!ALLOW_BASH_EXEC) {
     return res.status(403).json({ error: 'Bash execution is disabled. Set ALLOW_BASH_EXEC=true to enable.' });
   }
@@ -1270,6 +1280,7 @@ app.post(['/api/jobs', '/api/jobs/start'], authApi, async (req, res) => {
       cwd: req.body.cwd,
       clientId: req.mcpClientId,
       timeoutMs: req.body.timeoutMs,
+      connection: req.body.connection,
     });
     await audit({ type: 'job.start', clientId: req.mcpClientId, command: command.slice(0, 300), cwd: job.cwd, jobId: job.id, ms: Date.now() - start, ok: true });
     return res.json({ success: true, jobId: job.id, taskId: job.id, status: job.status, job: publicJob(job), createdAt: job.createdAt });
@@ -1339,6 +1350,7 @@ app.post('/api/exec/async', authApi, async (req, res) => {
       cwd: req.body.cwd,
       clientId: req.mcpClientId,
       timeoutMs: req.body.timeoutMs,
+      connection: req.body.connection,
     });
     asyncTasks.set(job.id, { id: job.id, command, cwd: job.cwd, status: job.status, stdout: '', stderr: '', exitCode: null, createdAt: Date.parse(job.createdAt), finishedAt: null });
     await audit({ type: 'exec.async', clientId: req.mcpClientId, command: command.slice(0, 300), taskId: job.id, ok: true });
@@ -1385,8 +1397,8 @@ app.post("/api/exec/script", authApi, async (req, res) => {
   if (!content.trim()) return res.status(400).json({ error: "content is required" });
   let interpreter = typeof req.body.interpreter === "string" && req.body.interpreter.trim() ? req.body.interpreter.trim() : "bash";
 
-  // 安全校验：解释器白名单 (v2.3.1)
-  // 支持两种格式：1. 纯命令名 (bash, python3)  2. 完整路径 (/usr/bin/bash)
+  // 瀹夊叏鏍￠獙锛氳В閲婂櫒鐧藉悕鍗?(v2.3.1)
+  // 鏀寔涓ょ鏍煎紡锛?. 绾懡浠ゅ悕 (bash, python3)  2. 瀹屾暣璺緞 (/usr/bin/bash)
   const interpreterBase = interpreter.split('/').pop().split('\\').pop();
   if (!ALLOWED_INTERPRETERS.has(interpreterBase)) {
     return res.status(400).json({ error: `Interpreter not allowed: ${interpreter}. Allowed: ${[...ALLOWED_INTERPRETERS].join(', ')}` });
@@ -1927,7 +1939,7 @@ app.get('/api/connection-diagnostics', authAdmin, async (req, res) => {
 app.get('/api/service-status', authAdmin, async (req, res) => {
   const results = {};
   // Node.js running
-  results.node = { name: 'Node.js 服务', status: 'running' };
+  results.node = { name: 'Node.js service', status: 'running' };
   // Dependencies
   try {
     const pkg = JSON.parse(await fs.readFile(path.join(__dirname, 'package.json'), 'utf-8'));
@@ -1936,31 +1948,36 @@ app.get('/api/service-status', authAdmin, async (req, res) => {
     for (const d of deps) {
       try { require.resolve(d, { paths: [__dirname] }); } catch { missing.push(d); }
     }
-    results.deps = { name: 'NPM 依赖', status: missing.length === 0 ? 'ok' : 'warn', detail: missing.length === 0 ? deps.length + ' 个依赖已安装' : '缺少: ' + missing.join(', '), deps };
+    results.deps = {
+      name: 'NPM dependencies',
+      status: missing.length === 0 ? 'ok' : 'warn',
+      detail: missing.length === 0 ? deps.length + ' dependencies installed' : 'Missing: ' + missing.join(', '),
+      deps
+    };
   } catch (e) {
-    results.deps = { name: 'NPM 依赖', status: 'error', detail: e.message };
+    results.deps = { name: 'NPM dependencies', status: 'error', detail: e.message };
   }
   // Autostart (cron)
   try {
     const { stdout } = await execAsync('crontab -l 2>/dev/null', { timeout: 5000 });
     const hasAutostart = stdout.includes('agentport-manager');
-    results.autostart = { name: '开机自启动', status: hasAutostart ? 'ok' : 'warn', detail: hasAutostart ? '已配置 (cron @reboot)' : '未配置' };
+    results.autostart = { name: 'Autostart', status: hasAutostart ? 'ok' : 'warn', detail: hasAutostart ? 'Configured (cron @reboot)' : 'Not configured' };
   } catch {
-    results.autostart = { name: '开机自启动', status: 'warn', detail: '未配置' };
+    results.autostart = { name: 'Autostart', status: 'warn', detail: 'Not configured' };
   }
   // Port
-  results.port = { name: '端口监听', status: 'ok', detail: PORT + ' 端口正常' };
+  results.port = { name: 'Port listening', status: 'ok', detail: PORT + ' port ok' };
   // Uptime
   const uptimeSec = Math.floor(process.uptime());
   const d = Math.floor(uptimeSec / 86400), h = Math.floor(uptimeSec % 86400 / 3600), m = Math.floor(uptimeSec % 3600 / 60);
-  results.uptime = { name: '运行时长', status: 'ok', detail: (d > 0 ? d + '天' : '') + (h > 0 ? h + '小时' : '') + m + '分钟' };
+  results.uptime = { name: 'Uptime', status: 'ok', detail: (d > 0 ? d + 'd' : '') + (h > 0 ? h + 'h' : '') + m + 'm' };
   // Disk usage of workspace
   try {
     const { stdout } = await execAsync('df -h ' + WORKSPACE_ROOT + ' 2>/dev/null | tail -1', { timeout: 5000 });
     const parts = stdout.trim().split(/\s+/);
-    results.disk = { name: '磁盘空间', status: 'ok', detail: '已用 ' + parts[2] + ' / ' + parts[1] + ' (' + parts[4] + ')' };
+    results.disk = { name: 'Disk space', status: 'ok', detail: 'Used ' + parts[2] + ' / ' + parts[1] + ' (' + parts[4] + ')' };
   } catch {
-    results.disk = { name: '磁盘空间', status: 'ok', detail: '-' };
+    results.disk = { name: 'Disk space', status: 'ok', detail: '-' };
   }
   res.json(results);
 });
@@ -1971,6 +1988,23 @@ app.get('/api/service-status', authAdmin, async (req, res) => {
 app.get('/api/config', authAdmin, async (req, res) => {
   try {
     const raw = await fs.readFile(ENV_PATH, 'utf-8');
+    if (req.query.raw === '1' || req.query.raw === 'true') {
+      return res.json({
+        success: true,
+        raw: true,
+        envPath: ENV_PATH,
+        config: raw,
+        runtime: {
+          workspaceRoot: WORKSPACE_ROOT,
+          clients: Object.keys(clientTokenMap),
+          port: PORT,
+          execMaxConcurrency: runtimeConfig.execMaxConcurrency,
+          execTimeoutMs: runtimeConfig.execTimeoutMs,
+          execQueueTimeoutMs: runtimeConfig.execQueueTimeoutMs,
+          exec: getExecStats(),
+        }
+      });
+    }
     // Parse and mask sensitive values
     const lines = raw.split('\n').map(line => {
       const idx = line.indexOf('=');
