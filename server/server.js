@@ -213,6 +213,53 @@ function makeEtag(content) {
   return crypto.createHash('sha256').update(content, 'utf8').digest('hex');
 }
 
+// --- Command policy (v2.5.1) ---
+// Shell metacharacters that chain, redirect, or substitute commands. When the
+// ALLOWED_COMMANDS whitelist is active, a command carrying any of these can
+// bypass the whitelist (e.g. "ls; rm -rf /" passes as "ls" then runs rm), so
+// such composite commands are rejected outright. When the whitelist is empty
+// (default), commands are unconstrained and this check is skipped.
+const SHELL_METACHARS_RE = /;|\|\||&&|\||`|\$\(|\$\{|>\s|<\s|>>|<</;
+
+/**
+ * Enforce command execution policy.
+ * - Always rejects when ALLOW_BASH_EXEC=false.
+ * - When ALLOWED_COMMANDS is non-empty: the leading command must be whitelisted
+ *   AND the command must not contain shell metacharacters that could chain an
+ *   un-whitelisted command after it.
+ * - When ALLOWED_COMMANDS is empty (default): no restriction.
+ * Throws an Error with statusCode 403 on violation.
+ */
+function validateCommandPolicy(command) {
+  if (!command || !command.trim()) {
+    const error = new Error('command is required');
+    error.statusCode = 400;
+    throw error;
+  }
+  if (!ALLOW_BASH_EXEC) {
+    const error = new Error('Bash execution is disabled. Set ALLOW_BASH_EXEC=true to enable.');
+    error.statusCode = 403;
+    throw error;
+  }
+  if (ALLOWED_COMMANDS.size > 0) {
+    // Reject composite commands that could chain past the whitelist.
+    if (SHELL_METACHARS_RE.test(command)) {
+      const error = new Error(
+        'Command rejected: shell metacharacters (;, |, &&, $(), etc.) are not allowed when ALLOWED_COMMANDS is set. ' +
+        'Whitelist mode permits single commands only.'
+      );
+      error.statusCode = 403;
+      throw error;
+    }
+    const commandBase = command.trim().split(/\s+/)[0];
+    if (!ALLOWED_COMMANDS.has(commandBase)) {
+      const error = new Error(`Command not allowed: ${commandBase}. Allowed: ${[...ALLOWED_COMMANDS].join(', ')}`);
+      error.statusCode = 403;
+      throw error;
+    }
+  }
+}
+
 async function readIfExists(filePath) {
   try {
     return await fs.readFile(filePath, 'utf-8');
@@ -415,24 +462,9 @@ function normalizeJobConnection(value) {
 }
 
 async function startPersistentJob({ command, cwd, clientId, timeoutMs, connection }) {
-  if (!command.trim()) {
-    const error = new Error('command is required');
-    error.statusCode = 400;
-    throw error;
-  }
-  if (!ALLOW_BASH_EXEC) {
-    const error = new Error('Bash execution is disabled. Set ALLOW_BASH_EXEC=true to enable.');
-    error.statusCode = 403;
-    throw error;
-  }
-  if (ALLOWED_COMMANDS.size > 0) {
-    const commandBase = command.split(/[\s|&;]/)[0];
-    if (!ALLOWED_COMMANDS.has(commandBase)) {
-      const error = new Error(`Command not allowed: ${commandBase}. Allowed: ${[...ALLOWED_COMMANDS].join(', ')}`);
-      error.statusCode = 403;
-      throw error;
-    }
-  }
+  // validateCommandPolicy covers: empty command (400), ALLOW_BASH_EXEC (403),
+  // and ALLOWED_COMMANDS whitelist + shell-metachar bypass prevention (403).
+  validateCommandPolicy(command);
 
   const jobCwd = typeof cwd === 'string' && cwd.trim() ? safePath(cwd) : WORKSPACE_ROOT;
   const resolvedTimeoutMs = resolveJobTimeoutMs(timeoutMs);
@@ -1139,17 +1171,13 @@ app.post(grepRoutes, authApi, async (req, res) => {
 app.post(bashRoutes, authApi, async (req, res) => {
   const start = Date.now();
   const command = typeof req.body.command === 'string' ? req.body.command : '';
-  if (!command.trim()) return res.status(400).json({ error: 'command is required' });
 
-  // 瀹夊叏鏍￠獙锛氬懡浠ゆ墽琛岄檺鍒?(v2.3.1)
-  if (!ALLOW_BASH_EXEC) {
-    return res.status(403).json({ error: 'Bash execution is disabled. Set ALLOW_BASH_EXEC=true to enable.' });
-  }
-  if (ALLOWED_COMMANDS.size > 0) {
-    const commandBase = command.split(/[\s|&;]/)[0];
-    if (!ALLOWED_COMMANDS.has(commandBase)) {
-      return res.status(403).json({ error: `Command not allowed: ${commandBase}. Allowed: ${[...ALLOWED_COMMANDS].join(', ')}` });
-    }
+  // 安全校验：命令执行限制 (v2.5.1) — unified policy incl. metachar bypass prevention
+  try {
+    validateCommandPolicy(command);
+  } catch (e) {
+    const statusCode = Number(e.statusCode) || 400;
+    return res.status(statusCode).json({ error: e.message });
   }
 
   let execSlotAcquired = false;
@@ -1224,6 +1252,18 @@ app.post('/api/batch', authApi, async (req, res) => {
         const result = await grepWorkspace(op);
         results.push({ type: 'grep', pattern: op.pattern, status: 200, ...result, ms: Date.now() - opStart });
       } else if (op.type === 'bash') {
+        // Apply the same command policy as /api/exec (whitelist + metachar
+        // bypass prevention). Previously batch bash ops were unchecked.
+        try {
+          validateCommandPolicy(op.command);
+        } catch (e) {
+          const statusCode = Number(e.statusCode) || 500;
+          results.push({
+            type: 'bash', command: op.command, status: statusCode,
+            error: e.message, ms: Date.now() - opStart,
+          });
+          continue;
+        }
         let execSlotAcquired = false;
         try {
           await acquireExecSlot();
