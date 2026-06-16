@@ -121,9 +121,13 @@ for (const [clientId, token] of Object.entries(clientTokenMap)) {
   if (token) tokenClientMap.set(token, clientId);
 }
 
-// Support both new (MCP_REMOTE_*) and legacy (NIUMA_SSH_*) env var names
+// Support both new (MCP_REMOTE_*) and legacy (NIUMA_SSH_*) env var names.
+// AUTH_TOKEN is a deprecated single-client fallback: it only takes effect when
+// AUTH_TOKENS is empty, and emits a warning to push operators toward the
+// clientId=token map form (AUTH_TOKENS / AUTH_TOKENS_JSON).
 const legacyToken = (process.env.AUTH_TOKEN || process.env.MCP_REMOTE_AUTH_TOKEN || process.env.NIUMA_SSH_AUTH_TOKEN || '').trim();
 if (legacyToken && tokenClientMap.size === 0) {
+  console.warn('[deprecation] AUTH_TOKEN is a legacy single-client token. Migrate to AUTH_TOKENS=clientId=token (or AUTH_TOKENS_JSON) for multi-client support.');
   tokenClientMap.set(legacyToken, 'legacy-client');
 }
 
