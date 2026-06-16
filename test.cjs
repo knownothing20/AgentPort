@@ -300,7 +300,18 @@ async function localTests() {
     for (const [pat, desc] of [["ensureHealthy", "ensureHealthy()"], ["ALLOWED_INTERPRETERS", "interpreter whitelist"], ["needsBase64Escape", "base64 detection"], ["wrapBase64Command", "base64 wrapper"], ["healthCheckError", "healthCheckError()"], ["isHealthError", "isHealthError()"], ["recordOp", "recordOp()"]]) {
       src.includes(pat) ? pass(`index.js: ${desc}`) : fail(`index.js missing: ${desc}`);
     }
+    !src.includes("console.error") ? pass("index.js: no raw console.error") : fail("index.js: raw console.error still present");
+    src.includes("scheduleStdioExit") && src.includes("isBrokenPipeError")
+      ? pass("index.js: broken-pipe stdio exit guard")
+      : fail("index.js: missing broken-pipe stdio exit guard");
   } catch (e) { fail("index.js read error", e.message); }
+
+  try {
+    const loggerSrc = fs.readFileSync(path.join(SKILL_DIR, "logger.js"), "utf-8");
+    loggerSrc.includes("LOG_SEGMENT_MAX_BYTES") && loggerSrc.includes("LOG_MAX_SEGMENTS_PER_DAY")
+      ? pass("logger.js: size-based log rotation")
+      : fail("logger.js: missing size-based log rotation");
+  } catch (e) { fail("logger.js read error", e.message); }
 
   // Version — read from local config (single source of truth, with legacy fallback)
   const cfgPath = MAIN_CONFIG_PATH;

@@ -2,18 +2,20 @@
 /**
  * AgentPort Sync Script
  *
- * 从 local/agentport.json 读取变量（兼容 local/agentport.json），同步到：
+ * Reads local/agentport.json and synchronizes generated files:
  *   - package.json (version, name, description)
- *   - index.js (version 常量、启动日志)
- *   - <mcpConfigPath> (MCP server 配置，变量替换)
- *   - SKILL.md (版本号)
- *   - local/server/.env (从 variables 生成服务端配置)
+ *   - index.js (version constants and startup log)
+ *   - <mcpConfigPath> (MCP server registration)
+ *   - SKILL.md (version references)
+ *   - local/server/.env (daemon runtime config)
+ *   - optional skill target directories with --skills
  *
- * 用法：
- *   node sync.cjs              # 执行同步
- *   node sync.cjs --dry-run    # 只显示差异，不写文件
- *   node sync.cjs --check      # 检查一致性，不一致则 exit 1
- *   node sync.cjs --env-only   # 只同步 local/server/.env
+ * Usage:
+ *   node sync.cjs                              # synchronize generated files
+ *   node sync.cjs --dry-run                    # show pending writes only
+ *   node sync.cjs --check                      # verify consistency, never write
+ *   node sync.cjs --env-only                   # only sync local/server/.env
+ *   node sync.cjs --skills --target <skillDir> # copy repo code to skill dirs
  */
 
 const fs = require("fs");
@@ -23,15 +25,36 @@ const os = require("os");
 const DRY_RUN = process.argv.includes("--dry-run");
 const CHECK = process.argv.includes("--check");
 const ENV_ONLY = process.argv.includes("--env-only");
+const SYNC_SKILLS = process.argv.includes("--skills");
 
 const SKILL_DIR = __dirname;
 const PRIMARY_CONFIG_JSON_PATH = path.join(SKILL_DIR, "local", "agentport.json");
+const SKILL_SYNC_EXCLUDES = new Set([".git", "local", "node_modules"]);
+
+function repeatedArg(names) {
+  const out = [];
+  for (let i = 2; i < process.argv.length; i += 1) {
+    const arg = process.argv[i];
+    const eq = arg.indexOf("=");
+    if (eq > 0) {
+      const key = arg.slice(0, eq);
+      if (names.includes(key)) out.push(arg.slice(eq + 1));
+      continue;
+    }
+    if (names.includes(arg) && process.argv[i + 1]) {
+      out.push(process.argv[i + 1]);
+      i += 1;
+    }
+  }
+  return out;
+}
+
 function resolveConfigPath() {
   if (fs.existsSync(PRIMARY_CONFIG_JSON_PATH)) return PRIMARY_CONFIG_JSON_PATH;
   return PRIMARY_CONFIG_JSON_PATH;
 }
 
-// ─── Helpers ──────────────────────────────────────────────
+// 鈹€鈹€鈹€ Helpers 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 function log(tag, msg) {
   const C = { sync: "\x1b[36m", ok: "\x1b[32m", warn: "\x1b[33m", err: "\x1b[31m", dim: "\x1b[2m", reset: "\x1b[0m" };
@@ -47,8 +70,8 @@ function readJson(filePath) {
 
 function writeJson(filePath, data) {
   const content = JSON.stringify(data, null, 2) + "\n";
-  if (DRY_RUN) {
-    log("sync", `Would write: ${filePath}`);
+  if (DRY_RUN || CHECK) {
+    log("sync", `${CHECK ? "Would need update" : "Would write"}: ${filePath}`);
     return;
   }
   fs.writeFileSync(filePath, content, "utf-8");
@@ -56,12 +79,70 @@ function writeJson(filePath, data) {
 }
 
 function writeFile(filePath, content) {
-  if (DRY_RUN) {
-    log("sync", `Would write: ${filePath}`);
+  if (DRY_RUN || CHECK) {
+    log("sync", `${CHECK ? "Would need update" : "Would write"}: ${filePath}`);
     return;
   }
   fs.writeFileSync(filePath, content, "utf-8");
   log("ok", `Updated: ${path.basename(filePath)}`);
+}
+
+function normalizeTargetList(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean);
+  return String(value).split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function resolveSkillTargets(vars) {
+  const fromArgs = repeatedArg(["--target", "--skill-target"]);
+  const fromConfig = normalizeTargetList(vars.skillTargets);
+  return [...new Set([...fromArgs, ...fromConfig])]
+    .map((item) => path.resolve(item.replace(/^~/, os.homedir())))
+    .filter((item) => item && path.resolve(item) !== path.resolve(SKILL_DIR));
+}
+
+function countSkillDiffs(srcDir, dstDir) {
+  let changed = 0;
+  for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
+    if (srcDir === SKILL_DIR && SKILL_SYNC_EXCLUDES.has(entry.name)) continue;
+    const src = path.join(srcDir, entry.name);
+    const dst = path.join(dstDir, entry.name);
+    if (!fs.existsSync(dst)) {
+      changed += 1;
+      log("sync", `${CHECK ? "Missing" : "Would copy"}: ${dst}`);
+      continue;
+    }
+    if (entry.isDirectory()) {
+      changed += countSkillDiffs(src, dst);
+      continue;
+    }
+    if (entry.isFile()) {
+      const srcContent = fs.readFileSync(src);
+      const dstContent = fs.readFileSync(dst);
+      if (!srcContent.equals(dstContent)) {
+        changed += 1;
+        log("sync", `${CHECK ? "Out of sync" : "Would update"}: ${dst}`);
+      }
+    }
+  }
+  return changed;
+}
+
+function syncSkillTarget(targetDir) {
+  if (DRY_RUN || CHECK) {
+    const changed = countSkillDiffs(SKILL_DIR, targetDir);
+    if (changed === 0) log("ok", `Skill target up-to-date: ${targetDir}`);
+    return changed;
+  }
+  fs.mkdirSync(targetDir, { recursive: true });
+  for (const entry of fs.readdirSync(SKILL_DIR, { withFileTypes: true })) {
+    if (SKILL_SYNC_EXCLUDES.has(entry.name)) continue;
+    const src = path.join(SKILL_DIR, entry.name);
+    const dst = path.join(targetDir, entry.name);
+    fs.cpSync(src, dst, { recursive: true, force: true });
+  }
+  log("ok", `Skill target synced: ${targetDir}`);
+  return 1;
 }
 
 /**
@@ -92,10 +173,10 @@ function resolveObject(obj, vars) {
   return obj;
 }
 
-// ─── Generate server/.env from config variables ──────
+// 鈹€鈹€鈹€ Generate server/.env from config variables 鈹€鈹€鈹€鈹€鈹€鈹€
 
 function generateServerEnv(vars) {
-  // .env key → config variable key mapping
+  // .env key 鈫?config variable key mapping
   const envMapping = [
     ["WORKSPACE_ROOT", "serverWorkspaceRoot"],
     ["PORT", "serverPort"],
@@ -119,7 +200,7 @@ function generateServerEnv(vars) {
   return lines.join("\n") + "\n";
 }
 
-// ─── Main ─────────────────────────────────────────────────
+// 鈹€鈹€鈹€ Main 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 function main() {
   console.log(`\n\x1b[1m\x1b[36m agentport sync\x1b[0m ${DRY_RUN ? "(dry-run)" : CHECK ? "(check)" : ENV_ONLY ? "(env-only)" : ""}\n`);
@@ -145,7 +226,7 @@ function main() {
 
   let changes = 0;
 
-  // ─── 2. Sync server/.env ──────────────────────────────
+  // 鈹€鈹€鈹€ 2. Sync server/.env 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
   const serverDir = path.join(SKILL_DIR, "local", "server");
   const serverEnvPath = path.join(serverDir, ".env");
   const generatedEnv = generateServerEnv(vars);
@@ -177,13 +258,13 @@ function main() {
     if (changes > 0) {
       log("sync", `${changes} file(s) ${DRY_RUN ? "would be " : ""}updated`);
     } else {
-      log("ok", "local/server/.env in sync ✓");
+      log("ok", "local/server/.env in sync");
     }
     console.log("");
     return;
   }
 
-  // ─── 3. Sync package.json ─────────────────────────────
+  // 鈹€鈹€鈹€ 3. Sync package.json 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
   const pkgPath = path.join(SKILL_DIR, "package.json");
   if (fs.existsSync(pkgPath)) {
     const pkg = readJson(pkgPath);
@@ -199,7 +280,7 @@ function main() {
     }
   }
 
-  // ─── 4. Sync index.js version ────────────────────────
+  // 鈹€鈹€鈹€ 4. Sync index.js version 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
   const indexPath = path.join(SKILL_DIR, "index.js");
   if (fs.existsSync(indexPath)) {
     let content = fs.readFileSync(indexPath, "utf-8");
@@ -233,7 +314,7 @@ function main() {
     }
   }
 
-  // ─── 5. Sync SKILL.md version ────────────────────────
+  // 鈹€鈹€鈹€ 5. Sync SKILL.md version 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
   const skillPath = path.join(SKILL_DIR, "SKILL.md");
   if (fs.existsSync(skillPath)) {
     let content = fs.readFileSync(skillPath, "utf-8");
@@ -268,7 +349,7 @@ function main() {
     }
   }
 
-  // ─── 6. Sync MCP config ────────────────────────────
+  // 鈹€鈹€鈹€ 6. Sync MCP config 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
   // Read MCP config path from config variables (supports any AI tool)
   const mcpConfigPath = vars.mcpConfigPath;
   const mcpServerName = vars.mcpServerName || name;
@@ -297,7 +378,7 @@ function main() {
         log("ok", `${path.basename(resolvedMcpPath)} up-to-date`);
       }
     } else if (fs.existsSync(mcpDir)) {
-      // Config file doesn't exist but directory does → create it
+      // Config file doesn't exist but directory does 鈫?create it
       const mcp = { mcpServers: {} };
       const resolvedMcpServer = resolveObject(configData.mcp.server, vars);
       mcp.mcpServers[mcpServerName] = resolvedMcpServer;
@@ -310,16 +391,26 @@ function main() {
     log("warn", `mcpConfigPath not set in config, skipping MCP registration`);
   }
 
-  // ─── Summary ─────────────────────────────────────────
+  if (SYNC_SKILLS) {
+    const targets = resolveSkillTargets(vars);
+    if (targets.length === 0) {
+      log("warn", "No skill targets configured. Pass --target <dir> or variables.skillTargets.");
+    }
+    for (const target of targets) {
+      changes += syncSkillTarget(target);
+    }
+  }
+
+  // Summary
   console.log("");
   if (changes > 0) {
     log("sync", `${changes} file(s) ${DRY_RUN ? "would be " : ""}updated`);
     if (CHECK) {
-      log("err", "Consistency check failed — files were out of sync");
+      log("err", "Consistency check failed: files were out of sync");
       process.exit(1);
     }
   } else {
-    log("ok", "All files in sync ✓");
+    log("ok", "All files in sync");
     if (CHECK) process.exit(0);
   }
 

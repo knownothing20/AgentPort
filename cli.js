@@ -13,6 +13,7 @@ const CONNECTIONS_PATH = path.join(__dirname, "local", "connections.json");
 const STATE_PATH = path.join(__dirname, "local", "cli-state.json");
 const TIMEOUT_MS = Number(process.env.MCP_REMOTE_TIMEOUT_MS || process.env.NIUMA_SSH_TIMEOUT_MS || 120000);
 const DEFAULT_TOKEN_ENV_PATH = "~/.agentport/daemon/.env";
+const SESSION_ID = sanitizeStateSegment(process.env.AGENTPORT_SESSION_ID || process.env.CODEX_SESSION_ID || "");
 
 function print(text = "") {
   process.stdout.write(`${text}\n`);
@@ -61,6 +62,15 @@ function writeJson(filePath, value) {
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
+function sanitizeStateSegment(value) {
+  return String(value || "").trim().replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
+}
+
+function statePath() {
+  if (!SESSION_ID) return STATE_PATH;
+  return path.join(__dirname, "local", "sessions", SESSION_ID, "cli-state.json");
+}
+
 function loadConnections() {
   const config = readJson(CONNECTIONS_PATH, { connections: [] });
   const connections = Array.isArray(config.connections) ? config.connections : [];
@@ -102,21 +112,87 @@ function parseArgs(argv) {
 }
 
 function getState() {
-  return readJson(STATE_PATH, {});
+  return readJson(statePath(), {});
 }
 
 function setCurrentConnection(name) {
-  writeJson(STATE_PATH, { current: name, updatedAt: new Date().toISOString() });
+  writeJson(statePath(), {
+    current: name,
+    sessionId: SESSION_ID || null,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+function explicitConnectionName(options = {}) {
+  return String(options.connection || process.env.MCP_REMOTE_CONNECTION || process.env.NIUMA_SSH_CONNECTION || "").trim();
+}
+
+function failClosedConnectionError(connections) {
+  const names = connections.map((conn) => conn.name).filter(Boolean).join(", ");
+  return [
+    "Multiple connections are configured; this command requires an explicit --connection <name>.",
+    `Available connections: ${names || "(none)"}.`,
+    "Do not rely on shared current connection for write, exec, script, batch, job, trace, token, or config operations.",
+  ].join(" ");
+}
+
+function connectionTarget(conn, route) {
+  const type = route || conn.type || "daemon";
+  const base = {
+    connection: conn.name || null,
+    route: type,
+    type,
+  };
+  if (type === "ssh") {
+    return {
+      ...base,
+      host: conn.host || null,
+      port: conn.port || 22,
+      username: conn.username || null,
+      target: `${conn.username || "unknown"}@${conn.host || "unknown"}:${conn.port || 22}`,
+    };
+  }
+  return {
+    ...base,
+    url: conn.url || null,
+    target: conn.url || null,
+  };
+}
+
+function withTarget(payload, ctx) {
+  return {
+    ...payload,
+    target: ctx.target,
+    connection: ctx.target.connection,
+    route: ctx.target.route,
+    fallbackFrom: ctx.fallbackFrom || undefined,
+    fallbackReason: ctx.fallbackReason || undefined,
+  };
 }
 
 function selectConnection(options = {}) {
   const { connections, byName, defaultName } = loadConnections();
-  const explicit = options.connection || process.env.MCP_REMOTE_CONNECTION || process.env.NIUMA_SSH_CONNECTION;
+  const explicit = explicitConnectionName(options);
+  if (options.requireExplicitConnection && connections.length > 1 && !explicit) {
+    throw new Error(failClosedConnectionError(connections));
+  }
   const stateCurrent = getState().current;
   const wanted = explicit || stateCurrent || defaultName;
   const route = String(options.route || "").toLowerCase();
   const wantsSsh = route === "ssh" || route === "openssh";
   const wantsDaemon = route === "daemon";
+
+  if (explicit) {
+    if (!byName.has(explicit)) {
+      throw new Error(`Connection '${explicit}' not found in ${CONNECTIONS_PATH}.`);
+    }
+    const chosen = byName.get(explicit);
+    const chosenType = chosen.type || "daemon";
+    if ((wantsSsh && chosenType !== "ssh") || (wantsDaemon && chosenType !== "daemon")) {
+      throw new Error(`Connection '${explicit}' is ${chosenType}, not ${wantsSsh ? "ssh" : "daemon"}.`);
+    }
+    return chosen;
+  }
 
   if (wantsSsh || wantsDaemon) {
     if (wanted && byName.has(wanted)) {
@@ -300,14 +376,30 @@ async function resolveTokenEnvPath(ctx, args) {
 }
 
 async function readTokenEnv(ctx, args) {
-  const envPath = await resolveTokenEnvPath(ctx, args);
+  let envPath = "";
   let content = "";
   try {
     if (ctx.type === "ssh") {
+      envPath = await resolveTokenEnvPath(ctx, args);
       content = await ctx.ssh.readFile(envPath);
     } else {
-      const data = await postWithFallback(ctx.http, ["/api/fs/read", "/read"], { path: envPath });
-      content = data.content ?? "";
+      try {
+        const response = await ctx.http.get("/api/config", { params: { raw: "1" } });
+        const data = response.data || {};
+        if (data.raw !== true || typeof data.config !== "string") {
+          throw new Error("Remote daemon does not support raw admin config reads.");
+        }
+        envPath = data.envPath || tokenEnvPathFromArgs(args);
+        content = data.config;
+      } catch (rawError) {
+        try {
+          envPath = await resolveTokenEnvPath(ctx, args);
+          const data = await postWithFallback(ctx.http, ["/api/fs/read", "/read"], { path: envPath });
+          content = data.content ?? "";
+        } catch (fsError) {
+          throw new Error(`${rawError.message} Fallback fs read failed: ${fsError.message}`);
+        }
+      }
     }
   } catch (error) {
     throw new Error(`Failed to read remote env file '${envPath}'. ${redactSensitiveText(error.message)}`);
@@ -324,9 +416,15 @@ async function writeTokenEnv(ctx, envPath, doc, secrets = []) {
   try {
     if (ctx.type === "ssh") {
       await ctx.ssh.writeFile(envPath, content);
-      return;
+      return { hotReloaded: false, method: "ssh-write" };
     }
-    await postWithFallback(ctx.http, ["/api/fs/write", "/write"], { path: envPath, content });
+    try {
+      await ctx.http.put("/api/config", { config: content });
+      return { hotReloaded: true, method: "daemon-config-api" };
+    } catch (_) {
+      await postWithFallback(ctx.http, ["/api/fs/write", "/write"], { path: envPath, content });
+      return { hotReloaded: false, method: "daemon-fs-write" };
+    }
   } catch (error) {
     throw new Error(redactSensitiveText(`Failed to write remote env file '${envPath}'. ${error.message}`, secrets));
   }
@@ -340,6 +438,151 @@ function addTokenUsage() {
   return "Usage: node cli.js token add --client-id <client-id> [--token value] [--admin] [--route ssh|daemon]";
 }
 
+function localDirFromArgs(args) {
+  const dir = args["local-dir"] || args.localDir || args["skill-dir"] || args.skillDir || __dirname;
+  return path.resolve(String(dir));
+}
+
+function localConnectionsPathFromArgs(args) {
+  const explicit = args["connections-path"] || args.connectionsPath;
+  if (explicit) return path.resolve(String(explicit));
+  return path.join(localDirFromArgs(args), "local", "connections.json");
+}
+
+function readLocalConnections(filePath) {
+  if (!fs.existsSync(filePath)) return { connections: [], default: "" };
+  const config = readJson(filePath, { connections: [] });
+  return {
+    ...config,
+    connections: Array.isArray(config.connections) ? config.connections : [],
+  };
+}
+
+function upsertConnection(config, connection) {
+  const connections = Array.isArray(config.connections) ? [...config.connections] : [];
+  const index = connections.findIndex((item) => item?.name === connection.name);
+  if (index >= 0) connections[index] = { ...connections[index], ...connection };
+  else connections.push(connection);
+  return { ...config, connections };
+}
+
+function inferDaemonName(clientId, args) {
+  return args["daemon-name"] || args.daemonName || args.name || `${clientId}-daemon`;
+}
+
+function inferDaemonUrl(ctx, state, args) {
+  const explicit = args["daemon-url"] || args.daemonUrl || args.url;
+  if (explicit) return normalizeBaseUrl(explicit);
+  if (ctx.conn?.url) return normalizeBaseUrl(ctx.conn.url);
+  if (ctx.conn?.host) return `http://${ctx.conn.host}:${state.port || 3183}`;
+  throw new Error("Cannot infer daemon URL. Pass --daemon-url http://host:port.");
+}
+
+async function verifyDaemonToken(url, clientId, token) {
+  let lastError = null;
+  try {
+    const client = axios.create({
+      baseURL: normalizeBaseUrl(url),
+      timeout: 10000,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "X-Client-ID": clientId,
+        "Content-Type": "application/json",
+      },
+    });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const response = await client.get("/api/jobs?limit=1");
+        return { ok: true, status: response.status };
+      } catch (error) {
+        lastError = error;
+        if (!["ECONNRESET", "EPIPE", "ETIMEDOUT", "ECONNABORTED"].includes(error?.code) || attempt > 0) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      }
+    }
+  } catch (error) {
+    lastError = error;
+  }
+  return {
+    ok: false,
+    status: lastError?.response?.status || null,
+    error: lastError?.response?.data?.error || lastError?.message,
+  };
+}
+
+async function commandClientProvision(args) {
+  const clientId = normalizeClientId(args["client-id"] || args.clientId || args._[2]);
+  const wantsAdmin = Boolean(args.admin);
+  const replace = Boolean(args.replace || args.force);
+  const setDefault = args.default !== false && args.default !== "false" && !args["no-default"];
+
+  await withConnection({ ...defaultTokenArgs(args), requireExplicitConnection: true }, async (ctx) => {
+    const state = await readTokenEnv(ctx, args);
+    const existing = tokenValueByClient(state.authTokens, clientId);
+    const token = existing && !replace ? existing : generateAuthToken(clientId);
+    const needsAdminUpdate = Boolean(existing && wantsAdmin && !state.adminTokens.has(existing));
+
+    let remoteWrite = { hotReloaded: false, method: "reused-existing-token" };
+    if (!existing || replace || needsAdminUpdate) {
+      state.authTokens.set(clientId, token);
+      if (wantsAdmin) state.adminTokens.add(token);
+      setEnvValue(state.doc, "AUTH_TOKENS", serializeAuthTokenMap(state.authTokens));
+      setEnvValue(state.doc, "ADMIN_TOKENS", serializeAdminTokenSet(state.adminTokens));
+      remoteWrite = await writeTokenEnv(ctx, state.envPath, state.doc, [token, existing]);
+    }
+
+    const daemonName = inferDaemonName(clientId, args);
+    const daemonUrl = inferDaemonUrl(ctx, state, args);
+    const connectionsPath = localConnectionsPathFromArgs(args);
+    const localConfig = readLocalConnections(connectionsPath);
+    const nextConfig = upsertConnection(localConfig, {
+      name: daemonName,
+      type: "daemon",
+      description: `${clientId} daemon`,
+      url: daemonUrl,
+      clientId,
+      authToken: token,
+    });
+    if (setDefault) nextConfig.default = daemonName;
+    writeJson(connectionsPath, nextConfig);
+
+    const verification = args["skip-verify"] ? { skipped: true } : await verifyDaemonToken(daemonUrl, clientId, token);
+    const action = needsAdminUpdate
+      ? "promoted-existing-token"
+      : existing && !replace
+        ? "reused-existing-token"
+        : (existing ? "rotated-token" : "created-token");
+    printJson(withTarget({
+      ok: true,
+      action,
+      clientId,
+      daemonName,
+      daemonUrl,
+      connectionsPath,
+      default: nextConfig.default || null,
+      tokenMasked: mask(token),
+      tokenStoredLocally: true,
+      remoteWrite,
+      verification,
+      reloadHint: verification.ok ? null : "If verification is unauthorized, reload the remote daemon config or run provision through an admin daemon route.",
+    }, ctx));
+  });
+}
+
+async function commandClient(args) {
+  const subcommand = (args._[1] || "help").toLowerCase();
+  switch (subcommand) {
+    case "provision":
+    case "setup":
+      await commandClientProvision(args);
+      break;
+    default:
+      throw new Error("Usage: node cli.js client provision --client-id <client-id> --connection <name> [--daemon-name name] [--daemon-url url] [--local-dir path]");
+  }
+}
+
 async function commandTokenList(args) {
   await withConnection(defaultTokenArgs(args), async (ctx) => {
     const { envPath, authTokens, adminTokens } = await readTokenEnv(ctx, args);
@@ -350,7 +593,7 @@ async function commandTokenList(args) {
         token: mask(token),
         admin: adminTokens.has(token),
       }));
-    printJson({
+    printJson(withTarget({
       ok: true,
       mode: ctx.type,
       route: ctx.type,
@@ -358,7 +601,7 @@ async function commandTokenList(args) {
       count: tokens.length,
       adminTokenCount: adminTokens.size,
       tokens,
-    });
+    }, ctx));
   });
 }
 
@@ -369,7 +612,7 @@ async function commandTokenAdd(args) {
   const token = rawToken || generateAuthToken(clientId);
   if (!token) throw new Error(addTokenUsage());
 
-  await withConnection(defaultTokenArgs(args), async (ctx) => {
+  await withConnection({ ...defaultTokenArgs(args), requireExplicitConnection: true }, async (ctx) => {
     const state = await readTokenEnv(ctx, args);
     const existing = tokenValueByClient(state.authTokens, clientId);
     if (existing && !args.replace && !args.force) {
@@ -381,7 +624,7 @@ async function commandTokenAdd(args) {
     setEnvValue(state.doc, "ADMIN_TOKENS", serializeAdminTokenSet(state.adminTokens));
     await writeTokenEnv(ctx, state.envPath, state.doc, [token, existing]);
 
-    printJson({
+    printJson(withTarget({
       ok: true,
       mode: ctx.type,
       route: ctx.type,
@@ -392,7 +635,7 @@ async function commandTokenAdd(args) {
       admin: wantsAdmin,
       replaced: Boolean(existing),
       previousTokenMasked: existing ? mask(existing) : null,
-    });
+    }, ctx));
   });
 }
 
@@ -400,7 +643,7 @@ async function commandTokenRevoke(args) {
   const clientId = normalizeClientId(args["client-id"] || args.clientId || args._[2]);
   const removeAdmin = Boolean(args.admin || args["remove-admin"]);
 
-  await withConnection(defaultTokenArgs(args), async (ctx) => {
+  await withConnection({ ...defaultTokenArgs(args), requireExplicitConnection: true }, async (ctx) => {
     const state = await readTokenEnv(ctx, args);
     const removedToken = state.authTokens.get(clientId);
     if (!removedToken) {
@@ -412,7 +655,7 @@ async function commandTokenRevoke(args) {
     setEnvValue(state.doc, "ADMIN_TOKENS", serializeAdminTokenSet(state.adminTokens));
     await writeTokenEnv(ctx, state.envPath, state.doc, [removedToken]);
 
-    printJson({
+    printJson(withTarget({
       ok: true,
       mode: ctx.type,
       route: ctx.type,
@@ -421,7 +664,7 @@ async function commandTokenRevoke(args) {
       removed: true,
       removedToken: mask(removedToken),
       adminRemoved,
-    });
+    }, ctx));
   });
 }
 
@@ -459,7 +702,7 @@ async function commandTokenDashboardUrl(args) {
     const rootUrl = `${baseUrl}/?token=${tokenParam}`;
     const dashboardUrl = `${baseUrl}/dashboard?token=${tokenParam}`;
 
-    printJson({
+    printJson(withTarget({
       ok: true,
       mode: ctx.type,
       route: ctx.type,
@@ -468,7 +711,7 @@ async function commandTokenDashboardUrl(args) {
       tokenMasked: mask(adminToken),
       rootUrl,
       dashboardUrl,
-    });
+    }, ctx));
   });
 }
 
@@ -531,6 +774,52 @@ function sanitizeKey(value) {
 function randomJobId(prefix = "ssh") {
   const rand = Math.random().toString(36).slice(2, 8);
   return `${prefix}-${Date.now()}-${rand}`;
+}
+
+function normalizeTraceName(value) {
+  const raw = String(value || "ssh-link").trim();
+  const cleaned = raw.replace(/[^a-zA-Z0-9._-]/g, "-").replace(/-+/g, "-");
+  return cleaned || "ssh-link";
+}
+
+function traceKey(name) {
+  return `trace-${sanitizeKey(name)}`;
+}
+
+function buildTraceCommand(name, intervalInput) {
+  const safeName = normalizeTraceName(name);
+  const intervalSeconds = positiveInt(intervalInput, 5, 1, 300);
+  const script = [
+    "set +e",
+    'TRACE_DIR="$HOME/.agentport/trace"',
+    'mkdir -p "$TRACE_DIR"',
+    `TRACE_FILE="$TRACE_DIR/${safeName}.log"`,
+    `echo "=== trace start $(date -Is) host=$(hostname) interval=${intervalSeconds}s ===" >> "$TRACE_FILE"`,
+    `while true; do`,
+    "  TS=$(date -Is)",
+    "  ESTAB=$(ss -tan state established '( sport = :22 )' 2>/dev/null | tail -n +2 | wc -l | tr -d ' ')",
+    "  SYNRECV=$(ss -tan state syn-recv 2>/dev/null | tail -n +2 | wc -l | tr -d ' ')",
+    "  TIMEWAIT=$(ss -tan state time-wait 2>/dev/null | tail -n +2 | wc -l | tr -d ' ')",
+    "  USERS=$(who 2>/dev/null | wc -l | tr -d ' ')",
+    "  LOAD=$(cut -d ' ' -f1-3 /proc/loadavg 2>/dev/null | xargs || echo na)",
+    '  echo "$TS estab_22=$ESTAB synrecv=$SYNRECV timewait=$TIMEWAIT users=$USERS load=$LOAD" >> "$TRACE_FILE"',
+    `  sleep ${intervalSeconds}`,
+    "done",
+    "",
+  ].join("\n");
+  return { safeName, intervalSeconds, script };
+}
+
+async function readTraceJobRef(ssh, traceName) {
+  const name = normalizeTraceName(traceName);
+  const keyName = traceKey(name);
+  const keyPath = await ssh.resolveRemotePath(`${sshJobRootPath()}/keys/${keyName}.job`);
+  const exists = await ssh.exists(keyPath);
+  if (!exists) {
+    return { name, keyName, keyPath, jobId: null };
+  }
+  const jobId = normalizeJobId(await ssh.readFile(keyPath));
+  return { name, keyName, keyPath, jobId: jobId || null };
 }
 
 function positiveInt(value, fallback, min = 1, max = 5000) {
@@ -650,13 +939,14 @@ async function withConnection(options, fn) {
   const conn = selectConnection(options);
   if ((conn.type || "daemon") === "ssh") {
     const client = new SSHClient(conn);
+    const target = connectionTarget(conn, "ssh");
     try {
-      return await fn({ type: "ssh", conn, ssh: client });
+      return await fn({ type: "ssh", conn, ssh: client, target });
     } finally {
       client.disconnect();
     }
   }
-  const daemonCtx = { type: "daemon", conn, http: daemonClient(conn) };
+  const daemonCtx = { type: "daemon", conn, http: daemonClient(conn), target: connectionTarget(conn, "daemon") };
   try {
     return await fn(daemonCtx);
   } catch (error) {
@@ -668,11 +958,13 @@ async function withConnection(options, fn) {
     if (!sshConn) throw error;
 
     const sshClient = new SSHClient(sshConn);
+    const target = connectionTarget(sshConn, "ssh");
     try {
       return await fn({
         type: "ssh",
         conn: sshConn,
         ssh: sshClient,
+        target,
         fallbackFrom: "daemon",
         fallbackReason: String(error?.message || error),
       });
@@ -882,11 +1174,12 @@ function fallbackSshConnection(primaryConn, options = {}) {
 async function commandRead(args) {
   const targetPath = args._[1] || args.path;
   if (!targetPath) throw new Error("Usage: node cli.js read <remote-path> [--connection name]");
-  await withConnection(args, async ({ type, http, ssh }) => {
+  await withConnection(args, async (ctx) => {
+    const { type, http, ssh } = ctx;
     if (type === "ssh") {
       const content = await ssh.readFile(targetPath);
       if (args.json) {
-        printJson({ ok: true, mode: "ssh", path: targetPath, content });
+        printJson(withTarget({ ok: true, mode: "ssh", path: targetPath, content }, ctx));
         return;
       }
       print(content);
@@ -894,7 +1187,7 @@ async function commandRead(args) {
     }
     const data = await postWithFallback(http, ["/api/fs/read", "/read"], { path: targetPath });
     if (args.json) {
-      printJson({ ok: true, mode: "daemon", path: targetPath, etag: data.etag, content: data.content ?? "" });
+      printJson(withTarget({ ok: true, mode: "daemon", path: targetPath, etag: data.etag, content: data.content ?? "" }, ctx));
       return;
     }
     print(data.content ?? "");
@@ -924,10 +1217,11 @@ async function commandWrite(args) {
     content = await readStdin();
   }
   content = sanitizeContent(content);
-  await withConnection(args, async ({ type, http, ssh }) => {
+  await withConnection({ ...args, requireExplicitConnection: true }, async (ctx) => {
+    const { type, http, ssh } = ctx;
     if (type === "ssh") {
       await ssh.writeFile(targetPath, content);
-      printJson({ ok: true, path: targetPath, mode: "ssh" });
+      printJson(withTarget({ ok: true, path: targetPath, mode: "ssh" }, ctx));
       return;
     }
     const data = await postWithFallback(http, ["/api/fs/write", "/write"], {
@@ -935,7 +1229,7 @@ async function commandWrite(args) {
       content,
       expectedEtag: typeof args.expectedEtag === "string" ? args.expectedEtag : undefined,
     });
-    printJson({ ok: true, path: targetPath, mode: "daemon", etag: data.etag });
+    printJson(withTarget({ ok: true, path: targetPath, mode: "daemon", etag: data.etag }, ctx));
   });
 }
 
@@ -1006,12 +1300,13 @@ async function commandGrep(args) {
 async function commandBash(args) {
   const command = args._.slice(1).join(" ") || args.command;
   if (!command) throw new Error("Usage: node cli.js bash <command> [--cwd path]");
-  await withConnection(args, async ({ type, http, ssh }) => {
+  await withConnection({ ...args, requireExplicitConnection: true }, async (ctx) => {
+    const { type, http, ssh } = ctx;
     const data = type === "ssh"
       ? await ssh.exec(command, { cwd: args.cwd })
       : await postWithFallback(http, ["/api/exec", "/bash", "/api/cmd/execute"], { command, cwd: args.cwd });
     if (args.json) {
-      printJson({ ok: true, mode: type, command, cwd: args.cwd || null, ...data });
+      printJson(withTarget({ ok: true, mode: type, command, cwd: args.cwd || null, ...data }, ctx));
       return;
     }
     if (data.stdout) print(data.stdout.replace(/\s+$/, ""));
@@ -1038,6 +1333,16 @@ async function readRemoteOptional(ssh, filePath) {
   }
 }
 
+function parseJsonOptional(raw) {
+  const text = String(raw || "").trim().replace(/^\uFEFF/, "");
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
 async function readSshJobStatus(ssh, jobId) {
   const ctx = await buildSshJobContext(ssh, jobId);
   const exists = await ssh.exists(ctx.jobDir);
@@ -1052,6 +1357,7 @@ async function readSshJobStatus(ssh, jobId) {
   const finishedAtRaw = await readRemoteOptional(ssh, `${ctx.jobDir}/finished_at`);
   const commandRaw = await readRemoteOptional(ssh, `${ctx.jobDir}/command.txt`);
   const cwdRaw = await readRemoteOptional(ssh, `${ctx.jobDir}/cwd.txt`);
+  const connectionRaw = await readRemoteOptional(ssh, `${ctx.jobDir}/connection.json`);
 
   const pid = normalizeJobId(pidRaw);
   const exitCodeText = normalizeJobId(exitRaw);
@@ -1073,6 +1379,7 @@ async function readSshJobStatus(ssh, jobId) {
     jobId: ctx.jobId,
     status,
     pid: pid || null,
+    target: parseJsonOptional(connectionRaw),
     exitCode: exitCodeText === "" ? null : Number(exitCodeText),
     canceledAt: normalizeJobId(canceledAtRaw) || null,
     startedAt: normalizeJobId(startedAtRaw) || null,
@@ -1100,7 +1407,8 @@ async function listSshJobIds(ssh, limit = 20) {
 async function commandJobStart(args) {
   const command = args.command || args._.slice(2).join(" ");
   if (!command) throw new Error("Usage: node cli.js job start <command> [--cwd path]");
-  await withConnection(args, async ({ type, http, ssh }) => {
+  await withConnection({ ...args, requireExplicitConnection: true }, async (ctx) => {
+    const { type, http, ssh } = ctx;
     if (type === "ssh") {
       const root = await ssh.resolveRemotePath(sshJobRootPath());
       const keysDir = `${root}/keys`;
@@ -1120,34 +1428,35 @@ async function commandJobStart(args) {
       }
 
       const jobId = randomJobId("ssh");
-      const ctx = await buildSshJobContext(ssh, jobId);
-      await ssh.exec(`mkdir -p ${JSON.stringify(ctx.jobDir)}`);
+      const jobCtx = await buildSshJobContext(ssh, jobId);
+      await ssh.exec(`mkdir -p ${JSON.stringify(jobCtx.jobDir)}`);
 
       const runCommand = args.cwd
         ? `cd ${JSON.stringify(args.cwd)} && ${command}`
         : command;
 
-      const runnerPath = `${ctx.jobDir}/runner.sh`;
+      const runnerPath = `${jobCtx.jobDir}/runner.sh`;
       const runnerScript = [
         "#!/usr/bin/env bash",
         "set +e",
-        `bash -lc ${JSON.stringify(runCommand)} > ${JSON.stringify(`${ctx.jobDir}/stdout.log`)} 2> ${JSON.stringify(`${ctx.jobDir}/stderr.log`)}`,
+        `bash -lc ${JSON.stringify(runCommand)} > ${JSON.stringify(`${jobCtx.jobDir}/stdout.log`)} 2> ${JSON.stringify(`${jobCtx.jobDir}/stderr.log`)}`,
         "code=$?",
-        `printf '%s' \"$code\" > ${JSON.stringify(`${ctx.jobDir}/exit_code`)}`,
-        `date -Is > ${JSON.stringify(`${ctx.jobDir}/finished_at`)}`,
+        `printf '%s' \"$code\" > ${JSON.stringify(`${jobCtx.jobDir}/exit_code`)}`,
+        `date -Is > ${JSON.stringify(`${jobCtx.jobDir}/finished_at`)}`,
       ].join("\n") + "\n";
 
-      await ssh.writeFile(`${ctx.jobDir}/command.txt`, command.endsWith("\n") ? command : `${command}\n`);
-      if (args.cwd) await ssh.writeFile(`${ctx.jobDir}/cwd.txt`, `${args.cwd}\n`);
-      await ssh.writeFile(`${ctx.jobDir}/started_at`, `${new Date().toISOString()}\n`);
+      await ssh.writeFile(`${jobCtx.jobDir}/command.txt`, command.endsWith("\n") ? command : `${command}\n`);
+      if (args.cwd) await ssh.writeFile(`${jobCtx.jobDir}/cwd.txt`, `${args.cwd}\n`);
+      await ssh.writeFile(`${jobCtx.jobDir}/started_at`, `${new Date().toISOString()}\n`);
+      await ssh.writeFile(`${jobCtx.jobDir}/connection.json`, `${JSON.stringify(ctx.target, null, 2)}\n`);
       await ssh.writeFile(runnerPath, runnerScript);
       await ssh.exec(`chmod +x ${JSON.stringify(runnerPath)}`);
 
       const launch = await ssh.exec(`nohup ${JSON.stringify(runnerPath)} >/dev/null 2>&1 & echo $!`);
       const pid = normalizeJobId(launch.stdout);
-      if (pid) await ssh.writeFile(`${ctx.jobDir}/pid`, `${pid}\n`);
+      if (pid) await ssh.writeFile(`${jobCtx.jobDir}/pid`, `${pid}\n`);
       if (key) {
-        await ssh.writeFile(`${ctx.keysDir}/${key}.job`, `${jobId}\n`);
+        await ssh.writeFile(`${jobCtx.keysDir}/${key}.job`, `${jobId}\n`);
       }
 
       const created = await readSshJobStatus(ssh, jobId);
@@ -1157,21 +1466,23 @@ async function commandJobStart(args) {
     const data = await postWithFallback(http, ["/api/jobs", "/api/jobs/start", "/api/exec/async"], {
       command,
       cwd: args.cwd,
+      connection: ctx.target,
     });
-    printJson(data);
+    printJson(withTarget(data, ctx));
   });
 }
 
 async function commandJobStatus(args) {
   const jobId = args._[2] || args.jobId || args.id;
   if (!jobId) throw new Error("Usage: node cli.js job status <job-id>");
-  await withConnection(args, async ({ type, http, ssh }) => {
+  await withConnection({ ...args, requireExplicitConnection: true }, async (ctx) => {
+    const { type, http, ssh } = ctx;
     if (type === "ssh") {
       printJson(await readSshJobStatus(ssh, jobId));
       return;
     }
     const data = await getWithFallback(http, [`/api/jobs/${encodeURIComponent(jobId)}`, `/api/task/${encodeURIComponent(jobId)}`]);
-    printJson(data);
+    printJson(withTarget(data, ctx));
   });
 }
 
@@ -1180,23 +1491,26 @@ async function commandJobLogs(args) {
   if (!jobId) throw new Error("Usage: node cli.js job logs <job-id> [--tail 200]");
   const tailLines = positiveInt(args.tail || args.lines, 200, 1, 10000);
   const tailBytes = positiveInt(args.tailBytes || args.bytes, 64 * 1024, 1024, 5 * 1024 * 1024);
-  await withConnection(args, async ({ type, http, ssh }) => {
+  await withConnection({ ...args, requireExplicitConnection: true }, async (ctx) => {
+    const { type, http, ssh } = ctx;
     if (type === "ssh") {
-      const ctx = await buildSshJobContext(ssh, jobId);
+      const jobCtx = await buildSshJobContext(ssh, jobId);
       const stat = await readSshJobStatus(ssh, jobId);
       if (!stat.ok) {
         printJson(stat);
         process.exitCode = 2;
         return;
       }
-      const stdout = (await readRemoteOptional(ssh, `${ctx.jobDir}/stdout.log`)) || "";
-      const stderr = (await readRemoteOptional(ssh, `${ctx.jobDir}/stderr.log`)) || "";
+      const stdout = (await readRemoteOptional(ssh, `${jobCtx.jobDir}/stdout.log`)) || "";
+      const stderr = (await readRemoteOptional(ssh, `${jobCtx.jobDir}/stderr.log`)) || "";
       const trimLines = (text) => text.split(/\r?\n/).slice(-tailLines).join("\n");
       const payload = {
         ok: true,
         mode: "ssh",
         route: "ssh",
         jobId,
+        target: stat.target || ctx.target,
+        connection: (stat.target || ctx.target).connection,
         status: stat.status,
         stdout: { content: trimLines(stdout), bytes: Buffer.byteLength(stdout, "utf8") },
         stderr: { content: trimLines(stderr), bytes: Buffer.byteLength(stderr, "utf8") },
@@ -1215,7 +1529,7 @@ async function commandJobLogs(args) {
     try {
       const data = await getWithFallback(http, [`/api/jobs/${encodeURIComponent(jobId)}/logs`], { tailBytes });
       if (args.json) {
-        printJson(data);
+        printJson(withTarget(data, ctx));
         return;
       }
       const stdout = data.stdout?.content || "";
@@ -1228,7 +1542,7 @@ async function commandJobLogs(args) {
     } catch (error) {
       const data = await getWithFallback(http, [`/api/task/${encodeURIComponent(jobId)}`]);
       if (args.json) {
-        printJson(data);
+        printJson(withTarget(data, ctx));
         return;
       }
       const combined = [
@@ -1243,9 +1557,10 @@ async function commandJobLogs(args) {
 async function commandJobCancel(args) {
   const jobId = args._[2] || args.jobId || args.id;
   if (!jobId) throw new Error("Usage: node cli.js job cancel <job-id>");
-  await withConnection(args, async ({ type, http, ssh }) => {
+  await withConnection({ ...args, requireExplicitConnection: true }, async (ctx) => {
+    const { type, http, ssh } = ctx;
     if (type === "ssh") {
-      const ctx = await buildSshJobContext(ssh, jobId);
+      const jobCtx = await buildSshJobContext(ssh, jobId);
       const stat = await readSshJobStatus(ssh, jobId);
       if (!stat.ok) {
         printJson(stat);
@@ -1258,19 +1573,20 @@ async function commandJobCancel(args) {
         return;
       }
       await ssh.exec(`if kill -0 ${shellSingleQuote(stat.pid)} 2>/dev/null; then kill ${shellSingleQuote(stat.pid)} 2>/dev/null || true; fi`);
-      await ssh.writeFile(`${ctx.jobDir}/finished_at`, `${new Date().toISOString()}\n`);
-      await ssh.writeFile(`${ctx.jobDir}/canceled_at`, `${new Date().toISOString()}\n`);
+      await ssh.writeFile(`${jobCtx.jobDir}/finished_at`, `${new Date().toISOString()}\n`);
+      await ssh.writeFile(`${jobCtx.jobDir}/canceled_at`, `${new Date().toISOString()}\n`);
       const updated = await readSshJobStatus(ssh, jobId);
       printJson({ ...updated, canceled: true });
       return;
     }
     const data = await postWithFallback(http, [`/api/jobs/${encodeURIComponent(jobId)}/cancel`], {});
-    printJson(data);
+    printJson(withTarget(data, ctx));
   });
 }
 
 async function commandJobList(args) {
-  await withConnection(args, async ({ type, http, ssh }) => {
+  await withConnection({ ...args, requireExplicitConnection: true }, async (ctx) => {
+    const { type, http, ssh } = ctx;
     if (type === "ssh") {
       const limit = positiveInt(args.limit || 20, 20, 1, 200);
       const ids = await listSshJobIds(ssh, limit);
@@ -1282,6 +1598,8 @@ async function commandJobList(args) {
         ok: true,
         mode: "ssh",
         route: "ssh",
+        target: ctx.target,
+        connection: ctx.target.connection,
         count: jobs.length,
         jobs,
       });
@@ -1291,7 +1609,7 @@ async function commandJobList(args) {
       limit: args.limit || 20,
       status: args.status,
     });
-    printJson(data);
+    printJson(withTarget(data, ctx));
   });
 }
 
@@ -1328,22 +1646,223 @@ async function commandJob(args) {
   }
 }
 
+async function commandTraceStart(args) {
+  const requestedName = args.name || args._[2] || "ssh-link";
+  const { safeName, intervalSeconds, script } = buildTraceCommand(requestedName, args.interval || args.every);
+  const restart = Boolean(args.restart || args.force);
+
+  await withConnection({ ...args, route: "ssh", requireExplicitConnection: true }, async ({ type, ssh }) => {
+    if (type !== "ssh") throw new Error("trace command only supports SSH route. Use --route ssh.");
+
+    const ref = await readTraceJobRef(ssh, safeName);
+    if (ref.jobId) {
+      const existing = await readSshJobStatus(ssh, ref.jobId);
+      if (existing.ok && existing.status === "running" && !restart) {
+        printJson({
+          ok: true,
+          mode: "ssh",
+          route: "ssh",
+          trace: safeName,
+          reused: true,
+          intervalSeconds,
+          jobId: ref.jobId,
+          status: existing.status,
+          pid: existing.pid,
+          hint: "Trace is already running. Use `trace stop` first or `trace start --restart`.",
+        });
+        return;
+      }
+      if (existing.ok && existing.pid) {
+        await ssh.exec(`if kill -0 ${shellSingleQuote(existing.pid)} 2>/dev/null; then kill ${shellSingleQuote(existing.pid)} 2>/dev/null || true; fi`);
+      }
+      await ssh.rm(ref.keyPath);
+    }
+
+    const jobId = randomJobId("trace");
+    const ctx = await buildSshJobContext(ssh, jobId);
+    const traceRoot = await ssh.resolveRemotePath("~/.agentport/trace");
+    const traceLogPath = `${traceRoot}/${safeName}.log`;
+    await ssh.exec(`mkdir -p ${JSON.stringify(ctx.jobDir)} ${JSON.stringify(ctx.keysDir)} ${JSON.stringify(traceRoot)}`);
+
+    const traceScriptPath = `${ctx.jobDir}/trace-loop.sh`;
+    const runnerPath = `${ctx.jobDir}/runner.sh`;
+    const runnerScript = [
+      "#!/usr/bin/env bash",
+      "set +e",
+      `bash ${JSON.stringify(traceScriptPath)} > ${JSON.stringify(`${ctx.jobDir}/stdout.log`)} 2> ${JSON.stringify(`${ctx.jobDir}/stderr.log`)}`,
+      "code=$?",
+      `printf '%s' "$code" > ${JSON.stringify(`${ctx.jobDir}/exit_code`)}`,
+      `date -Is > ${JSON.stringify(`${ctx.jobDir}/finished_at`)}`,
+    ].join("\n") + "\n";
+
+    await ssh.writeFile(traceScriptPath, script);
+    await ssh.exec(`chmod +x ${JSON.stringify(traceScriptPath)}`);
+    await ssh.writeFile(`${ctx.jobDir}/command.txt`, script);
+    await ssh.writeFile(`${ctx.jobDir}/cwd.txt`, "~\n");
+    await ssh.writeFile(`${ctx.jobDir}/started_at`, `${new Date().toISOString()}\n`);
+    await ssh.writeFile(runnerPath, runnerScript);
+    await ssh.exec(`chmod +x ${JSON.stringify(runnerPath)}`);
+
+    const launch = await ssh.exec(`nohup ${JSON.stringify(runnerPath)} >/dev/null 2>&1 & echo $!`);
+    const pid = normalizeJobId(launch.stdout);
+    if (pid) await ssh.writeFile(`${ctx.jobDir}/pid`, `${pid}\n`);
+    await ssh.writeFile(`${ctx.keysDir}/${ref.keyName}.job`, `${jobId}\n`);
+
+    const status = await readSshJobStatus(ssh, jobId);
+    printJson({
+      ...status,
+      trace: safeName,
+      intervalSeconds,
+      logPath: traceLogPath,
+      key: ref.keyName,
+    });
+  });
+}
+
+async function commandTraceStatus(args) {
+  const requestedName = args.name || args._[2] || "ssh-link";
+  const safeName = normalizeTraceName(requestedName);
+  await withConnection({ ...args, route: "ssh", requireExplicitConnection: true }, async ({ type, ssh }) => {
+    if (type !== "ssh") throw new Error("trace command only supports SSH route. Use --route ssh.");
+    const ref = await readTraceJobRef(ssh, safeName);
+    const traceRoot = await ssh.resolveRemotePath("~/.agentport/trace");
+    const traceLogPath = `${traceRoot}/${safeName}.log`;
+    if (!ref.jobId) {
+      printJson({
+        ok: false,
+        mode: "ssh",
+        route: "ssh",
+        trace: safeName,
+        status: "not_found",
+        logPath: traceLogPath,
+        error: "trace job not found",
+      });
+      return;
+    }
+    const status = await readSshJobStatus(ssh, ref.jobId);
+    printJson({
+      ...status,
+      trace: safeName,
+      key: ref.keyName,
+      logPath: traceLogPath,
+    });
+  });
+}
+
+async function commandTraceLogs(args) {
+  const requestedName = args.name || args._[2] || "ssh-link";
+  const safeName = normalizeTraceName(requestedName);
+  const tailLines = positiveInt(args.tail || args.lines, 120, 1, 5000);
+  await withConnection({ ...args, route: "ssh", requireExplicitConnection: true }, async ({ type, ssh }) => {
+    if (type !== "ssh") throw new Error("trace command only supports SSH route. Use --route ssh.");
+    const ref = await readTraceJobRef(ssh, safeName);
+    const traceRoot = await ssh.resolveRemotePath("~/.agentport/trace");
+    const traceLogPath = `${traceRoot}/${safeName}.log`;
+    const logResult = await ssh.exec(`if [ -f ${shellSingleQuote(traceLogPath)} ]; then tail -n ${tailLines} ${shellSingleQuote(traceLogPath)}; fi`);
+
+    const payload = {
+      ok: true,
+      mode: "ssh",
+      route: "ssh",
+      trace: safeName,
+      jobId: ref.jobId,
+      tail: tailLines,
+      logPath: traceLogPath,
+      content: logResult.stdout || "",
+    };
+
+    if (args.json) {
+      printJson(payload);
+      return;
+    }
+    print(payload.content || "");
+  });
+}
+
+async function commandTraceStop(args) {
+  const requestedName = args.name || args._[2] || "ssh-link";
+  const safeName = normalizeTraceName(requestedName);
+  await withConnection({ ...args, route: "ssh", requireExplicitConnection: true }, async ({ type, ssh }) => {
+    if (type !== "ssh") throw new Error("trace command only supports SSH route. Use --route ssh.");
+    const ref = await readTraceJobRef(ssh, safeName);
+    if (!ref.jobId) {
+      printJson({
+        ok: false,
+        mode: "ssh",
+        route: "ssh",
+        trace: safeName,
+        stopped: false,
+        error: "trace job not found",
+      });
+      return;
+    }
+
+    const status = await readSshJobStatus(ssh, ref.jobId);
+    if (status.ok && status.pid) {
+      await ssh.exec(`if kill -0 ${shellSingleQuote(status.pid)} 2>/dev/null; then kill ${shellSingleQuote(status.pid)} 2>/dev/null || true; fi`);
+      const ctx = await buildSshJobContext(ssh, ref.jobId);
+      await ssh.writeFile(`${ctx.jobDir}/finished_at`, `${new Date().toISOString()}\n`);
+      await ssh.writeFile(`${ctx.jobDir}/canceled_at`, `${new Date().toISOString()}\n`);
+    }
+    await ssh.rm(ref.keyPath);
+    const updated = await readSshJobStatus(ssh, ref.jobId);
+    printJson({
+      ...updated,
+      trace: safeName,
+      key: ref.keyName,
+      stopped: true,
+    });
+  });
+}
+
+async function commandTrace(args) {
+  const subcommand = (args._[1] || "status").toLowerCase();
+  switch (subcommand) {
+    case "start":
+    case "run":
+      await commandTraceStart(args);
+      break;
+    case "status":
+    case "show":
+      await commandTraceStatus(args);
+      break;
+    case "logs":
+    case "log":
+      await commandTraceLogs(args);
+      break;
+    case "stop":
+    case "cancel":
+      await commandTraceStop(args);
+      break;
+    default:
+      throw new Error("Usage: node cli.js trace <start|status|logs|stop> [name] [--interval 5] [--tail 120] [--restart]");
+  }
+}
+
 async function commandScript(args) {
   const file = args._[1] || args.file;
   const interpreter = args.interpreter || "bash";
   if (!file) throw new Error("Usage: node cli.js script <local-script-file> [--interpreter bash] [--cwd path]");
   const content = fs.readFileSync(file, "utf8");
-  await withConnection(args, async ({ type, http, ssh }) => {
+  await withConnection({ ...args, requireExplicitConnection: true }, async (ctx) => {
+    const { type, http, ssh } = ctx;
     if (type === "ssh") {
       const remoteFile = `/tmp/agentport-cli-${Date.now()}.${interpreter === "python3" ? "py" : "sh"}`;
       await ssh.writeFile(remoteFile, content);
       const result = await ssh.exec(`${interpreter} ${JSON.stringify(remoteFile)}`, { cwd: args.cwd });
       await ssh.rm(remoteFile);
-      printJson(result);
+      printJson(withTarget(result, ctx));
       return;
     }
     const data = await postWithFallback(http, ["/api/exec/script"], { content, interpreter, cwd: args.cwd });
-    printJson(data);
+    printJson(withTarget(data, ctx));
+  });
+}
+
+function batchHasRiskyOperations(operations) {
+  return operations.some((op) => {
+    const type = String(op?.type || "").toLowerCase();
+    return type === "write" || type === "bash" || type === "script" || type === "exec";
   });
 }
 
@@ -1353,7 +1872,8 @@ async function commandBatch(args) {
   const payload = readJson(file, null);
   const operations = Array.isArray(payload) ? payload : payload.operations;
   if (!Array.isArray(operations)) throw new Error("Batch file must be an array or { operations: [...] }");
-  await withConnection(args, async ({ type, http, ssh }) => {
+  await withConnection({ ...args, requireExplicitConnection: batchHasRiskyOperations(operations) }, async (ctx) => {
+    const { type, http, ssh } = ctx;
     if (type === "ssh") {
       const results = [];
       for (const op of operations) {
@@ -1372,10 +1892,10 @@ async function commandBatch(args) {
         else if (op.type === "bash") results.push({ ...op, status: 200, ...(await ssh.exec(op.command, { cwd: op.cwd })) });
         else results.push({ ...op, status: 400, error: "Unsupported SSH batch operation" });
       }
-      printJson({ success: true, results });
+      printJson(withTarget({ success: true, results }, ctx));
       return;
     }
-    printJson(await postWithFallback(http, ["/api/batch"], { operations }));
+    printJson(withTarget(await postWithFallback(http, ["/api/batch"], { operations }), ctx));
   });
 }
 
@@ -1406,10 +1926,15 @@ Commands:
   node cli.js job logs <job-id> [--tail 200]
   node cli.js job cancel <job-id>
   node cli.js job list [--limit 20]
+  node cli.js trace start [name] [--interval 5] [--restart]
+  node cli.js trace status [name]
+  node cli.js trace logs [name] [--tail 120]
+  node cli.js trace stop [name]
   node cli.js token list [--route ssh]
   node cli.js token add --client-id <client-id> [--admin]
   node cli.js token revoke --client-id <client-id> [--admin]
   node cli.js token dashboard-url [--client-id <client-id>]
+  node cli.js client provision --client-id <client-id> --connection <name>
   node cli.js script local-script.sh [--interpreter bash]
   node cli.js batch batch.json
 
@@ -1417,6 +1942,11 @@ Options:
   --connection <name>       choose connection
   --route <auto|ssh|daemon> prefer route for this command
   --json                    structured output for read/bash/logs/errors
+
+Safety:
+  When multiple connections are configured, write/exec/job/trace/token mutation commands
+  require explicit --connection <name>. Set AGENTPORT_SESSION_ID to make \`connect\`
+  maintain a session-scoped current connection instead of the shared fallback state.
 `);
 }
 
@@ -1468,8 +1998,14 @@ async function main(args) {
     case "job":
       await commandJob(args);
       break;
+    case "trace":
+      await commandTrace(args);
+      break;
     case "token":
       await commandToken(args);
+      break;
+    case "client":
+      await commandClient(args);
       break;
     case "logs":
       args._ = ["job", "logs", ...args._.slice(1)];

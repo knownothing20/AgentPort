@@ -13,16 +13,73 @@ import { SSHClient, SSHConnectionManager } from "./ssh-client.js";
 import { scanLocalSSH, formatSSHScanSummary } from "./ssh-scanner.js";
 import logger from "./logger.js";
 
+let _fatalHandlerActive = false;
+let _stdioExitScheduled = false;
+
+function localErrorMessage(error) {
+  return error instanceof Error ? error.stack || error.message : String(error);
+}
+
+function isBrokenPipeError(error) {
+  const code = String(error?.code || "");
+  const message = localErrorMessage(error);
+  return code === "EPIPE" || /EPIPE|broken pipe/i.test(message);
+}
+
+function scheduleStdioExit(reason, error = null) {
+  if (_stdioExitScheduled) return;
+  _stdioExitScheduled = true;
+  try {
+    logger.warn("process", "Scheduling exit after stdio transport failure", {
+      reason,
+      error: error ? localErrorMessage(error) : undefined,
+    });
+  } catch {}
+  setTimeout(() => process.exit(1), 20);
+}
+
+function writeStderrLine(...parts) {
+  try {
+    if (!process.stderr?.writable || process.stderr.destroyed || process.stderr.writableEnded) return false;
+    process.stderr.write(`${parts.map((part) => String(part)).join(" ")}\n`);
+    return true;
+  } catch (error) {
+    if (isBrokenPipeError(error)) {
+      scheduleStdioExit("stderr write failed", error);
+    } else {
+      try {
+        logger.warn("process", "Failed to write stderr", { error: localErrorMessage(error) });
+      } catch {}
+    }
+    return false;
+  }
+}
+
+function handleProcessError(kind, error) {
+  const message = localErrorMessage(error);
+  if (_fatalHandlerActive) {
+    if (isBrokenPipeError(error)) scheduleStdioExit(`${kind} recursion hit broken pipe`, error);
+    return;
+  }
+  _fatalHandlerActive = true;
+  try {
+    logger.error("process", kind, message);
+    if (isBrokenPipeError(error)) {
+      scheduleStdioExit(kind, error);
+      return;
+    }
+    writeStderrLine(`[agentport] ${kind}:`, message);
+  } finally {
+    _fatalHandlerActive = false;
+  }
+}
+
 process.on("unhandledRejection", (reason) => {
-  const message = reason instanceof Error ? reason.stack || reason.message : String(reason);
-  logger.error("process", "Unhandled rejection", message);
-  console.error("[agentport] unhandled rejection:", message);
+  handleProcessError("Unhandled rejection", reason);
 });
 
 process.on("uncaughtException", (error) => {
-  const message = error instanceof Error ? error.stack || error.message : String(error);
-  logger.error("process", "Uncaught exception", message);
-  console.error("[agentport] uncaught exception:", message);
+  handleProcessError("Uncaught exception", error);
 });
 
 // Read version from local config
@@ -132,6 +189,7 @@ const _stdioState = {
   stdinClosed: false,
   stdinErrored: false,
   stdoutErrored: false,
+  stderrErrored: false,
 };
 const _transportState = {
   connected: false,
@@ -319,6 +377,8 @@ function diagnosticSnapshot(reason, extra = {}) {
       stdinReadableDestroyed: process.stdin.destroyed,
       stdoutWritableEnded: process.stdout.writableEnded,
       stdoutWritableDestroyed: process.stdout.destroyed,
+      stderrWritableEnded: process.stderr.writableEnded,
+      stderrWritableDestroyed: process.stderr.destroyed,
     },
     transport: _transportState,
     memory: process.memoryUsage(),
@@ -632,7 +692,7 @@ function loadConnections() {
       return config.default || Object.keys(_connections)[0];
     }
   } catch (e) {
-    console.error('Failed to load connections.json:', e.message);
+    writeStderrLine("Failed to load connections.json:", e.message);
   }
   return null;
 }
@@ -671,6 +731,69 @@ function getSSHClient(connectionName) {
     throw new Error('Not an SSH connection');
   }
   return _sshManager.switchConnection(name);
+}
+
+function explicitToolConnection(args = {}) {
+  return typeof args.connection === "string" && args.connection.trim() ? args.connection.trim() : "";
+}
+
+function failClosedToolConnectionError() {
+  const names = Object.keys(_connections).join(", ");
+  return [
+    "Multiple connections are configured; this tool call requires an explicit connection.",
+    `Available connections: ${names || "(none)"}.`,
+    "Do not rely on current connection for write, exec, script, batch, async task, or config operations.",
+  ].join(" ");
+}
+
+function batchHasRiskyOperations(operations) {
+  return Array.isArray(operations) && operations.some((op) => {
+    const type = String(op?.type || "").toLowerCase();
+    return type === "write" || type === "bash" || type === "script" || type === "exec";
+  });
+}
+
+function toolRequiresExplicitConnection(toolName, args = {}) {
+  if (Object.keys(_connections).length <= 1) return false;
+  if (explicitToolConnection(args)) return false;
+  if (toolName === "remote_write" || toolName === "remote_bash" || toolName === "remote_script") return true;
+  if (toolName === "remote_exec_async" || toolName === "remote_task") return true;
+  if (toolName === "remote_config" && String(args.action || "").toLowerCase() === "write") return true;
+  if (toolName === "remote_batch" && batchHasRiskyOperations(args.operations)) return true;
+  return false;
+}
+
+function setActiveConnection(connectionName) {
+  if (!_connections[connectionName]) {
+    throw new Error(`Connection '${connectionName}' not found. Available: ${Object.keys(_connections).join(", ")}`);
+  }
+  _currentConnection = connectionName;
+  const conn = _connections[connectionName];
+  _connectionAxios = conn.type === "ssh" ? null : getAxiosInstance(connectionName);
+  return conn;
+}
+
+function applyPerCallConnection(toolName, args = {}) {
+  if (toolName === "remote_connect" || toolName === "remote_setup" || toolName === "remote_ssh_info") {
+    return null;
+  }
+  loadConnections();
+  const previous = {
+    connection: _currentConnection,
+    axios: _connectionAxios,
+  };
+  const explicit = explicitToolConnection(args);
+  if (explicit) {
+    setActiveConnection(explicit);
+    return () => {
+      _currentConnection = previous.connection;
+      _connectionAxios = previous.axios;
+    };
+  }
+  if (toolRequiresExplicitConnection(toolName, args)) {
+    throw new Error(failClosedToolConnectionError());
+  }
+  return null;
 }
 
 // --- Connection health cache ---
@@ -868,7 +991,7 @@ async function postWithFallback(paths, payload, retryCount = 0) {
       // Network error: retry once with delay
       if (isNetworkError(error) && retryCount < MAX_RETRIES) {
         _stats.retries++;
-        console.error(`Network error on ${path}: ${error.code || error.message}. Retrying in ${RETRY_DELAY_MS}ms... (attempt ${retryCount + 1}/${MAX_RETRIES})`);
+        writeStderrLine(`Network error on ${path}: ${error.code || error.message}. Retrying in ${RETRY_DELAY_MS}ms... (attempt ${retryCount + 1}/${MAX_RETRIES})`);
         await sleep(RETRY_DELAY_MS);
         return postWithFallback(paths, payload, retryCount + 1);
       }
@@ -878,7 +1001,7 @@ async function postWithFallback(paths, payload, retryCount = 0) {
   // Fallback paths all returned 404/405, retry once on network level
   if (isNetworkError(lastError) && retryCount < MAX_RETRIES) {
     _stats.retries++;
-    console.error(`Network error on fallback. Retrying in ${RETRY_DELAY_MS}ms... (attempt ${retryCount + 1}/${MAX_RETRIES})`);
+    writeStderrLine(`Network error on fallback. Retrying in ${RETRY_DELAY_MS}ms... (attempt ${retryCount + 1}/${MAX_RETRIES})`);
     await sleep(RETRY_DELAY_MS);
     return postWithFallback(paths, payload, retryCount + 1);
   }
@@ -1176,7 +1299,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       description: "Check if remote daemon is reachable. Must be called before first operation.",
       inputSchema: {
         type: "object",
-        properties: {},
+        properties: {
+          connection: {
+            type: "string",
+            description: "Optional connection name for this call only.",
+          },
+        },
       },
     },
     {
@@ -1185,6 +1313,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       inputSchema: {
         type: "object",
         properties: {
+          connection: {
+            type: "string",
+            description: "Optional connection name for this call only.",
+          },
           path: {
             type: "string",
             description: "Remote file path. Supports absolute or workspace-relative path.",
@@ -1199,6 +1331,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       inputSchema: {
         type: "object",
         properties: {
+          connection: {
+            type: "string",
+            description: "Required when multiple connections are configured. Applies to this write call only.",
+          },
           path: {
             type: "string",
             description: "Remote file path. Supports absolute or workspace-relative path.",
@@ -1221,6 +1357,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       inputSchema: {
         type: "object",
         properties: {
+          connection: {
+            type: "string",
+            description: "Optional connection name for this call only.",
+          },
           path: {
             type: "string",
             description: "Remote file path. Supports absolute or workspace-relative path.",
@@ -1235,6 +1375,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       inputSchema: {
         type: "object",
         properties: {
+          connection: {
+            type: "string",
+            description: "Optional connection name for this call only.",
+          },
           pattern: {
             type: "string",
             description: "Glob pattern, e.g. **/*.ts, src/**/*.py.",
@@ -1253,6 +1397,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       inputSchema: {
         type: "object",
         properties: {
+          connection: {
+            type: "string",
+            description: "Optional connection name for this call only.",
+          },
           pattern: {
             type: "string",
             description: "Text or regex pattern to search for.",
@@ -1296,7 +1444,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       description: "Get comprehensive connection diagnostics: status, latency, cache hit rate, operation stats.",
       inputSchema: {
         type: "object",
-        properties: {},
+        properties: {
+          connection: {
+            type: "string",
+            description: "Optional connection name for this call only.",
+          },
+        },
       },
     },
     {
@@ -1305,6 +1458,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       inputSchema: {
         type: "object",
         properties: {
+          connection: {
+            type: "string",
+            description: "Required when multiple connections are configured. Applies to this bash call only.",
+          },
           command: {
             type: "string",
             description: "Bash command to execute. Commands with special chars ($ ` \\ ! \" # ; & |) are auto base64 encoded.",
@@ -1323,6 +1480,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       inputSchema: {
         type: "object",
         properties: {
+          connection: {
+            type: "string",
+            description: "Required when multiple connections are configured. Applies to this script call only.",
+          },
           content: {
             type: "string",
             description: "Script content. Written to remote temp file as-is, not parsed by bash -c.",
@@ -1345,6 +1506,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       inputSchema: {
         type: "object",
         properties: {
+          connection: {
+            type: "string",
+            description: "Required when operations include write/bash. Applies to this batch call only.",
+          },
           operations: {
             type: "array",
             description: "Operations array. Each item contains type (read|stat|glob|grep|bash) and corresponding parameters.",
@@ -1370,6 +1535,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       inputSchema: {
         type: "object",
         properties: {
+          connection: {
+            type: "string",
+            description: "Required when multiple connections are configured. Applies to this async exec call only.",
+          },
           command: {
             type: "string",
             description: "Bash command to execute asynchronously.",
@@ -1388,6 +1557,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       inputSchema: {
         type: "object",
         properties: {
+          connection: {
+            type: "string",
+            description: "Required when multiple connections are configured. Applies to this task query only.",
+          },
           taskId: {
             type: "string",
             description: "Task ID returned by remote_exec_async.",
@@ -1402,6 +1575,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       inputSchema: {
         type: "object",
         properties: {
+          connection: {
+            type: "string",
+            description: "Required for write when multiple connections are configured. Applies to this config call only.",
+          },
           action: {
             type: "string",
             enum: ["read", "write"],
@@ -1494,9 +1671,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   let args = {};
   let caughtError = null;
   let callInfo = null;
+  let restoreCallConnection = null;
   
   try {
     args = getArguments(request);
+    restoreCallConnection = applyPerCallConnection(toolName, args);
     const argSummary = summarizeArgs(toolName, args);
     callInfo = {
       callId,
@@ -2278,7 +2457,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Auto base64 escape for commands containing bash special chars (same as remote_bash)
         const effectiveCommand = needsBase64Escape(command) ? wrapBase64Command(command) : command;
         try {
-          const response = await getCurrentAxios().post("/api/exec/async", { command: effectiveCommand, cwd });
+          const response = await getCurrentAxios().post("/api/exec/async", {
+            command: effectiveCommand,
+            cwd,
+            connection: currentConnectionSummary(),
+          });
           const data = response.data;
           return toTextResult(JSON.stringify(withRuntimeMeta({
             taskId: data.taskId,
@@ -2871,6 +3054,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     } else if (LOG_TOOL_SUCCESS) {
       logger.info(toolName, `Completed call #${callId}`, payload);
     }
+    if (restoreCallConnection) {
+      try {
+        restoreCallConnection();
+      } catch {}
+    }
   }
 });
 
@@ -2931,7 +3119,7 @@ async function main() {
       }
 
       if (_proxyBroker) {
-        console.error(
+        writeStderrLine(
           `[agentport] duplicate instance proxy mode enabled (clientId=${CLIENT_ID || "default"}, ownerPid=${singleton.existing?.pid || "unknown"}, broker=${_proxyBroker.url})`
         );
       } else {
@@ -2940,7 +3128,7 @@ async function main() {
           existing: singleton.existing || null,
           hint: "Owner instance has no proxy broker yet. Close stale process or restart agentport.",
         });
-        console.error(
+        writeStderrLine(
           `[agentport] duplicate instance blocked (clientId=${CLIENT_ID || "default"}, existingPid=${singleton.existing?.pid || "unknown"}, lock=${singleton.lockPath})`
         );
         process.exit(0);
@@ -2957,7 +3145,7 @@ async function main() {
         lockPath: singleton.lockPath,
         reason: singleton.reason || "unknown",
       });
-      console.error(
+      writeStderrLine(
         `[agentport] singleton lock failed: ${singleton.reason || "unknown"} (lock=${singleton.lockPath})`
       );
       process.exit(1);
@@ -2987,7 +3175,7 @@ async function main() {
       logProcessEvent("error", "Failed to start singleton broker", {
         error: errorMessage(error),
       });
-      console.error(`[agentport] failed to start singleton broker: ${errorMessage(error)}`);
+      writeStderrLine(`[agentport] failed to start singleton broker: ${errorMessage(error)}`);
     }
     writeProcessRegistry();
   }
@@ -3000,11 +3188,11 @@ async function main() {
     
     if (conn.type === 'ssh') {
       // SSH connection - will connect on first use
-      console.error(`Loaded ${Object.keys(_connections).length} connections, default: ${defaultConn} (SSH)`);
+      writeStderrLine(`Loaded ${Object.keys(_connections).length} connections, default: ${defaultConn} (SSH)`);
     } else {
       // Daemon connection
       _connectionAxios = getAxiosInstance(defaultConn);
-      console.error(`Loaded ${Object.keys(_connections).length} connections, default: ${defaultConn} (daemon)`);
+      writeStderrLine(`Loaded ${Object.keys(_connections).length} connections, default: ${defaultConn} (daemon)`);
     }
   }
   
@@ -3024,6 +3212,8 @@ async function main() {
       diagnostic: diagnosticSnapshot("transport.close"),
     });
     if (typeof previousOnClose === "function") previousOnClose();
+    releaseSingletonLock();
+    scheduleStdioExit("stdio transport closed");
   };
   transport.onerror = (error) => {
     _transportState.errored = true;
@@ -3040,16 +3230,24 @@ async function main() {
       diagnostic: diagnosticSnapshot("transport.error"),
     });
     if (typeof previousOnError === "function") previousOnError(error);
+    if (isBrokenPipeError(error)) {
+      releaseSingletonLock();
+      scheduleStdioExit("stdio transport error", error);
+    }
   };
   process.stdin.on("end", () => {
     _stdioState.stdinEnded = true;
     pushDiagnosticEvent("stdin.end", { activeCallCount: _activeToolCalls.size });
     logProcessEvent("warn", "stdin end", { diagnostic: diagnosticSnapshot("stdin.end") });
+    releaseSingletonLock();
+    scheduleStdioExit("stdin ended");
   });
   process.stdin.on("close", () => {
     _stdioState.stdinClosed = true;
     pushDiagnosticEvent("stdin.close", { activeCallCount: _activeToolCalls.size });
     logProcessEvent("warn", "stdin close", { diagnostic: diagnosticSnapshot("stdin.close") });
+    releaseSingletonLock();
+    scheduleStdioExit("stdin closed");
   });
   process.stdin.on("error", (error) => {
     _stdioState.stdinErrored = true;
@@ -3061,6 +3259,10 @@ async function main() {
       error: error instanceof Error ? error.stack || error.message : String(error),
       diagnostic: diagnosticSnapshot("stdin.error"),
     });
+    if (isBrokenPipeError(error)) {
+      releaseSingletonLock();
+      scheduleStdioExit("stdin error", error);
+    }
   });
   process.stdout.on("error", (error) => {
     _stdioState.stdoutErrored = true;
@@ -3072,6 +3274,25 @@ async function main() {
       error: error instanceof Error ? error.stack || error.message : String(error),
       diagnostic: diagnosticSnapshot("stdout.error"),
     });
+    if (isBrokenPipeError(error)) {
+      releaseSingletonLock();
+      scheduleStdioExit("stdout error", error);
+    }
+  });
+  process.stderr.on("error", (error) => {
+    _stdioState.stderrErrored = true;
+    pushDiagnosticEvent("stderr.error", {
+      error: error instanceof Error ? error.message : String(error),
+      activeCallCount: _activeToolCalls.size,
+    });
+    logProcessEvent("error", "stderr error", {
+      error: error instanceof Error ? error.stack || error.message : String(error),
+      diagnostic: diagnosticSnapshot("stderr.error"),
+    });
+    if (isBrokenPipeError(error)) {
+      releaseSingletonLock();
+      scheduleStdioExit("stderr error", error);
+    }
   });
   await server.connect(transport);
   _transportState.connected = true;
@@ -3088,12 +3309,12 @@ async function main() {
     ? `ssh://${_connections[_currentConnection]?.host}:${_connections[_currentConnection]?.port || 22}`
     : (_currentConnection ? _connections[_currentConnection]?.url : REMOTE_URL);
   
-  console.error(
+  writeStderrLine(
     `AgentPort v${PKG_VERSION} running on stdio (name=${PKG_NAME}, type=${connType}, remote=${connInfo}, auth=${AUTH_TOKEN ? "on" : "off"}, timeout=${REQUEST_TIMEOUT_MS}ms, runtimeMode=${_runtimeMode.mode}, modeSource=${_runtimeMode.source})`
   );
 }
 
 main().catch((error) => {
-  console.error("Server error:", error);
+  writeStderrLine("Server error:", localErrorMessage(error));
   process.exit(1);
 });

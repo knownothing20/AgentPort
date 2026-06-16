@@ -24,16 +24,26 @@ Always choose the most stable available runtime for the task:
 For long-term coding, prefer daemon jobs when healthy. If daemon or native MCP
 transport is unstable, keep working through `--route ssh` instead of stopping.
 
-## Installation Check
+## Fresh Install Baseline
 
 From the skill directory:
 
 ```bash
 npm install
-node cli.js doctor
+cp local/connections.json.example local/connections.json
 ```
 
-Expected result: at least one connection reports `"ok": true`.
+Edit `local/connections.json` so it contains an SSH connection for the target
+server. Do not add a daemon token by hand.
+
+Then verify SSH:
+
+```bash
+node cli.js ssh-health --connection <ssh-connection> --route ssh --json
+```
+
+`doctor` is useful after a real connection exists. On a fresh clone without
+`local/connections.json`, it can only report that no connection is configured.
 
 ## Remote Setup Compatibility Guard
 
@@ -58,29 +68,63 @@ Then enforce read-only detection before any deployment action.
 
 Practical setup order:
 1. Local install first (`git clone` + `npm install`).
-2. Confirm target host and SSH connectivity.
-3. Detect existing daemon state first (dir/env/process/3183).
-4. Existing daemon -> client-only (`deploy=false`), configure unique machine token.
-5. Missing daemon -> one-time bootstrap (`deploy=true`) from one operator machine.
-6. If Dashboard is required, ensure token is in `ADMIN_TOKENS` and use:
+2. Create SSH-only `local/connections.json`.
+3. Confirm target host and SSH connectivity.
+4. Detect existing daemon state first (dir/env/process/3183).
+5. Existing daemon -> client-only, provision a unique machine/software token.
+6. Missing daemon -> one-time bootstrap from one operator machine.
+7. If Dashboard is required, ensure token is in `ADMIN_TOKENS` and use:
    - `http://<host>:3183/?token=<admin-token>`
    - `http://<host>:3183/dashboard?token=<admin-token>`
 
 Token guidance:
-- For existing daemon servers, read `AUTH_TOKENS` from remote `.env` and use an
-  existing `clientId=token` pair in local `connections.json`.
-- Do not generate/replace remote tokens unless deployment was explicitly approved.
+- For existing daemon servers, use `node cli.js client provision` instead of
+  reading and copying raw `AUTH_TOKENS` by hand.
+- Do not rotate existing remote tokens unless replacement was explicitly approved.
 - Do not reuse one token across multiple computers.
 - Create one unique `clientId=token` per computer/software.
 - If Dashboard access is required, ensure the same token is also present in
   `ADMIN_TOKENS`.
 
+Standard token flow for a new AI software with only SSH configured:
+
+```bash
+node <skill-dir>/cli.js ssh-health --connection <ssh-connection> --route ssh --json
+node <skill-dir>/cli.js client provision \
+  --client-id <machine-software> \
+  --connection <ssh-connection> \
+  --route ssh \
+  --daemon-url http://<host>:3183 \
+  --daemon-name <machine-software-daemon> \
+  --local-dir <skill-dir> \
+  --json
+node <skill-dir>/cli.js job list --connection <machine-software-daemon> --route daemon --limit 1 --json
+```
+
+The command creates or reuses the remote `clientId=token`, writes the local
+daemon connection into that software's own `local/connections.json`, and prints
+only `tokenMasked`. If the result says the token was written but verification is
+unauthorized, reload or restart the daemon, then run the same provision command
+again.
+
+If this install already has an admin daemon connection, the shorter hot-reload
+path is:
+
+```bash
+node <skill-dir>/cli.js client provision \
+  --client-id <machine-software> \
+  --connection <admin-daemon-connection> \
+  --route daemon \
+  --daemon-name <machine-software-daemon> \
+  --local-dir <skill-dir> \
+  --json
+```
+
 First-time token flow (both local + server are new):
 1. Detect remote daemon state first (read-only).
 2. If daemon is missing, run `remote_setup(..., deploy=true)` once.
-3. Read back `AUTH_TOKENS` from remote `.env`.
-4. Save `clientId/authToken` in local daemon connection.
-5. Validate with `remote_health` and `ssh-health`.
+3. Run `client provision` once for each machine/software client.
+4. Validate with `job list --route daemon` and `ssh-health`.
 
 If the target AI tool supports native MCP registration, also create
 `local/agentport.json` from `agentport.example.json`, set
@@ -119,6 +163,7 @@ node <skill-dir>/cli.js list
 node <skill-dir>/cli.js connect <connection-name>
 node <skill-dir>/cli.js health
 node <skill-dir>/cli.js ssh-health
+node <skill-dir>/cli.js client provision --client-id <machine-software> --connection <name>
 ```
 
 Use the actual skill path for the current AI tool. Examples:
@@ -142,6 +187,10 @@ node cli.js job logs <job-id> --tail 200
 node cli.js job cancel <job-id>
 node cli.js job list --limit 20
 node cli.js job start "sleep 30" --route ssh
+node cli.js trace start ssh-link --route ssh --interval 2
+node cli.js trace status ssh-link --route ssh --json
+node cli.js trace logs ssh-link --route ssh --tail 120
+node cli.js trace stop ssh-link --route ssh
 ```
 
 The CLI reads `local/connections.json` and stores only the selected connection

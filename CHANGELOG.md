@@ -1,5 +1,44 @@
 # Changelog
 
+## [2026-06-16] fix | Fail-closed connection targeting for multi-session safety
+
+### Added
+- Added session-scoped CLI current state via `AGENTPORT_SESSION_ID` / `CODEX_SESSION_ID`.
+- Added per-call `connection` support to MCP remote operation schemas.
+- Added job connection metadata so SSH and daemon jobs can record the connection target used at start time.
+- Added `client provision` for one-command machine/software token provisioning without printing raw tokens.
+- Added `sync.cjs --skills --target <dir>` for syncing code into independent skill directories while preserving each target `local/`, `.git`, and `node_modules`.
+- Added admin-only raw config reads behind `/api/config?raw=1` so CLI provisioning can update daemon tokens through hot reload.
+
+### Changed
+- Changed CLI connection resolution so explicit `--connection` wins and route/type mismatches fail instead of silently falling back.
+- Changed high-risk CLI commands (`write`, `bash`, `script`, risky `batch`, `job`, `trace`, token mutation) to require explicit `--connection` when multiple connections are configured.
+- Changed MCP high-risk tools (`remote_write`, `remote_bash`, `remote_script`, risky `remote_batch`, `remote_exec_async`, `remote_task`, config write) to fail closed without explicit `connection` in multi-connection setups.
+- Added target metadata to key CLI JSON outputs so agents can see the actual connection, route, and host/url used.
+- Changed onboarding docs to prefer `client provision` over manual `AUTH_TOKENS` copying.
+- Condensed `SKILL.md` into a short runtime contract and moved install detail to `AGENT_GUIDE.md`.
+- Changed fresh-install guidance to be SSH-first: create SSH-only `local/connections.json`, run `ssh-health`, provision this software's daemon token, then validate with authenticated `job list`.
+- Changed `local/connections.json.example` to SSH-only so fresh installs do not start with fake daemon credentials.
+- Fixed `sync.cjs --check` so it reports drift without writing files.
+
+---
+
+## [2026-05-23] feat | Built-in SSH trace maintenance tool
+
+### Added
+- Added CLI trace maintenance commands in `cli.js`:
+  - `trace start [name] [--interval 5] [--restart]`
+  - `trace status [name]`
+  - `trace logs [name] [--tail 120]`
+  - `trace stop [name]`
+- Added SSH trace background runner that records periodic link metrics on remote host:
+  - `estab_22`, `synrecv`, `timewait`, `users`, `load`
+  - output path: `~/.agentport/trace/<name>.log`
+- Added trace command examples in `README.md`, `SKILL.md`, and `AGENT_GUIDE.md`.
+
+### Changed
+- Extended CLI usage output to include trace maintenance commands.
+
 ## [2026-05-20] feat | Multi-agent onboarding hardening and dashboard polish
 
 ### Added

@@ -52,11 +52,11 @@ Remote setup safety policy:
 - `remote_setup` defaults to client-only mode (`deploy=false`).
 - Existing remote daemon files are not overwritten by default.
 - Overwrite requires explicit `deploy=true` and `forceDeploy=true`.
-- For existing servers, read `AUTH_TOKENS` from remote `.env` and reuse token
-  pairs instead of regenerating/replacing server credentials.
+- For existing servers, use `node cli.js client provision` to create or reuse
+  one token for the current machine/software. Do not ask agents to print or
+  manually copy raw `AUTH_TOKENS` values.
 - For first-time server bootstrap, run read-only detection first, then deploy
-  once from one operator computer, then reuse generated token pairs on all
-  other client computers.
+  once from one operator computer, then provision each other client separately.
 - For multi-computer usage, do not share one token. Create one unique
   `clientId=token` per computer/software.
 
@@ -115,6 +115,28 @@ node cli.js bash "pwd && ls -la" --route ssh --json
 node cli.js write /path/to/workspace/tmp.txt --content "hello"
 ```
 
+Provision a daemon token for a new AI software or new computer:
+
+```bash
+# First make sure an SSH connection to the server exists in local/connections.json.
+node cli.js ssh-health --connection <ssh-connection> --route ssh --json
+
+# Create or reuse a unique token, write it to the remote daemon config, and
+# store only this software's daemon connection in its own local/connections.json.
+node cli.js client provision \
+  --client-id <machine-software> \
+  --connection <admin-daemon-connection> \
+  --route daemon \
+  --daemon-name <machine-software-daemon> \
+  --local-dir <skill-dir> \
+  --json
+```
+
+If the current daemon does not yet support raw admin config reads, run the same
+command with `--route ssh --connection <ssh-connection>`, then reload or restart
+the daemon before validating the newly created token. The command only prints a
+masked token.
+
 For long-running development tasks, use the persistent daemon job gateway:
 
 ```bash
@@ -138,6 +160,17 @@ node cli.js job status <job-id> --route ssh
 node cli.js job logs <job-id> --route ssh --json
 node cli.js job cancel <job-id> --route ssh
 ```
+
+For shared-link disconnect diagnostics, use the built-in SSH trace tool:
+
+```bash
+node cli.js trace start ssh-link --route ssh --interval 2
+node cli.js trace status ssh-link --route ssh --json
+node cli.js trace logs ssh-link --route ssh --tail 120
+node cli.js trace stop ssh-link --route ssh
+```
+
+Trace logs are written on the remote host under `~/.agentport/trace/<name>.log`.
 
 See [AGENT_GUIDE.md](./AGENT_GUIDE.md) for the full install and agent bootstrap
 workflow.
@@ -178,126 +211,120 @@ disconnects from an overloaded execution queue.
 
 ## Quick Start
 
-### 1. Clone the repository
+### Fresh Agent Install Against An Existing Daemon
+
+Use this path when a new AI software installs AgentPort for an already running
+remote daemon.
+
+### 1. Clone Into This Software's Skill Directory
 
 ```bash
 git clone https://github.com/knownothing20/agentport.git
 cd agentport
-```
-
-### 2. Install dependencies
-
-```bash
 npm install
 ```
 
-### 2.1 First-Time Onboarding (Do This Order)
+Each AI software should have its own physical AgentPort directory. Do not use a
+junction when different tools need different credentials.
 
-1. Confirm target host first (example: `192.168.31.183`) and verify SSH.
-2. Finish local install (`git clone` + `npm install`) before any remote deploy action.
-3. Detect remote state first (read-only): daemon dir, `.env`, process, port `3183`.
-4. If remote daemon already exists: stay client-only (`deploy=false`) and reuse/add token safely.
-5. If remote daemon is missing: one-time bootstrap only (`deploy=true` from one operator machine).
-6. Use one unique token per `machine+software` client (`win11-codex`, `macbook-workbuddy`), never reuse one token across machines.
-7. If Dashboard is needed on this machine, ensure token is also in `ADMIN_TOKENS`, then open:
-   - `http://<host>:3183/?token=<admin-token>`
-   - `http://<host>:3183/dashboard?token=<admin-token>`
-8. Stability expectation: if native MCP is unstable or reports `Transport closed`, continue with `node cli.js ... --route ssh`.
+### 2. Create SSH-Only Local Config
 
-### 2.2 Install on another computer
+Create `local/connections.json` from the example and fill in only SSH first:
 
-For a new computer or another AI desktop tool, see
+```bash
+cp local/connections.json.example local/connections.json
+```
+
+Example:
+
+```json
+{
+  "connections": [
+    {
+      "name": "ssh-main",
+      "type": "ssh",
+      "host": "192.168.31.183",
+      "port": 22,
+      "username": "leon",
+      "privateKey": "~/.ssh/id_rsa"
+    }
+  ],
+  "default": "ssh-main"
+}
+```
+
+Verify the SSH baseline:
+
+```bash
+node cli.js ssh-health --connection ssh-main --route ssh --json
+```
+
+### 3. Provision This Software's Daemon Token
+
+If this fresh install does not already have an admin daemon connection, use SSH
+provisioning:
+
+```bash
+node cli.js client provision \
+  --client-id <machine-software> \
+  --connection ssh-main \
+  --route ssh \
+  --daemon-url http://192.168.31.183:3183 \
+  --daemon-name daemon-main \
+  --local-dir . \
+  --json
+```
+
+If the remote daemon was not hot-reloaded by the command, reload or restart it,
+then run the same provision command again. A successful result reports
+`verification.ok: true` and prints only `tokenMasked`.
+
+Validate with an authenticated endpoint:
+
+```bash
+node cli.js job list --connection daemon-main --route daemon --limit 1 --json
+```
+
+### 4. Register Native MCP If Needed
+
+If the target AI tool supports MCP servers, create `local/agentport.json`, set
+`skillDir` and `mcpConfigPath`, then run:
+
+```bash
+cp agentport.example.json local/agentport.json
+node sync.cjs
+```
+
+Restart the AI tool after MCP registration changes.
+
+### Install on another computer or AI software
+
+For a new computer or another AI desktop tool, use the same SSH-first flow. See
 [INSTALL_OTHER_MACHINE.md](./INSTALL_OTHER_MACHINE.md).
 
-Short version:
+### CLI Guided Setup
 
-```bash
-git clone https://github.com/knownothing20/agentport.git
-cd agentport
-npm install
-cp local/connections.json.example local/connections.json
-npm run doctor
-```
-
-Then copy your private `local/connections.json`, optional
-`local/agentport.json`, and SSH keys from the old computer through a
-secure channel. Update any absolute key paths for the new machine.
-
-### 3. CLI Guided Setup (Recommended)
-
-Use the interactive wizard to scan your SSH environment and guide you through configuration:
+The interactive wizard can help create SSH connections, but the non-interactive
+SSH-first flow above is the recommended path for agents:
 
 ```bash
 npm run setup
 ```
 
-The wizard will:
-1. Auto-scan your local SSH keys, config, and known_hosts
-2. Display scan results and let you choose an authentication method
-3. Guide you through entering server address and username
-4. Test the SSH connection
-5. Auto-save config to `local/connections.json`
+### Deploy remote daemon
 
-### 4. Manual Configuration (Alternative)
-
-If you prefer not to use the guided wizard:
+Only use this section for first-time server bootstrap or planned daemon
+maintenance. Normal client installs should not overwrite remote daemon files.
 
 ```bash
-cp agentport.example.json local/agentport.json
-# Edit local/agentport.json, fill in all variables
-```
-
-Key variables:
-
-| Variable | Description |
-|----------|-------------|
-| `skillDir` | Absolute path to the skill installation directory |
-| `mcpConfigPath` | Path to the target AI tool's MCP config file |
-| `remoteUrl` | Remote daemon address |
-| `authToken` | Client authentication token |
-| `serverExecMaxConcurrency` | Remote daemon command concurrency limit, default `4` |
-| `serverExecQueueTimeoutMs` | Queue wait timeout before HTTP `429`, default `15000` |
-
-### 5. Sync configuration
-
-```bash
-node sync.cjs
-```
-
-### 6. Deploy remote daemon
-
-```bash
-# Create daemon directory on remote server
 ssh USER@SERVER "mkdir -p /path/to/daemon"
-
-# Upload server files to remote server
 scp server/server.js server/agentport-manager.sh server/package.json USER@SERVER:/path/to/daemon/
-
-# Upload generated .env config (created by sync.cjs in step 4)
 scp local/server/.env USER@SERVER:/path/to/daemon/
-
-# SSH to remote server
 ssh USER@SERVER
 cd /path/to/daemon
 npm install
 nohup bash agentport-manager.sh >> boot.log 2>&1 &
 ```
-
-### 7. Restart AI tool
-
-After configuration takes effect, restart your AI tool to activate MCP registration.
-
-### 8. Verify fallback mode
-
-If your AI tool does not expose native `remote_*` MCP tools, verify the CLI
-fallback:
-
-```bash
-npm run doctor
-node cli.js health
-```
-
-At least one configured connection should report `"ok": true`.
 
 ---
 
@@ -400,9 +427,9 @@ After starting the service, visit:
 - `http://your-server:3183/?token=<admin-token>`
 - `http://your-server:3183/dashboard?token=<admin-token>`
 
-Dashboard uses admin auth. If you want one token to work for both API calls and
-Dashboard on a client machine, add that token to both `AUTH_TOKENS` and
-`ADMIN_TOKENS` in remote `.env`.
+Dashboard uses admin auth. If this software needs Dashboard access, provision or
+promote its token with `client provision --admin` instead of editing remote
+`.env` by hand.
 
 ### Dashboard Features
 
