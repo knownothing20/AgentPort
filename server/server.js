@@ -223,7 +223,7 @@ function makeEtag(content) {
 // bypass the whitelist (e.g. "ls; rm -rf /" passes as "ls" then runs rm), so
 // such composite commands are rejected outright. When the whitelist is empty
 // (default), commands are unconstrained and this check is skipped.
-const SHELL_METACHARS_RE = /;|\|\||&&|\||`|\$\(|\$\{|>\s|<\s|>>|<</;
+const SHELL_METACHARS_RE = /[;&|`$><\n]|\$\(|\$\{/;
 
 /**
  * Enforce command execution policy.

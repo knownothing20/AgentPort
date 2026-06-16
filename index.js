@@ -2190,13 +2190,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           try {
             const sshClient = getSSHClient();
             const maxResults = clampPositiveInt(args.maxResults, 200, 1, 5000);
-            const result = await sshClient.exec(buildSshGrepCommand({ ...args, maxResults }));
+            // Enforce workspace boundary on cwd so grep cannot escape the root.
+            const safeCwd = sshClient.resolveWorkspaceCwd(args.cwd);
+            const result = await sshClient.exec(buildSshGrepCommand({ ...args, maxResults, cwd: safeCwd || args.cwd }));
             const matches = parseSshGrepOutput(result.stdout);
             return toTextResult(JSON.stringify(withRuntimeMeta({
               success: true,
               engine: "grep",
               pattern: args.pattern,
-              cwd: args.cwd || ".",
+              cwd: safeCwd || args.cwd || ".",
               maxResults,
               matches,
               truncated: matches.length >= maxResults,
@@ -2261,7 +2263,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (isSSHConnection()) {
           try {
             const sshClient = getSSHClient();
-            const tmpFile = `/tmp/agentport-script-${Date.now()}.sh`;
+            // When workspaceRoot is enforced, /tmp is outside the boundary and
+            // writeFile would reject it. Use a temp dir inside the workspace
+            // instead; fall back to /tmp when workspaceRoot is unset (legacy).
+            const wsRoot = sshClient.workspaceRoot;
+            const tmpDir = wsRoot
+              ? `${wsRoot}/.agentport-tmp`
+              : '/tmp';
+            const tmpFile = `${tmpDir}/agentport-script-${Date.now()}.sh`;
+            if (wsRoot) {
+              await sshClient.mkdir(tmpDir);
+            }
             // Write script to temp file
             await sshClient.writeFile(tmpFile, scriptContent);
             // Execute the script
@@ -2346,7 +2358,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   results.push({ type: "glob", pattern: op.pattern, status: 200, entries: files });
                 } else if (op.type === "grep") {
                   const maxResults = clampPositiveInt(op.maxResults, 200, 1, 5000);
-                  const result = await sshClient.exec(buildSshGrepCommand({ ...op, maxResults }));
+                  const safeCwd = sshClient.resolveWorkspaceCwd(op.cwd);
+                  const result = await sshClient.exec(buildSshGrepCommand({ ...op, maxResults, cwd: safeCwd || op.cwd }));
                   results.push({
                     type: "grep",
                     pattern: op.pattern,
