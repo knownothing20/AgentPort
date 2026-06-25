@@ -12,9 +12,9 @@ Always choose the most stable available runtime for the task:
    `remote_health`, `remote_read`, `remote_write`, `remote_bash`, and the other
    `remote_*` tools directly.
 2. SSH-first CLI for baseline stability.
-   Use `node cli.js ssh-health`, `node cli.js read|write|bash --route ssh`, and
-   `node cli.js job ... --route ssh` when MCP transport closes or daemon health
-   is unknown.
+   Use `node cli.js ssh-health`, `node cli.js read|safe-write|safe-script|bash --route ssh`,
+   and `node cli.js job ... --route ssh` when MCP transport closes or daemon
+   health is unknown.
 3. CLI daemon gateway for long-running development.
    Use `node cli.js status` and `node cli.js job ...` for tests, builds,
    polling, and work that must survive native MCP transport failures.
@@ -175,7 +175,14 @@ node cli.js glob "**/*.js" --cwd /path/to/workspace
 node cli.js grep "video-analysis" --cwd /path/to/workspace --include "*.ts,*.py"
 node cli.js write /path/to/workspace/tmp.txt --content "hello"
 node cli.js write /path/to/workspace/tmp.txt --file local-file.txt
+node cli.js safe-write /path/to/workspace/file.ts --file local-utf8-payload.ts --verify readback
+node cli.js safe-script local-script.sh --interpreter bash --cwd /path/to/workspace
 ```
+
+Use `safe-write` and `safe-script` when the payload is source code, a patch,
+Markdown, Chinese text, or a complex script. The shell command should contain
+only short arguments and file paths; do not inline large payloads into
+PowerShell, `--content`, heredoc, or `bash` strings.
 
 For long-running work:
 
@@ -201,7 +208,10 @@ name in `local/cli-state.json`. It does not copy or print full tokens.
 - Never write Chinese or other non-ASCII text with shell redirection such as
   `echo >>`, `tee`, or `cat >>`.
 - For file writes, use native `remote_write` first. If using CLI fallback, use
-  `node cli.js write ... --content` or `--file`.
+  `node cli.js safe-write ... --file` for large or non-ASCII payloads, and
+  reserve `write --content` for tiny ASCII probes.
+- For remote scripts, use `safe-script` instead of putting multiline scripts in
+  a local PowerShell command.
 - Run `doctor` or `health` before the first read/write/bash operation.
 - If daemon and SSH are both available, use daemon jobs for long-running coding work.
 - If daemon fails or MCP reports `Transport closed`, switch to `--route ssh` and continue.

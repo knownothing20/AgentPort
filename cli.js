@@ -219,6 +219,91 @@ function sanitizeContent(content) {
   return String(content).replace(/\r\n/g, "\n").replace(/^\uFEFF/, "");
 }
 
+function preserveUtf8Content(content) {
+  return String(content).replace(/^\uFEFF/, "");
+}
+
+function sha256Text(content) {
+  return crypto.createHash("sha256").update(String(content), "utf8").digest("hex");
+}
+
+function utf8Bytes(content) {
+  return Buffer.byteLength(String(content), "utf8");
+}
+
+function shouldVerifyReadback(args) {
+  if (args["no-verify"] || args.noVerify) return false;
+  const value = String(args.verify ?? "readback").trim().toLowerCase();
+  return !["0", "false", "no", "none", "off", "skip"].includes(value);
+}
+
+function readUtf8PayloadFile(file, { normalizeLf = false } = {}) {
+  if (!file || typeof file !== "string") throw new Error("Missing --file <local-file>.");
+  const content = fs.readFileSync(file, "utf8");
+  return normalizeLf ? sanitizeContent(content) : preserveUtf8Content(content);
+}
+
+const SAFE_SCRIPT_INTERPRETERS = new Set(["bash", "sh", "dash", "zsh", "python", "python3", "node", "ruby", "perl"]);
+
+function safeScriptInterpreter(value) {
+  const interpreter = String(value || "bash").trim();
+  if (!SAFE_SCRIPT_INTERPRETERS.has(interpreter)) {
+    throw new Error(`Unsupported interpreter '${interpreter}'. Allowed: ${[...SAFE_SCRIPT_INTERPRETERS].join(", ")}`);
+  }
+  return interpreter;
+}
+
+function scriptExtension(interpreter) {
+  if (interpreter === "python" || interpreter === "python3") return "py";
+  if (interpreter === "node") return "js";
+  if (interpreter === "ruby") return "rb";
+  if (interpreter === "perl") return "pl";
+  return "sh";
+}
+
+function remoteTempDirArg(args) {
+  return args.remoteTmpDir || args["remote-tmp-dir"] || args.tmpDir || args["tmp-dir"] || "";
+}
+
+function joinRemotePath(dir, name) {
+  return `${String(dir || "").replace(/\/+$/, "")}/${name}`;
+}
+
+function remoteScriptBaseDir(ssh, args) {
+  const explicit = remoteTempDirArg(args);
+  if (explicit) return explicit;
+  if (ssh.workspaceRoot) {
+    const cwd = ssh.resolveWorkspaceCwd(args.cwd);
+    return joinRemotePath(cwd || ssh.workspaceRoot, ".agentport-tmp");
+  }
+  if (typeof args.cwd === "string" && args.cwd.trim()) {
+    const cwd = args.cwd.trim();
+    if (cwd.startsWith("/") || cwd.startsWith("~")) return joinRemotePath(cwd, ".agentport-tmp");
+  }
+  return "~/.agentport/tmp";
+}
+
+function remoteScriptPath(ssh, args, interpreter) {
+  const name = `agentport-safe-${Date.now()}-${crypto.randomBytes(6).toString("hex")}.${scriptExtension(interpreter)}`;
+  return joinRemotePath(remoteScriptBaseDir(ssh, args), name);
+}
+
+async function verifyRemoteContent(ctx, targetPath, expectedSha256) {
+  const { type, http, ssh } = ctx;
+  let content = "";
+  if (type === "ssh") {
+    content = await ssh.readFile(targetPath);
+  } else {
+    const data = await postWithFallback(http, ["/api/fs/read", "/read"], { path: targetPath });
+    content = data.content ?? "";
+  }
+  const actualSha256 = sha256Text(content);
+  if (actualSha256 !== expectedSha256) {
+    throw new Error(`Remote readback mismatch for '${targetPath}'. expected=${expectedSha256} actual=${actualSha256}`);
+  }
+  return { ok: true, sha256: actualSha256, bytes: utf8Bytes(content) };
+}
+
 function decodeEnvValue(value) {
   const text = String(value ?? "").trim();
   if (!text) return "";
@@ -1233,6 +1318,60 @@ async function commandWrite(args) {
   });
 }
 
+async function commandSafeWrite(args) {
+  const targetPath = args._[1] || args.path;
+  if (!targetPath) throw new Error("Usage: node cli.js safe-write <remote-path> --file <local-file> [--verify readback|none]");
+  if (typeof args.content === "string") {
+    throw new Error("safe-write does not accept --content. Put the payload in a UTF-8 file and pass --file <local-file>.");
+  }
+
+  const sourceFile = args.file || args.from || args._[2];
+  const normalizeLf = Boolean(args.normalizeLf || args["normalize-lf"]);
+  const content = readUtf8PayloadFile(sourceFile, { normalizeLf });
+  const expectedSha256 = sha256Text(content);
+  const payload = {
+    ok: true,
+    command: "safe-write",
+    path: targetPath,
+    sourceFile: path.resolve(sourceFile),
+    bytes: utf8Bytes(content),
+    sha256: expectedSha256,
+    normalizeLf,
+  };
+
+  if (args.dryRun || args["dry-run"]) {
+    printJson({ ...payload, dryRun: true, verified: false });
+    return;
+  }
+
+  await withConnection({ ...args, requireExplicitConnection: true }, async (ctx) => {
+    const { type, http, ssh } = ctx;
+    let writeResult = {};
+    if (type === "ssh") {
+      await ssh.writeFile(targetPath, content);
+      writeResult = { mode: "ssh" };
+    } else {
+      const data = await postWithFallback(http, ["/api/fs/write", "/write"], {
+        path: targetPath,
+        content,
+        expectedEtag: typeof args.expectedEtag === "string" ? args.expectedEtag : undefined,
+      });
+      writeResult = { mode: "daemon", etag: data.etag };
+    }
+
+    const verification = shouldVerifyReadback(args)
+      ? await verifyRemoteContent(ctx, targetPath, expectedSha256)
+      : { skipped: true };
+
+    printJson(withTarget({
+      ...payload,
+      ...writeResult,
+      verified: !verification.skipped,
+      verification,
+    }, ctx));
+  });
+}
+
 async function commandStat(args) {
   const targetPath = args._[1] || args.path;
   if (!targetPath) throw new Error("Usage: node cli.js stat <remote-path>");
@@ -1860,6 +1999,75 @@ async function commandScript(args) {
   });
 }
 
+async function commandSafeScript(args) {
+  const file = args._[1] || args.file;
+  if (!file) throw new Error("Usage: node cli.js safe-script <local-script-file> [--interpreter bash] [--cwd path]");
+
+  const interpreter = safeScriptInterpreter(args.interpreter || "bash");
+  const normalizeLf = !(args.preserveEol || args["preserve-eol"]);
+  const keepRemote = Boolean(args.keepRemote || args["keep-remote"]);
+  const content = readUtf8PayloadFile(file, { normalizeLf });
+  const expectedSha256 = sha256Text(content);
+  const payload = {
+    ok: true,
+    command: "safe-script",
+    sourceFile: path.resolve(file),
+    interpreter,
+    cwd: args.cwd || null,
+    bytes: utf8Bytes(content),
+    sha256: expectedSha256,
+    normalizeLf,
+    keepRemote,
+  };
+
+  if (args.dryRun || args["dry-run"]) {
+    printJson({
+      ...payload,
+      dryRun: true,
+      remoteTmpDir: remoteTempDirArg(args) || "(auto)",
+      verifiedUpload: false,
+    });
+    return;
+  }
+
+  await withConnection({ ...args, requireExplicitConnection: true }, async (ctx) => {
+    const { type, http, ssh } = ctx;
+    if (type === "ssh") {
+      const remoteFile = remoteScriptPath(ssh, args, interpreter);
+      let cleanup = { skipped: keepRemote };
+      await ssh.writeFile(remoteFile, content);
+      const uploadVerification = await verifyRemoteContent(ctx, remoteFile, expectedSha256);
+      const result = await ssh.exec(`${interpreter} ${JSON.stringify(remoteFile)}`, { cwd: args.cwd });
+      if (!keepRemote) {
+        try {
+          await ssh.rm(remoteFile);
+          cleanup = { ok: true };
+        } catch (error) {
+          cleanup = { ok: false, error: error.message };
+        }
+      }
+      printJson(withTarget({
+        ...payload,
+        mode: "ssh",
+        remoteFile,
+        verifiedUpload: true,
+        uploadVerification,
+        cleanup,
+        result,
+      }, ctx));
+      return;
+    }
+
+    const data = await postWithFallback(http, ["/api/exec/script"], { content, interpreter, cwd: args.cwd });
+    printJson(withTarget({
+      ...payload,
+      mode: "daemon",
+      verifiedUpload: false,
+      result: data,
+    }, ctx));
+  });
+}
+
 function batchHasRiskyOperations(operations) {
   return operations.some((op) => {
     const type = String(op?.type || "").toLowerCase();
@@ -1919,6 +2127,7 @@ Commands:
   node cli.js read <remote-path> [--connection name]
   node cli.js write <remote-path> --content "text"
   node cli.js write <remote-path> --file local.txt
+  node cli.js safe-write <remote-path> --file payload.txt [--verify readback|none]
   node cli.js stat <remote-path>
   node cli.js glob "**/*.js" [--cwd /path]
   node cli.js grep "text" [--cwd /path] [--include "*.js,*.ts"]
@@ -1938,6 +2147,7 @@ Commands:
   node cli.js token dashboard-url [--client-id <client-id>]
   node cli.js client provision --client-id <client-id> --connection <name>
   node cli.js script local-script.sh [--interpreter bash]
+  node cli.js safe-script local-script.sh [--interpreter bash] [--cwd /path]
   node cli.js batch batch.json
 
 Options:
@@ -1949,6 +2159,9 @@ Safety:
   When multiple connections are configured, write/exec/job/trace/token mutation commands
   require explicit --connection <name>. Set AGENTPORT_SESSION_ID to make \`connect\`
   maintain a session-scoped current connection instead of the shared fallback state.
+  For large source, patches, Markdown, Chinese text, or complex scripts, keep
+  PowerShell as a short launcher only and use safe-write/safe-script with a
+  local UTF-8 payload file. Avoid passing code through --content or bash strings.
 `);
 }
 
@@ -1985,6 +2198,10 @@ async function main(args) {
     case "write":
       await commandWrite(args);
       break;
+    case "safe-write":
+    case "write-safe":
+      await commandSafeWrite(args);
+      break;
     case "stat":
       await commandStat(args);
       break;
@@ -2019,6 +2236,10 @@ async function main(args) {
       break;
     case "script":
       await commandScript(args);
+      break;
+    case "safe-script":
+    case "script-safe":
+      await commandSafeScript(args);
       break;
     case "batch":
       await commandBatch(args);
