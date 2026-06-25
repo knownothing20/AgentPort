@@ -106,6 +106,8 @@ node cli.js health --connection <name> --route daemon --json
 node cli.js ssh-health --connection <name> --route ssh --json
 node cli.js read <remote-path> --connection <name> --route ssh --json
 node cli.js write <remote-path> --file <local-file> --connection <name> --route ssh --json
+node cli.js safe-write <remote-path> --file <local-utf8-file> --connection <name> --route ssh --json
+node cli.js safe-script <local-script-file> --interpreter bash --cwd <remote-cwd> --connection <name> --route ssh --json
 node cli.js bash "pwd && ls -la" --connection <name> --route ssh --json
 node cli.js job start "npm test" --cwd <remote-cwd> --connection <name> --route daemon --json
 node cli.js job status <job-id> --connection <name> --route daemon --json
@@ -130,8 +132,12 @@ exclusions: `.git`, `local`, and `node_modules`.
 
 - Always pass explicit `--connection` for write, exec, script, batch, job,
   trace, token, and config operations.
-- Prefer structured `write` or `remote_write`; avoid shell redirection for
-  non-ASCII content.
+- Prefer structured `safe-write`, `safe-script`, `write --file`, or
+  `remote_write`; avoid shell redirection for non-ASCII content.
+- Keep PowerShell as a short launcher only. Do not pass large source, patches,
+  Markdown, Chinese text, or complex scripts through `--content`, `bash`, heredoc,
+  or inline command strings. Put the payload in a UTF-8 file and call
+  `safe-write` or `safe-script`.
 - Do not read, print, or copy raw tokens unless the user explicitly authorizes
   a credential repair task. Even then, keep values in memory and report only
   masked status.

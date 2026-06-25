@@ -1,5 +1,16 @@
 # Changelog
 
+## [2026-06-25] feat | Stable payload write and script channel
+
+### Added
+- Added CLI `safe-write` for UTF-8 file-backed remote writes with optional LF normalization and default readback SHA-256 verification.
+- Added CLI `safe-script` for file-backed remote script execution with interpreter allow-listing, upload verification, workspace-aware temporary paths, and default cleanup.
+
+### Changed
+- Updated agent guidance to keep PowerShell as a short launcher and route large source, patches, Markdown, Chinese text, and complex scripts through `safe-write` or `safe-script`.
+
+---
+
 ## [2026-06-16] fix | Fail-closed connection targeting for multi-session safety
 
 ### Added
