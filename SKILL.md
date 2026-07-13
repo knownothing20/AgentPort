@@ -19,7 +19,11 @@ Current version: **v2.5.0**
 
 ## Required Startup Check
 
-From this skill directory:
+When native MCP tools are available, keep startup windowless by calling
+`remote_connect(connection=<explicit-name>)` followed by `remote_health()`.
+
+Use the CLI checks only when native MCP is unavailable or unhealthy. From this
+skill directory:
 
 ```bash
 node cli.js doctor --json
@@ -45,12 +49,14 @@ session-scoped CLI current state.
 
 Use this order:
 
-1. `--route ssh` for health, read, write, stat, glob, grep, and one-off bash
-   when transport stability matters.
-2. Daemon jobs for long-running work:
-   `node cli.js job start "npm test" --connection <daemon> --route daemon`.
-3. Native MCP `remote_*` only after `remote_connect()` and `remote_health()`
-   return healthy structured data.
+1. Native MCP `remote_*` for health, read, write, stat, glob, grep, and short
+   one-off commands after `remote_connect()` and `remote_health()` succeed.
+2. Daemon jobs for builds, tests, installs, Docker operations, or anything that
+   may run longer than 10 seconds. Prefer MCP `remote_exec_async` or
+   `remote_script_async`; use `safe-job` for the CLI fallback with a local file:
+   `node cli.js safe-job local-build.sh --cwd /workspace --connection <daemon> --route daemon`.
+3. SSH-first CLI only as a transport fallback when MCP or daemon transport is
+   unavailable. Synchronous SSH commands default to a 120-second timeout.
 
 If native MCP reports `Transport closed`, keep working through the CLI instead
 of stopping.
@@ -107,7 +113,10 @@ node cli.js ssh-health --connection <name> --route ssh --json
 node cli.js read <remote-path> --connection <name> --route ssh --json
 node cli.js write <remote-path> --file <local-file> --connection <name> --route ssh --json
 node cli.js safe-write <remote-path> --file <local-utf8-file> --connection <name> --route ssh --json
+node cli.js safe-apply <local-patch-file> --cwd <remote-repo> --connection <name> --route ssh --json
 node cli.js safe-script <local-script-file> --interpreter bash --cwd <remote-cwd> --connection <name> --route ssh --json
+node cli.js safe-bash <local-bash-file> --cwd <remote-cwd> --connection <name> --route ssh --json
+node cli.js safe-job <local-script-file> --cwd <remote-cwd> --connection <daemon> --route daemon --job-timeout-ms 1800000 --json
 node cli.js bash "pwd && ls -la" --connection <name> --route ssh --json
 node cli.js job start "npm test" --cwd <remote-cwd> --connection <name> --route daemon --json
 node cli.js job status <job-id> --connection <name> --route daemon --json
@@ -132,12 +141,23 @@ exclusions: `.git`, `local`, and `node_modules`.
 
 - Always pass explicit `--connection` for write, exec, script, batch, job,
   trace, token, and config operations.
-- Prefer structured `safe-write`, `safe-script`, `write --file`, or
+- Prefer structured `safe-write`, `safe-apply`, `safe-script`, `write --file`, or
   `remote_write`; avoid shell redirection for non-ASCII content.
+- Use `safe-apply --check` before applying multi-file patches when possible.
 - Keep PowerShell as a short launcher only. Do not pass large source, patches,
   Markdown, Chinese text, or complex scripts through `--content`, `bash`, heredoc,
   or inline command strings. Put the payload in a UTF-8 file and call
   `safe-write` or `safe-script`.
+- Use `safe-bash` for complex read-only grep/find/git diagnostics, pipelines,
+  nested quotes, template strings, or commands containing `$`, `${...}`, `|`,
+  backticks, or multiple `cd && ...` segments.
+- Never run builds, tests, package installs, Docker commands, or other long work
+  through synchronous `bash`, `safe-bash`, or `safe-script`. Use `safe-job` or
+  `job start`, then poll `job status` / `job logs`.
+- On Windows, launch stdio MCP servers through the bundled
+  `windows/hidden-stdio-launcher.cs` helper. It uses `CREATE_NO_WINDOW` and a
+  kill-on-close Job Object so canceled parent processes do not leave Node or
+  SSH children behind.
 - Do not read, print, or copy raw tokens unless the user explicitly authorizes
   a credential repair task. Even then, keep values in memory and report only
   masked status.

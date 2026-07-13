@@ -217,9 +217,22 @@ export class SSHClient {
   /**
    * Disconnect
    */
-  disconnect() {
-    if (this.client) {
-      this.client.end();
+  disconnect({ force = false } = {}) {
+    const client = this.client;
+    if (client) {
+      if (force) {
+        client.destroy();
+      } else {
+        let forceTimer = null;
+        const clearForceTimer = () => {
+          if (forceTimer) clearTimeout(forceTimer);
+          forceTimer = null;
+        };
+        client.once('close', clearForceTimer);
+        forceTimer = setTimeout(() => client.destroy(), 500);
+        forceTimer.unref?.();
+        client.end();
+      }
     }
     this.client = null;
     this.sftp = null;
@@ -299,6 +312,12 @@ export class SSHClient {
     const safeCwd = this.workspaceRoot
       ? this.resolveWorkspaceCwd(options.cwd)
       : options.cwd;
+    const timeoutMs = Number(options.timeoutMs ?? this.config?.execTimeoutMs ?? 0);
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 0) {
+      const error = new Error('SSH exec timeout must be an integer >= 0');
+      error.code = 'EINVAL';
+      throw error;
+    }
 
     return new Promise((resolve, reject) => {
       const execOptions = {};
@@ -312,11 +331,22 @@ export class SSHClient {
 
         let stdout = '';
         let stderr = '';
-
+        const timer = timeoutMs > 0 ? setTimeout(() => {
+          const error = new Error(`SSH command timed out after ${timeoutMs}ms`);
+          error.code = 'ETIMEDOUT';
+          error.timeoutMs = timeoutMs;
+          error.stdout = stdout.trim();
+          error.stderr = stderr.trim();
+          reject(error);
+          try { stream.close?.(); } catch {}
+          try { stream.destroy?.(); } catch {}
+          this.disconnect({ force: true });
+        }, timeoutMs) : null;
         stream.on('data', (data) => { stdout += data.toString(); });
         stream.stderr.on('data', (data) => { stderr += data.toString(); });
 
         stream.on('close', (code) => {
+          if (timer) clearTimeout(timer);
           resolve({
             stdout: stdout.trim(),
             stderr: stderr.trim(),
@@ -325,6 +355,7 @@ export class SSHClient {
         });
 
         stream.on('error', (err) => {
+          if (timer) clearTimeout(timer);
           reject(new Error(`流错误: ${err.message}`));
         });
       });
