@@ -3,8 +3,11 @@
 import axios from "axios";
 import crypto from "crypto";
 import fs from "fs";
+import http from "http";
+import https from "https";
 import path from "path";
 import { fileURLToPath } from "url";
+import { scheduleForcedExit, startParentWatchdog } from "./cli-lifecycle.js";
 import { SSHClient } from "./ssh-client.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -12,8 +15,12 @@ const __dirname = path.dirname(__filename);
 const CONNECTIONS_PATH = path.join(__dirname, "local", "connections.json");
 const STATE_PATH = path.join(__dirname, "local", "cli-state.json");
 const TIMEOUT_MS = Number(process.env.MCP_REMOTE_TIMEOUT_MS || process.env.NIUMA_SSH_TIMEOUT_MS || 120000);
+const SAFE_JOB_TIMEOUT_MS = Number(process.env.AGENTPORT_SAFE_JOB_TIMEOUT_MS || 1800000);
+const HTTP_AGENT = new http.Agent({ keepAlive: false });
+const HTTPS_AGENT = new https.Agent({ keepAlive: false });
 const DEFAULT_TOKEN_ENV_PATH = "~/.agentport/daemon/.env";
 const SESSION_ID = sanitizeStateSegment(process.env.AGENTPORT_SESSION_ID || process.env.CODEX_SESSION_ID || "");
+const stopParentWatchdog = startParentWatchdog();
 
 function print(text = "") {
   process.stdout.write(`${text}\n`);
@@ -109,6 +116,32 @@ function parseArgs(argv) {
     }
   }
   return out;
+}
+
+function parseTimeoutMs(value, fallback, name) {
+  const resolved = value === undefined || value === null || value === "" ? fallback : Number(value);
+  if (!Number.isInteger(resolved) || resolved < 0) {
+    throw new Error(`${name} must be an integer >= 0.`);
+  }
+  if (resolved > 0 && resolved < 1000) {
+    throw new Error(`${name} must be 0 or at least 1000ms.`);
+  }
+  return resolved;
+}
+
+function cliExecTimeoutMs(args = {}, conn = {}) {
+  const value = args.execTimeoutMs ?? args["exec-timeout-ms"] ?? conn.execTimeoutMs;
+  return parseTimeoutMs(value, TIMEOUT_MS, "--exec-timeout-ms");
+}
+
+function jobTimeoutMs(args = {}, fallback) {
+  const value = args.jobTimeoutMs ?? args["job-timeout-ms"] ?? args.timeoutMs ?? args["timeout-ms"];
+  if (value === undefined && fallback === undefined) return undefined;
+  return parseTimeoutMs(value, fallback, "--job-timeout-ms");
+}
+
+function cliSshConfig(conn, args = {}) {
+  return { ...conn, execTimeoutMs: cliExecTimeoutMs(args, conn) };
 }
 
 function getState() {
@@ -288,6 +321,69 @@ function remoteScriptPath(ssh, args, interpreter) {
   return joinRemotePath(remoteScriptBaseDir(ssh, args), name);
 }
 
+function remotePayloadPath(ssh, args, extension) {
+  const ext = String(extension || "txt").replace(/[^a-zA-Z0-9]/g, "") || "txt";
+  const name = `agentport-payload-${Date.now()}-${crypto.randomBytes(6).toString("hex")}.${ext}`;
+  return joinRemotePath(remoteScriptBaseDir(ssh, args), name);
+}
+
+function remoteJobWrapperPath(ctx, args) {
+  const explicit = remoteTempDirArg(args);
+  let baseDir = explicit;
+  if (!baseDir && ctx.type === "ssh") baseDir = remoteScriptBaseDir(ctx.ssh, args);
+  if (!baseDir && typeof args.cwd === "string" && args.cwd.trim()) {
+    baseDir = joinRemotePath(args.cwd.trim(), ".agentport-tmp");
+  }
+  if (!baseDir) throw new Error("safe-job requires --cwd <remote-cwd> or --remote-tmp-dir <path>.");
+  const name = `agentport-safe-job-${Date.now()}-${crypto.randomBytes(6).toString("hex")}.sh`;
+  return joinRemotePath(baseDir, name);
+}
+
+function safeHeredocMarker(content) {
+  let marker;
+  do {
+    marker = `AGENTPORT_JOB_${crypto.randomBytes(12).toString("hex").toUpperCase()}`;
+  } while (String(content).split(/\r?\n/).includes(marker));
+  return marker;
+}
+
+function buildSafeJobWrapper(content, interpreter, { keepRemote = false } = {}) {
+  const marker = safeHeredocMarker(content);
+  const lines = ["#!/usr/bin/env bash", "set +e"];
+  if (!keepRemote) {
+    lines.push(
+      'cleanup() { rm -f -- "$0"; }',
+      "trap 'code=$?; cleanup; exit \"$code\"' EXIT",
+      "trap 'exit 143' HUP INT TERM",
+    );
+  }
+  lines.push(`${shellSingleQuote(interpreter)} - <<'${marker}'`);
+  lines.push(String(content).replace(/\n$/, ""));
+  lines.push(marker, "");
+  return lines.join("\n");
+}
+
+async function writeRemoteContent(ctx, targetPath, content) {
+  if (ctx.type === "ssh") {
+    await ctx.ssh.writeFile(targetPath, content);
+    return { mode: "ssh" };
+  }
+  const data = await postWithFallback(ctx.http, ["/api/fs/write", "/write"], { path: targetPath, content });
+  return { mode: "daemon", etag: data.etag };
+}
+
+async function cleanupRemoteContent(ctx, targetPath, cwd) {
+  if (ctx.type === "ssh") {
+    await ctx.ssh.rm(targetPath);
+    return;
+  }
+  await postWithFallback(ctx.http, ["/api/exec/script"], {
+    content: `rm -f -- ${shellSingleQuote(targetPath)}\n`,
+    interpreter: "bash",
+    cwd,
+  });
+}
+
 async function verifyRemoteContent(ctx, targetPath, expectedSha256) {
   const { type, http, ssh } = ctx;
   let content = "";
@@ -302,6 +398,29 @@ async function verifyRemoteContent(ctx, targetPath, expectedSha256) {
     throw new Error(`Remote readback mismatch for '${targetPath}'. expected=${expectedSha256} actual=${actualSha256}`);
   }
   return { ok: true, sha256: actualSha256, bytes: utf8Bytes(content) };
+}
+
+function gitApplyFlags(args, { check = false } = {}) {
+  const flags = [];
+  if (check) flags.push("--check");
+  if (args.reverse) flags.push("--reverse");
+  if (args.index) flags.push("--index");
+  if (args.cached) flags.push("--cached");
+  if (args["3way"] || args.threeWay || args["three-way"]) flags.push("--3way");
+  const whitespace = args.whitespace ? String(args.whitespace).trim() : "";
+  if (whitespace) {
+    const allowed = new Set(["nowarn", "warn", "fix", "error", "error-all"]);
+    if (!allowed.has(whitespace)) {
+      throw new Error(`Unsupported --whitespace value '${whitespace}'. Allowed: ${[...allowed].join(", ")}`);
+    }
+    flags.push(`--whitespace=${whitespace}`);
+  }
+  return flags;
+}
+
+function gitApplyCommand(remotePatchPath, args, options = {}) {
+  const flags = gitApplyFlags(args, options).map(shellSingleQuote).join(" ");
+  return `git apply${flags ? ` ${flags}` : ""} ${shellSingleQuote(remotePatchPath)}`;
 }
 
 function decodeEnvValue(value) {
@@ -569,6 +688,8 @@ async function verifyDaemonToken(url, clientId, token) {
     const client = axios.create({
       baseURL: normalizeBaseUrl(url),
       timeout: 10000,
+      httpAgent: HTTP_AGENT,
+      httpsAgent: HTTPS_AGENT,
       headers: {
         Authorization: `Bearer ${token}`,
         "X-Client-ID": clientId,
@@ -952,6 +1073,8 @@ function daemonClient(conn) {
   return axios.create({
     baseURL: conn.url,
     timeout: Number(conn.timeoutMs || TIMEOUT_MS),
+    httpAgent: HTTP_AGENT,
+    httpsAgent: HTTPS_AGENT,
     headers: {
       Authorization: `Bearer ${conn.authToken}`,
       "X-Client-ID": conn.clientId || "agentport-cli",
@@ -960,7 +1083,7 @@ function daemonClient(conn) {
   });
 }
 
-async function postWithFallback(client, paths, payload) {
+async function postWithFallback(client, paths, payload, { retryNetwork = true } = {}) {
   let lastError;
   for (const route of paths) {
     try {
@@ -968,7 +1091,7 @@ async function postWithFallback(client, paths, payload) {
       return response.data;
     } catch (error) {
       lastError = error;
-      if (!error?.response && ["ECONNRESET", "EPIPE", "ETIMEDOUT", "ECONNABORTED"].includes(error?.code)) {
+      if (retryNetwork && !error?.response && ["ECONNRESET", "EPIPE", "ETIMEDOUT", "ECONNABORTED"].includes(error?.code)) {
         await new Promise((resolve) => setTimeout(resolve, 150));
         try {
           const response = await client.post(route, payload);
@@ -1023,7 +1146,7 @@ async function getWithFallback(client, paths, query = {}) {
 async function withConnection(options, fn) {
   const conn = selectConnection(options);
   if ((conn.type || "daemon") === "ssh") {
-    const client = new SSHClient(conn);
+    const client = new SSHClient(cliSshConfig(conn, options));
     const target = connectionTarget(conn, "ssh");
     try {
       return await fn({ type: "ssh", conn, ssh: client, target });
@@ -1042,7 +1165,7 @@ async function withConnection(options, fn) {
     const sshConn = fallbackSshConnection(conn, options);
     if (!sshConn) throw error;
 
-    const sshClient = new SSHClient(sshConn);
+    const sshClient = new SSHClient(cliSshConfig(sshConn, options));
     const target = connectionTarget(sshConn, "ssh");
     try {
       return await fn({
@@ -1074,7 +1197,7 @@ async function checkDaemon(conn) {
 }
 
 async function checkSsh(conn) {
-  const client = new SSHClient(conn);
+  const client = new SSHClient(cliSshConfig(conn, args));
   const started = Date.now();
   try {
     const result = await client.exec("printf '%s' \"$USER@$HOSTNAME:$PWD\"");
@@ -1544,11 +1667,8 @@ async function listSshJobIds(ssh, limit = 20) {
   return result.stdout.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
 }
 
-async function commandJobStart(args) {
-  const command = args.command || args._.slice(2).join(" ");
-  if (!command) throw new Error("Usage: node cli.js job start <command> [--cwd path]");
-  await withConnection({ ...args, requireExplicitConnection: true }, async (ctx) => {
-    const { type, http, ssh } = ctx;
+async function startJob(ctx, command, args = {}) {
+  const { type, http, ssh } = ctx;
     if (type === "ssh") {
       const root = await ssh.resolveRemotePath(sshJobRootPath());
       const keysDir = `${root}/keys`;
@@ -1561,8 +1681,7 @@ async function commandJobStart(args) {
           const existingJobId = normalizeJobId(await ssh.readFile(keyFile));
           if (existingJobId) {
             const existing = await readSshJobStatus(ssh, existingJobId);
-            printJson({ ...existing, reused: true, key });
-            return;
+            return { ...existing, reused: true, key };
           }
         }
       }
@@ -1600,15 +1719,29 @@ async function commandJobStart(args) {
       }
 
       const created = await readSshJobStatus(ssh, jobId);
-      printJson({ ...created, key: key || undefined });
-      return;
+      return { ...created, key: key || undefined };
     }
-    const data = await postWithFallback(http, ["/api/jobs", "/api/jobs/start", "/api/exec/async"], {
-      command,
-      cwd: args.cwd,
-      connection: ctx.target,
-    });
-    printJson(withTarget(data, ctx));
+  const timeoutMs = jobTimeoutMs(args, args.defaultJobTimeoutMs);
+  const body = {
+    command,
+    cwd: args.cwd,
+    connection: ctx.target,
+  };
+  if (timeoutMs !== undefined) body.timeoutMs = timeoutMs;
+  const data = await postWithFallback(
+    http,
+    ["/api/jobs", "/api/jobs/start", "/api/exec/async"],
+    body,
+    { retryNetwork: false },
+  );
+  return withTarget(data, ctx);
+}
+
+async function commandJobStart(args) {
+  const command = args.command || args._.slice(2).join(" ");
+  if (!command) throw new Error("Usage: node cli.js job start <command> [--cwd path]");
+  await withConnection({ ...args, requireExplicitConnection: true }, async (ctx) => {
+    printJson(await startJob(ctx, command, args));
   });
 }
 
@@ -2010,7 +2143,7 @@ async function commandSafeScript(args) {
   const expectedSha256 = sha256Text(content);
   const payload = {
     ok: true,
-    command: "safe-script",
+    command: args.commandName || "safe-script",
     sourceFile: path.resolve(file),
     interpreter,
     cwd: args.cwd || null,
@@ -2065,6 +2198,190 @@ async function commandSafeScript(args) {
       verifiedUpload: false,
       result: data,
     }, ctx));
+  });
+}
+
+async function commandSafeJob(args) {
+  const file = args._[1] || args.file;
+  if (!file) throw new Error("Usage: node cli.js safe-job <local-script-file> --cwd <remote-cwd> [--interpreter bash]");
+  if (args.key) throw new Error("safe-job does not support --key because every uploaded script is unique.");
+
+  const interpreter = safeScriptInterpreter(args.interpreter || "bash");
+  const normalizeLf = !(args.preserveEol || args["preserve-eol"]);
+  const keepRemote = Boolean(args.keepRemote || args["keep-remote"]);
+  const content = readUtf8PayloadFile(file, { normalizeLf });
+  const wrapper = buildSafeJobWrapper(content, interpreter, { keepRemote });
+  const payload = {
+    command: "safe-job",
+    sourceFile: path.resolve(file),
+    interpreter,
+    cwd: args.cwd || null,
+    bytes: utf8Bytes(content),
+    sha256: sha256Text(content),
+    wrapperBytes: utf8Bytes(wrapper),
+    wrapperSha256: sha256Text(wrapper),
+    keepRemote,
+    jobTimeoutMs: jobTimeoutMs(args, SAFE_JOB_TIMEOUT_MS),
+  };
+
+  if (args.dryRun || args["dry-run"]) {
+    printJson({ ok: true, ...payload, dryRun: true, verifiedUpload: false });
+    return;
+  }
+
+  await withConnection({ ...args, requireExplicitConnection: true }, async (ctx) => {
+    const remoteWrapper = remoteJobWrapperPath(ctx, args);
+    let uploaded = false;
+    try {
+      const writeResult = await writeRemoteContent(ctx, remoteWrapper, wrapper);
+      uploaded = true;
+      const uploadVerification = await verifyRemoteContent(ctx, remoteWrapper, payload.wrapperSha256);
+      const submittedCommand = `bash ${shellSingleQuote(remoteWrapper)}`;
+      const job = await startJob(ctx, submittedCommand, {
+        ...args,
+        defaultJobTimeoutMs: SAFE_JOB_TIMEOUT_MS,
+      });
+      printJson({
+        ...job,
+        safeJob: {
+          ...payload,
+          remoteWrapper,
+          submittedCommand,
+          verifiedUpload: true,
+          uploadVerification,
+          writeResult,
+        },
+      });
+    } catch (error) {
+      if (uploaded) {
+        try { await cleanupRemoteContent(ctx, remoteWrapper, args.cwd); } catch {}
+      }
+      throw error;
+    }
+  });
+}
+
+async function commandSafeBash(args) {
+  const file = args._[1] || args.file;
+  if (!file) throw new Error("Usage: node cli.js safe-bash <local-bash-file> [--cwd path]");
+  await commandSafeScript({
+    ...args,
+    interpreter: "bash",
+    commandName: "safe-bash",
+    _: ["safe-script", file, ...args._.slice(2)],
+  });
+}
+
+async function commandSafeApply(args) {
+  const file = args._[1] || args.file;
+  if (!file) throw new Error("Usage: node cli.js safe-apply <local-patch-file> --cwd <remote-repo> [--check]");
+  if (!args.cwd) throw new Error("safe-apply requires --cwd <remote-repo> so git apply runs in the intended repository.");
+
+  const content = readUtf8PayloadFile(file, { normalizeLf: true });
+  const expectedSha256 = sha256Text(content);
+  const checkOnly = Boolean(args.check || args["check-only"]);
+  const payload = {
+    ok: true,
+    command: "safe-apply",
+    sourceFile: path.resolve(file),
+    cwd: args.cwd,
+    bytes: utf8Bytes(content),
+    sha256: expectedSha256,
+    checkOnly,
+    flags: gitApplyFlags(args, { check: false }),
+  };
+
+  if (args.dryRun || args["dry-run"]) {
+    printJson({ ...payload, dryRun: true, checked: false, applied: false });
+    return;
+  }
+
+  await withConnection({ ...args, requireExplicitConnection: true }, async (ctx) => {
+    const { type, http, ssh } = ctx;
+    if (type === "ssh") {
+      const remotePatch = remotePayloadPath(ssh, args, "patch");
+      let cleanup = { skipped: Boolean(args.keepRemote || args["keep-remote"]) };
+      await ssh.writeFile(remotePatch, content);
+      const uploadVerification = await verifyRemoteContent(ctx, remotePatch, expectedSha256);
+      const checkResult = await ssh.exec(gitApplyCommand(remotePatch, args, { check: true }), { cwd: args.cwd });
+      if (checkResult.code !== 0) {
+        if (!cleanup.skipped) {
+          try {
+            await ssh.rm(remotePatch);
+            cleanup = { ok: true };
+          } catch (error) {
+            cleanup = { ok: false, error: error.message };
+          }
+        }
+        printJson(withTarget({
+          ...payload,
+          ok: false,
+          mode: "ssh",
+          remotePatch,
+          checked: false,
+          applied: false,
+          uploadVerification,
+          checkResult,
+          cleanup,
+        }, ctx));
+        process.exitCode = 2;
+        return;
+      }
+
+      let applyResult = null;
+      if (!checkOnly) {
+        applyResult = await ssh.exec(gitApplyCommand(remotePatch, args), { cwd: args.cwd });
+      }
+      if (!cleanup.skipped) {
+        try {
+          await ssh.rm(remotePatch);
+          cleanup = { ok: true };
+        } catch (error) {
+          cleanup = { ok: false, error: error.message };
+        }
+      }
+      const applied = Boolean(!checkOnly && applyResult?.code === 0);
+      printJson(withTarget({
+        ...payload,
+        ok: checkOnly || applied,
+        mode: "ssh",
+        remotePatch,
+        checked: true,
+        applied,
+        uploadVerification,
+        checkResult,
+        applyResult,
+        cleanup,
+      }, ctx));
+      if (!checkOnly && !applied) process.exitCode = 2;
+      return;
+    }
+
+    const b64 = Buffer.from(content, "utf8").toString("base64").replace(/(.{1,76})/g, "$1\n").trim();
+    const flags = gitApplyFlags(args, { check: false }).map(shellSingleQuote).join(" ");
+    const script = [
+      "set -eu",
+      'patch_file="$(mktemp "${TMPDIR:-/tmp}/agentport-patch.XXXXXX.patch")"',
+      'cleanup() { rm -f "$patch_file"; }',
+      "trap cleanup EXIT",
+      "base64 -d > \"$patch_file\" <<'AGENTPORT_PATCH_B64'",
+      b64,
+      "AGENTPORT_PATCH_B64",
+      `git apply --check${flags ? ` ${flags}` : ""} "$patch_file"`,
+      checkOnly ? "exit 0" : `git apply${flags ? ` ${flags}` : ""} "$patch_file"`,
+      "",
+    ].join("\n");
+    const data = await postWithFallback(http, ["/api/exec/script"], { content: script, interpreter: "bash", cwd: args.cwd });
+    const applied = Boolean(checkOnly ? data?.code === 0 || data?.ok : data?.code === 0 || data?.ok);
+    printJson(withTarget({
+      ...payload,
+      ok: applied,
+      mode: "daemon",
+      checked: applied,
+      applied: !checkOnly && applied,
+      result: data,
+    }, ctx));
+    if (!applied) process.exitCode = 2;
   });
 }
 
@@ -2128,10 +2445,13 @@ Commands:
   node cli.js write <remote-path> --content "text"
   node cli.js write <remote-path> --file local.txt
   node cli.js safe-write <remote-path> --file payload.txt [--verify readback|none]
+  node cli.js safe-apply patch.diff --cwd /path/to/repo [--check]
   node cli.js stat <remote-path>
   node cli.js glob "**/*.js" [--cwd /path]
   node cli.js grep "text" [--cwd /path] [--include "*.js,*.ts"]
   node cli.js bash "pwd && ls -la" [--cwd /path]
+  node cli.js safe-bash local-readonly-check.sh [--cwd /path]
+  node cli.js safe-job local-build.sh --cwd /path [--job-timeout-ms 1800000]
   node cli.js job start "npm test" [--cwd /path]
   node cli.js job status <job-id>
   node cli.js job logs <job-id> [--tail 200]
@@ -2153,6 +2473,8 @@ Commands:
 Options:
   --connection <name>       choose connection
   --route <auto|ssh|daemon> prefer route for this command
+  --exec-timeout-ms <ms>    synchronous SSH timeout; 0 disables it
+  --job-timeout-ms <ms>     daemon job timeout; 0 disables it
   --json                    structured output for read/bash/logs/errors
 
 Safety:
@@ -2161,7 +2483,8 @@ Safety:
   maintain a session-scoped current connection instead of the shared fallback state.
   For large source, patches, Markdown, Chinese text, or complex scripts, keep
   PowerShell as a short launcher only and use safe-write/safe-script with a
-  local UTF-8 payload file. Avoid passing code through --content or bash strings.
+  local UTF-8 payload file. Use safe-bash for grep pipelines and multiline
+  diagnostics. Avoid passing code through --content or bash strings.
 `);
 }
 
@@ -2202,6 +2525,10 @@ async function main(args) {
     case "write-safe":
       await commandSafeWrite(args);
       break;
+    case "safe-apply":
+    case "apply-safe":
+      await commandSafeApply(args);
+      break;
     case "stat":
       await commandStat(args);
       break;
@@ -2213,6 +2540,14 @@ async function main(args) {
       break;
     case "bash":
       await commandBash(args);
+      break;
+    case "safe-bash":
+    case "bash-safe":
+      await commandSafeBash(args);
+      break;
+    case "safe-job":
+    case "job-safe":
+      await commandSafeJob(args);
       break;
     case "job":
       await commandJob(args);
@@ -2250,4 +2585,9 @@ async function main(args) {
 }
 
 const _args = parseArgs(process.argv.slice(2));
-main(_args).catch((error) => fail(error.message, 1, _args));
+main(_args)
+  .catch((error) => fail(error.message, 1, _args))
+  .finally(() => {
+    stopParentWatchdog();
+    scheduleForcedExit({ exitCode: process.exitCode ?? 0 });
+  });

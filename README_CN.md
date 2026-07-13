@@ -43,7 +43,7 @@ AI 远程开发网关：支持 MCP、CLI、SSH 恢复和持久 daemon Job。
 | 原生 MCP 工具 | 当前 AI 软件支持自定义 MCP 时使用结构化 `remote_*` 工具 |
 | CLI daemon 网关 | `node cli.js status` 和 `node cli.js job ...` 支撑稳定开发流程 |
 | 持久 Job | 远程 daemon 内运行测试、构建、长任务，支持状态、日志和取消 |
-| 异步执行 | `remote_exec_async` + `remote_task` 作为长任务兼容接口 |
+| 异步执行 | `remote_exec_async` / `remote_script_async` + `remote_task` 作为长任务接口 |
 | 配置热重载 | `remote_config` 修改远端配置无需重启 |
 | 动态连接 | 支持多服务器切换，无需重启 MCP |
 | 健康检查 | 自动检测远端服务状态 |
@@ -177,6 +177,7 @@ node cli.js health
 | `remote_glob` | 按 glob 模式搜索 |
 | `remote_bash` | 执行远程命令 |
 | `remote_script` | 执行多行脚本 |
+| `remote_script_async` | 将多行脚本提交为持久后台任务 |
 | `remote_batch` | 批量操作 |
 | `remote_exec_async` | 异步执行 |
 | `remote_task` | 查询异步任务 |

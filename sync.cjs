@@ -353,8 +353,9 @@ function main() {
   // Read MCP config path from config variables (supports any AI tool)
   const mcpConfigPath = vars.mcpConfigPath;
   const mcpServerName = vars.mcpServerName || name;
+  const mcpPathIsPlaceholder = /^(?:PATH_TO_|ABSOLUTE_PATH_TO_)/.test(String(mcpConfigPath || ""));
 
-  if (mcpConfigPath) {
+  if (mcpConfigPath && !mcpPathIsPlaceholder) {
     const resolvedMcpPath = mcpConfigPath.replace(/^~/, os.homedir());
     const mcpDir = path.dirname(resolvedMcpPath);
 
@@ -387,6 +388,8 @@ function main() {
     } else {
       log("warn", `MCP config directory not found: ${mcpDir}, skipping`);
     }
+  } else if (mcpPathIsPlaceholder) {
+    log("warn", "mcpConfigPath is still a template placeholder, skipping MCP registration");
   } else {
     log("warn", `mcpConfigPath not set in config, skipping MCP registration`);
   }

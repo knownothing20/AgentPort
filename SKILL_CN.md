@@ -173,6 +173,7 @@ agentport/
 | `remote_status` | 获取连接诊断信息 | ✅ | ✅ |
 | `remote_bash` | 执行远程命令 | ✅ | ✅ |
 | `remote_script` | 执行远程脚本 | ✅ | ✅ |
+| `remote_script_async` | 异步执行远程脚本 | ❌ | ✅ |
 | `remote_batch` | 批量操作 | ✅ | ✅ |
 | `remote_exec_async` | 异步执行命令 | ❌ | ✅ |
 | `remote_task` | 查询异步任务状态 | ❌ | ✅ |
@@ -680,6 +681,7 @@ node test.cjs --local-only
 | `remote_glob` | 按 glob 规则搜索远程文件 | v1.0 |
 | `remote_bash` | 执行远程命令（含特殊字符自动 base64 编码，避免转义问题） | v2.1 |
 | `remote_script` | 执行多行脚本（写入临时文件再执行，彻底避免 bash 转义/编码问题） | v2.1 |
+| `remote_script_async` | 将多行脚本提交为持久后台任务并立即返回 taskId | v2.5 |
 | `remote_status` | 综合诊断：连接状态、延迟、缓存命中率、操作统计 | v1.2 |
 | `remote_batch` | 批量操作，一次请求最多 20 个 read/stat/glob/bash | v2.0 |
 | `remote_exec_async` | 异步执行长耗时命令，立即返回 taskId | v2.0 |
@@ -863,7 +865,7 @@ Dashboard 功能：
 | 搜索远程代码 | `remote_health` → `remote_glob` |
 | 查看文件信息 | `remote_health` → `remote_stat` |
 | 批量读多个文件 | `remote_health` → `remote_batch` |
-| 长耗时任务 | `remote_health` → `remote_exec_async` → `remote_task` 轮询 |
+| 长耗时任务 | `remote_health` → `remote_exec_async` / `remote_script_async` → `remote_task` 轮询 |
 | 修改远端配置 | `remote_config read` → 修改 → `remote_config write`（自动热重载） |
 | 添加新客户端 | `remote_config read` → 在 AUTH_TOKENS 末尾追加 `新客户端名=新token` → `remote_config write` |
 | 连接诊断 | `remote_status` |

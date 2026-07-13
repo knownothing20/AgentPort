@@ -76,7 +76,7 @@ the project documentation in this repository.
 | Native MCP Tools | Structured `remote_*` tools when the host supports custom MCP servers |
 | CLI Daemon Gateway | `node cli.js status` and `node cli.js job ...` for stable development workflows |
 | Persistent Jobs | Remote daemon jobs for tests, builds, logs, status, and cancel |
-| Async Execution | `remote_exec_async` + `remote_task` compatibility for long-running tasks |
+| Async Execution | `remote_exec_async` / `remote_script_async` + `remote_task` for long-running tasks |
 | Config Hot Reload | `remote_config` modify remote config without restart |
 | Execution Backpressure | Queue timeout returns clear 429 with exec running/max/queued state |
 | Dynamic Connections | Switch between multiple servers without restarting MCP |
@@ -91,12 +91,12 @@ the project documentation in this repository.
 `agentport` is a remote development gateway with multiple runtime channels.
 Choose by task type:
 
-1. **SSH-first CLI for stable base operations**: use `--route ssh` for health,
-   read/write, stat, glob, grep, and one-off command execution.
-2. **CLI daemon gateway for long-running development**: use `node cli.js status`
-   and persistent `job` commands for tests, builds, polling, and durable logs.
-3. **Native MCP for convenience when available**: if `remote_*` tools are visible
-   and stable, use them for quick structured operations.
+1. **Native MCP for short structured operations**: if `remote_*` tools are
+   healthy, use them for a windowless local workflow.
+2. **CLI daemon gateway for long-running development**: use `safe-job` and
+   persistent `job` commands for tests, builds, installs, polling, and logs.
+3. **SSH-first CLI as the recovery path**: use `--route ssh` when native MCP or
+   daemon transport is unavailable. Synchronous commands time out by default.
 4. **HTTP/manual last**: only use direct REST calls or manual commands when SSH,
    daemon, and native MCP are all unavailable.
 
@@ -142,6 +142,7 @@ For long-running development tasks, use the persistent daemon job gateway:
 ```bash
 node cli.js status
 node cli.js job start "npm test" --cwd /path/to/workspace
+node cli.js safe-job local-build.sh --cwd /path/to/workspace --job-timeout-ms 1800000
 node cli.js job status <job-id>
 node cli.js job logs <job-id> --tail 200
 node cli.js job cancel <job-id>
@@ -353,6 +354,7 @@ nohup bash agentport-manager.sh >> boot.log 2>&1 &
 | `remote_grep` | Search remote file contents |
 | `remote_bash` | Execute remote command |
 | `remote_script` | Execute multi-line script |
+| `remote_script_async` | Submit a multi-line script as a persistent job |
 | `remote_batch` | Batch operations |
 | `remote_exec_async` | Async execution |
 | `remote_task` | Query async task |

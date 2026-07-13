@@ -5,9 +5,26 @@
 ### Added
 - Added CLI `safe-write` for UTF-8 file-backed remote writes with optional LF normalization and default readback SHA-256 verification.
 - Added CLI `safe-script` for file-backed remote script execution with interpreter allow-listing, upload verification, workspace-aware temporary paths, and default cleanup.
+- Added CLI `safe-bash` as a file-backed bash entrypoint for grep pipelines, nested quotes, and multiline diagnostics.
+- Added CLI `safe-apply` for file-backed remote patch application with `git apply --check` before applying.
+- Added CLI `safe-job` for verified file-backed scripts that start as persistent remote jobs and return immediately.
+- Added MCP `remote_script_async` for windowless submission of multi-line scripts as persistent daemon jobs.
+- Added a Windows hidden stdio launcher with `CREATE_NO_WINDOW`, parent-exit detection, and kill-on-close Job Object cleanup.
+- Added focused lifecycle tests for parent-process loss, hidden-launcher cleanup, SSH execution timeout, and `safe-job` dry-run behavior.
 
 ### Changed
 - Updated agent guidance to keep PowerShell as a short launcher and route large source, patches, Markdown, Chinese text, and complex scripts through `safe-write` or `safe-script`.
+- Updated agent guidance to route complex read-only remote commands through `safe-bash` instead of inline `bash "..."` strings.
+- Updated agent guidance to route multi-file changes through `safe-apply --check` before applying.
+- Native MCP is now the preferred Windows path for short operations; builds, tests, installs, and other long commands are routed to daemon jobs.
+- Synchronous CLI SSH execution now defaults to a 120-second timeout and supports `--exec-timeout-ms`.
+- Daemon job commands accept `--job-timeout-ms`; `safe-job` defaults to 30 minutes.
+- MCP `remote_exec_async` now accepts `timeoutMs` and uses explicit non-keepalive transport for single-attempt job submission.
+
+### Fixed
+- CLI invocations now exit when their launching parent disappears and force-release residual handles after command completion.
+- SSH disconnect now force-destroys connections that do not close promptly, preventing canceled commands from leaving orphaned Node processes.
+- Skill sync now ignores the template MCP config path instead of creating a file named `PATH_TO_YOUR_AI_TOOL_MCP_CONFIG`.
 
 ---
 

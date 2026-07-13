@@ -7,17 +7,19 @@ development access through `agentport`.
 
 Always choose the most stable available runtime for the task:
 
-1. Native MCP tools for quick structured operations.
+1. Native MCP tools for quick structured operations. This is the preferred
+   windowless path on Windows.
    If `remote_*` tools are visible and stable, use `remote_connect`,
    `remote_health`, `remote_read`, `remote_write`, `remote_bash`, and the other
    `remote_*` tools directly.
-2. SSH-first CLI for baseline stability.
-   Use `node cli.js ssh-health`, `node cli.js read|safe-write|safe-script|bash --route ssh`,
+2. SSH-first CLI for baseline stability only when native MCP is unavailable.
+   Use `node cli.js ssh-health`, `node cli.js read|safe-write|safe-apply|safe-script|safe-bash --route ssh`,
    and `node cli.js job ... --route ssh` when MCP transport closes or daemon
    health is unknown.
-3. CLI daemon gateway for long-running development.
-   Use `node cli.js status` and `node cli.js job ...` for tests, builds,
-   polling, and work that must survive native MCP transport failures.
+3. Daemon jobs for long-running development.
+   Prefer MCP `remote_exec_async` or `remote_script_async`; use
+   `node cli.js safe-job ...` and `node cli.js job ...` as CLI fallbacks for
+   builds, tests, installs, Docker operations, polling, and durable logs.
 4. HTTP/manual fallback.
    If none of the above are available, print exact commands for the user to run.
 
@@ -176,13 +178,28 @@ node cli.js grep "video-analysis" --cwd /path/to/workspace --include "*.ts,*.py"
 node cli.js write /path/to/workspace/tmp.txt --content "hello"
 node cli.js write /path/to/workspace/tmp.txt --file local-file.txt
 node cli.js safe-write /path/to/workspace/file.ts --file local-utf8-payload.ts --verify readback
+node cli.js safe-apply local.patch --cwd /path/to/workspace --check
+node cli.js safe-apply local.patch --cwd /path/to/workspace
 node cli.js safe-script local-script.sh --interpreter bash --cwd /path/to/workspace
+node cli.js safe-bash local-readonly-check.sh --cwd /path/to/workspace
+node cli.js safe-job local-build.sh --cwd /path/to/workspace --route daemon --job-timeout-ms 1800000
 ```
 
-Use `safe-write` and `safe-script` when the payload is source code, a patch,
-Markdown, Chinese text, or a complex script. The shell command should contain
-only short arguments and file paths; do not inline large payloads into
-PowerShell, `--content`, heredoc, or `bash` strings.
+Use `safe-write`, `safe-apply`, and `safe-script` when the payload is source
+code, a patch, Markdown, Chinese text, or a complex script. The shell command
+should contain only short arguments and file paths; do not inline large payloads
+into PowerShell, `--content`, heredoc, or `bash` strings.
+
+Use `safe-bash` for complex read-only diagnostics such as grep/find pipelines,
+`cd && git ...`, nested quotes, template strings, or commands containing `$`,
+`${...}`, `|`, or backticks.
+
+Use `safe-job` instead of `safe-script` for builds, tests, installs, Docker
+operations, and any script that may run longer than 10 seconds. It uploads and
+verifies the local UTF-8 script, submits a persistent remote job, returns a job
+id immediately, and removes its temporary wrapper when the job finishes. Its
+daemon timeout defaults to 30 minutes; set `--job-timeout-ms 0` only for
+intentionally unbounded work.
 
 For long-running work:
 
@@ -210,11 +227,28 @@ name in `local/cli-state.json`. It does not copy or print full tokens.
 - For file writes, use native `remote_write` first. If using CLI fallback, use
   `node cli.js safe-write ... --file` for large or non-ASCII payloads, and
   reserve `write --content` for tiny ASCII probes.
-- For remote scripts, use `safe-script` instead of putting multiline scripts in
-  a local PowerShell command.
+- For multi-file patches, use `safe-apply --check` first, then `safe-apply`.
+- For short remote scripts, use `safe-script` instead of putting multiline
+  scripts in a local PowerShell command. Use `safe-job` for long scripts.
+- For complex read-only remote commands, use `safe-bash` instead of
+  `bash "grep ... | ..."`.
 - Run `doctor` or `health` before the first read/write/bash operation.
 - If daemon and SSH are both available, use daemon jobs for long-running coding work.
 - If daemon fails or MCP reports `Transport closed`, switch to `--route ssh` and continue.
+
+### Windows Hidden Stdio Launcher
+
+Windows may display a terminal when a console-based MCP server or fallback CLI
+is launched directly. Build the bundled launcher with:
+
+```powershell
+./windows/build-hidden-stdio-launcher.ps1
+```
+
+The launcher preserves stdin/stdout/stderr, starts the child with
+`CREATE_NO_WINDOW`, and places it in a kill-on-close Windows Job Object. If the
+parent Codex or PowerShell process exits, it terminates the full child process
+tree instead of leaving an orphaned `node.exe`.
 
 ## Minimal Agent Bootstrap Prompt
 

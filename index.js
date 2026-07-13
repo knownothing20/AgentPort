@@ -8,10 +8,19 @@ import axios from "axios";
 import fs from "fs";
 import path from "path";
 import http from "http";
+import https from "https";
 import { randomBytes } from "crypto";
 import { SSHClient, SSHConnectionManager } from "./ssh-client.js";
 import { scanLocalSSH, formatSSHScanSummary } from "./ssh-scanner.js";
 import logger from "./logger.js";
+
+// Node 19+ enables keep-alive on the global HTTP agents. Some lightweight
+// daemon/proxy combinations close those sockets without a reusable FIN, so a
+// subsequent POST can fail with ECONNRESET after the server already handled it.
+// Explicit non-keepalive agents avoid stale-socket reuse and, importantly,
+// avoid retrying non-idempotent job-start requests.
+const HTTP_AGENT = new http.Agent({ keepAlive: false });
+const HTTPS_AGENT = new https.Agent({ keepAlive: false });
 
 let _fatalHandlerActive = false;
 let _stdioExitScheduled = false;
@@ -706,6 +715,8 @@ function getAxiosInstance(connectionName) {
     return attachTraceInterceptors(axios.create({
       baseURL: conn.url.replace(/\/+$/, ''),
       timeout: REQUEST_TIMEOUT_MS,
+      httpAgent: HTTP_AGENT,
+      httpsAgent: HTTPS_AGENT,
       headers: {
         ...(conn.authToken ? { authorization: `Bearer ${conn.authToken}` } : {}),
         ...(conn.clientId ? { "x-mcp-client-id": conn.clientId } : {}),
@@ -756,7 +767,7 @@ function batchHasRiskyOperations(operations) {
 function toolRequiresExplicitConnection(toolName, args = {}) {
   if (Object.keys(_connections).length <= 1) return false;
   if (explicitToolConnection(args)) return false;
-  if (toolName === "remote_write" || toolName === "remote_bash" || toolName === "remote_script") return true;
+  if (toolName === "remote_write" || toolName === "remote_bash" || toolName === "remote_script" || toolName === "remote_script_async") return true;
   if (toolName === "remote_exec_async" || toolName === "remote_task") return true;
   if (toolName === "remote_config" && String(args.action || "").toLowerCase() === "write") return true;
   if (toolName === "remote_batch" && batchHasRiskyOperations(args.operations)) return true;
@@ -887,6 +898,36 @@ function wrapBase64Command(command) {
   return `printf '%s' '${b64}' | base64 -d | bash`;
 }
 
+function shellSingleQuote(value) {
+  return `'${String(value).replace(/'/g, `'"'"'`)}'`;
+}
+
+function asyncTimeoutMs(value, fallback = 1800000) {
+  const resolved = value === undefined || value === null || value === "" ? fallback : Number(value);
+  if (!Number.isInteger(resolved) || resolved < 0 || (resolved > 0 && resolved < 1000)) {
+    throw new Error("timeoutMs must be 0 or an integer >= 1000");
+  }
+  return resolved;
+}
+
+function buildAsyncScriptWrapper(content, interpreter) {
+  let marker;
+  do {
+    marker = `AGENTPORT_ASYNC_${randomBytes(12).toString("hex").toUpperCase()}`;
+  } while (String(content).split(/\r?\n/).includes(marker));
+  return [
+    "#!/usr/bin/env bash",
+    "set +e",
+    'cleanup() { rm -f -- "$0"; }',
+    "trap 'code=$?; cleanup; exit \"$code\"' EXIT",
+    "trap 'exit 143' HUP INT TERM",
+    `${shellSingleQuote(interpreter)} - <<'${marker}'`,
+    String(content).replace(/\n$/, ""),
+    marker,
+    "",
+  ].join("\n");
+}
+
 // --- Content sanitization for remote_write ---
 const PRESERVE_CRLF = (process.env.MCP_REMOTE_PRESERVE_CRLF || process.env.NIUMA_SSH_PRESERVE_CRLF || "").trim() === "true";
 
@@ -956,6 +997,8 @@ const server = new Server(
 const axiosInstance = attachTraceInterceptors(axios.create({
   baseURL: REMOTE_URL,
   timeout: REQUEST_TIMEOUT_MS,
+  httpAgent: HTTP_AGENT,
+  httpsAgent: HTTPS_AGENT,
   headers: {
     ...(AUTH_TOKEN ? { authorization: `Bearer ${AUTH_TOKEN}` } : {}),
     ...(CLIENT_ID ? { "x-mcp-client-id": CLIENT_ID } : {}),
@@ -1501,6 +1544,37 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
     },
     {
+      name: "remote_script_async",
+      description: "Submit a multi-line script as a persistent daemon job. Returns taskId immediately; use remote_task to query status and logs. Preferred for builds, tests, installs, and scripts longer than 10 seconds.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          connection: {
+            type: "string",
+            description: "Required when multiple connections are configured. Must select a daemon connection.",
+          },
+          content: {
+            type: "string",
+            description: "Script content. Uploaded through the MCP channel without PowerShell or shell escaping.",
+          },
+          interpreter: {
+            type: "string",
+            description: "Script interpreter, default bash. Uses the same whitelist as remote_script.",
+          },
+          cwd: {
+            type: "string",
+            description: "Working directory. Defaults to the daemon workspace root.",
+          },
+          timeoutMs: {
+            type: "integer",
+            minimum: 0,
+            description: "Remote job timeout in milliseconds. Defaults to 1800000 (30 minutes); 0 disables the timeout.",
+          },
+        },
+        required: ["content"],
+      },
+    },
+    {
       name: "remote_batch",
       description: "Batch execute multiple operations (read/stat/glob/bash). Max 20 per request, more efficient than multiple individual calls.",
       inputSchema: {
@@ -1546,6 +1620,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           cwd: {
             type: "string",
             description: "Optional. Working directory.",
+          },
+          timeoutMs: {
+            type: "integer",
+            minimum: 0,
+            description: "Remote job timeout in milliseconds. Defaults to the daemon setting; 0 disables the timeout.",
           },
         },
         required: ["command"],
@@ -2330,6 +2409,73 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
       }
 
+      case "remote_script_async": {
+        recordOp("remote_script_async");
+        if (isSSHConnection()) {
+          return toTextResult(JSON.stringify(withRuntimeMeta({
+            error: "Async script execution requires a daemon connection",
+            message: "Switch to a daemon connection, or use CLI safe-job --route ssh as the recovery path.",
+          }), null, 2));
+        }
+
+        const scriptContent = sanitizeContent(requireNonEmptyString(args, "content"));
+        const interpreter = typeof args.interpreter === "string" && args.interpreter.trim()
+          ? args.interpreter.trim()
+          : "bash";
+        if (!ALLOWED_INTERPRETERS.has(interpreter)) {
+          return toTextResult(`Error: Unsupported interpreter '${interpreter}'. Allowed: ${[...ALLOWED_INTERPRETERS].join(", ")}`);
+        }
+
+        try { await ensureHealthy(); } catch (e) { if (isHealthError(e)) return healthCheckError(e.message); throw e; }
+        const requestedCwd = typeof args.cwd === "string" && args.cwd.trim() ? args.cwd.trim() : "";
+        const cwd = requestedCwd || _workspaceRoot;
+        if (!cwd) return toTextResult("Error: remote_script_async requires cwd when the daemon does not expose workspaceRoot.");
+        const absoluteCwd = cwd.startsWith("/") || !_workspaceRoot
+          ? cwd
+          : `${_workspaceRoot.replace(/\/+$/, "")}/${cwd.replace(/^\/+/, "")}`;
+        const wrapperPath = `${absoluteCwd.replace(/\/+$/, "")}/.agentport-tmp/agentport-async-${Date.now()}-${randomBytes(6).toString("hex")}.sh`;
+        const wrapperContent = buildAsyncScriptWrapper(scriptContent, interpreter);
+        const timeoutMs = asyncTimeoutMs(args.timeoutMs);
+
+        let uploaded = false;
+        try {
+          await postWithFallback(["/api/fs/write", "/write"], {
+            path: wrapperPath,
+            content: wrapperContent,
+          });
+          uploaded = true;
+          const readback = await postWithFallback(["/api/fs/read", "/read"], { path: wrapperPath });
+          if ((readback.content ?? "") !== wrapperContent) {
+            throw new Error("Async script upload verification failed");
+          }
+          const data = (await getCurrentAxios().post("/api/exec/async", {
+            command: `bash ${shellSingleQuote(wrapperPath)}`,
+            cwd,
+            timeoutMs,
+            connection: currentConnectionSummary(),
+          })).data;
+          return toTextResult(JSON.stringify(withRuntimeMeta({
+            taskId: data.taskId,
+            status: data.status,
+            createdAt: data.createdAt,
+            interpreter,
+            cwd,
+            timeoutMs,
+            verifiedUpload: true,
+            message: `Task ${data.taskId} started. Use remote_task with this taskId to check progress.`,
+          }), null, 2));
+        } catch (error) {
+          if (uploaded) {
+            postWithFallback(["/api/exec/script"], {
+              content: `rm -f -- ${shellSingleQuote(wrapperPath)}\n`,
+              interpreter: "bash",
+              cwd,
+            }).catch(() => {});
+          }
+          return toTextResult(`Async script error: ${errorMessage(error)}`);
+        }
+      }
+
       case "remote_batch": {
         recordOp("remote_batch");
         const operations = args.operations;
@@ -2475,15 +2621,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         try { await ensureHealthy(); } catch (e) { if (isHealthError(e)) return healthCheckError(e.message); throw e; }
         const command = requireNonEmptyString(args, "command");
         const cwd = typeof args.cwd === "string" ? args.cwd : undefined;
+        const timeoutMs = args.timeoutMs === undefined ? undefined : asyncTimeoutMs(args.timeoutMs, undefined);
         // Auto base64 escape for commands containing bash special chars (same as remote_bash)
         const effectiveCommand = needsBase64Escape(command) ? wrapBase64Command(command) : command;
         try {
-          const response = await getCurrentAxios().post("/api/exec/async", {
+          const body = {
             command: effectiveCommand,
             cwd,
             connection: currentConnectionSummary(),
-          });
-          const data = response.data;
+          };
+          if (timeoutMs !== undefined) body.timeoutMs = timeoutMs;
+          const data = (await getCurrentAxios().post("/api/exec/async", body)).data;
           return toTextResult(JSON.stringify(withRuntimeMeta({
             taskId: data.taskId,
             status: data.status,
@@ -2882,6 +3030,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             _connectionAxios = attachTraceInterceptors(axios.create({
               baseURL: daemonInfo.url,
               timeout: REQUEST_TIMEOUT_MS,
+              httpAgent: HTTP_AGENT,
+              httpsAgent: HTTPS_AGENT,
               headers: {
                 authorization: `Bearer ${daemonInfo.authToken}`,
                 "x-mcp-client-id": daemonInfo.clientId,
