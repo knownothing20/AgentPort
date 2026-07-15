@@ -8,7 +8,7 @@ const readline = require("readline");
 const REMOTE = process.argv.includes("--remote");
 const CONNECTION_ARG = process.argv.find((arg) => arg.startsWith("--connection="));
 const CONNECTION = CONNECTION_ARG ? CONNECTION_ARG.slice("--connection=".length) : "183-agentport-daemon";
-const LAUNCHER = path.join(process.env.USERPROFILE || "", ".codex", "bin", "hidden-stdio-launcher-v2.exe");
+const LAUNCHER = path.join(process.env.USERPROFILE || "", ".codex", "bin", "hidden-stdio-launcher-v3.exe");
 const INDEX = path.join(__dirname, "index.js");
 
 function terminalCount() {

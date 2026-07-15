@@ -1,6 +1,6 @@
 ---
 name: agentport
-description: AI Remote Development Gateway for MCP, CLI fallback, SSH recovery, and persistent daemon jobs. Use for remote Linux development, agentport CLI, remote files, remote commands, daemon jobs, SSH fallback, token provisioning, and multi-agent connection safety.
+description: AI 远程开发网关：支持 MCP、CLI 回退、SSH 恢复和持久守护任务；用于远程 Linux 开发、AgentPort CLI、远程文件与命令、守护任务、SSH 备用通道、令牌配置及多 Agent 连接安全。AI Remote Development Gateway for MCP, CLI fallback, SSH recovery, and persistent daemon jobs. Use for remote Linux development, AgentPort CLI, remote files, remote commands, daemon jobs, SSH fallback, token provisioning, and multi-agent connection safety.
 license: MIT
 ---
 

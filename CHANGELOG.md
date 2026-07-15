@@ -25,6 +25,8 @@
 - CLI invocations now exit when their launching parent disappears and force-release residual handles after command completion.
 - SSH disconnect now force-destroys connections that do not close promptly, preventing canceled commands from leaving orphaned Node processes.
 - Skill sync now ignores the template MCP config path instead of creating a file named `PATH_TO_YOUR_AI_TOOL_MCP_CONFIG`.
+- SSH health checks now pass their timeout options through without referencing an undefined argument object.
+- The hidden stdio launcher now builds as the v3 Windows GUI subsystem executable, preventing the launcher itself from allocating a console window.
 
 ---
 
