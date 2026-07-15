@@ -126,7 +126,7 @@ async function testParentWatchdogIntegration() {
 
 async function testHiddenLauncherParentCleanup() {
   if (process.platform !== "win32") return;
-  const launcherPath = path.join(process.env.USERPROFILE || "", ".codex", "bin", "hidden-stdio-launcher-v2.exe");
+  const launcherPath = path.join(process.env.USERPROFILE || "", ".codex", "bin", "hidden-stdio-launcher-v3.exe");
   assert.ok(fs.existsSync(launcherPath), `launcher missing: ${launcherPath}`);
 
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentport-launcher-"));

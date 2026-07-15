@@ -1196,7 +1196,7 @@ async function checkDaemon(conn) {
   };
 }
 
-async function checkSsh(conn) {
+async function checkSsh(conn, args = {}) {
   const client = new SSHClient(cliSshConfig(conn, args));
   const started = Date.now();
   try {

@@ -1,5 +1,5 @@
 param(
-  [string]$OutputPath = "$env:USERPROFILE\.codex\bin\hidden-stdio-launcher-v2.exe"
+  [string]$OutputPath = "$env:USERPROFILE\.codex\bin\hidden-stdio-launcher-v3.exe"
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,7 +14,7 @@ if (-not (Test-Path -LiteralPath $compiler)) {
 
 $outputDir = Split-Path -Parent $OutputPath
 New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
-& $compiler /nologo /target:exe /optimize+ "/out:$OutputPath" $source
+& $compiler /nologo /target:winexe /optimize+ "/out:$OutputPath" $source
 if ($LASTEXITCODE -ne 0) {
   throw "hidden stdio launcher compilation failed with exit code $LASTEXITCODE"
 }
