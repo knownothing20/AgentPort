@@ -74,3 +74,11 @@ together and `daemon/server-entry.cjs` becomes the service entrypoint.
 
 This staged model keeps current MCP tools, CLI commands, HTTP paths, jobs, and
 dashboard behavior compatible while route groups are extracted incrementally.
+
+## Validation
+
+```bash
+npm run test:gateway
+```
+
+The gateway test uses only Node.js built-ins and runs on Windows and Linux.
