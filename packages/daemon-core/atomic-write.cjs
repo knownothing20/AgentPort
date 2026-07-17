@@ -6,7 +6,7 @@ function sha256(content) {
   return crypto.createHash("sha256").update(content).digest("hex");
 }
 
-async function atomicWriteFile(targetPath, content, { encoding = "utf8", mode = 0o600 } = {}) {
+async function atomicWriteFile(targetPath, content, { encoding = "utf8", mode = 0o644 } = {}) {
   const directory = path.dirname(targetPath);
   await fs.mkdir(directory, { recursive: true });
 

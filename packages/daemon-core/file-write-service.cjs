@@ -44,9 +44,20 @@ function createFileWriteService({ workspaceRoot } = {}) {
         throw conflict("Write conflict: target already exists", currentEtag);
       }
 
+      let existingMode = null;
+      try {
+        const existingStat = await fs.stat(resolved.path);
+        existingMode = existingStat.mode & 0o777;
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+      }
+      const requestedMode = options.mode === undefined || options.mode === null
+        ? (existingMode ?? 0o644)
+        : Number(options.mode);
+
       const result = await atomicWriteFile(resolved.path, content, {
         encoding: "utf8",
-        mode: options.mode || 0o600,
+        mode: requestedMode,
       });
       const readback = await fs.readFile(resolved.path);
       const readbackEtag = sha256(readback);

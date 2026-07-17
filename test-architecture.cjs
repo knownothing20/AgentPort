@@ -107,8 +107,13 @@ async function testDaemonFileServices() {
       (error) => error?.code === "EWRITE_CONFLICT" && error?.statusCode === 409,
     );
 
+    if (process.platform !== "win32") await fs.chmod(path.join(tempRoot, "src", "demo.txt"), 0o755);
     const second = await writer.writeText("src/demo.txt", "changed", { expectedEtag: first.etag });
     assert.notEqual(second.etag, first.etag);
+    if (process.platform !== "win32") {
+      const mode = (await fs.stat(path.join(tempRoot, "src", "demo.txt"))).mode & 0o777;
+      assert.equal(mode, 0o755);
+    }
 
     const manifest = await reader.manifest(".");
     assert.ok(manifest.entries.some((entry) => entry.path.replace(/\\/g, "/") === "src/demo.txt"));
