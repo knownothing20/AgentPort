@@ -1,7 +1,7 @@
 {
   "name": "agentport",
   "version": "2.5.0",
-  "description": "AgentPort dual-end remote development gateway for MCP, CLI, SSH recovery, and persistent daemon jobs",
+  "description": "AgentPort dual-end remote development gateway for MCP, CLI, SSH recovery, persistent jobs, and Git Worktree sessions",
   "main": "index.js",
   "type": "module",
   "scripts": {
@@ -19,9 +19,10 @@
     "test:gateway": "node test-daemon-gateway.cjs",
     "test:exec": "node test-exec-core.cjs",
     "test:jobs": "node test-job-service.cjs && node test-daemon-exec-jobs.cjs",
-    "test:client": "node test-client-runtime.cjs",
+    "test:client": "node test-client-runtime.cjs && node test-client-development-sessions.cjs",
+    "test:sessions": "node test-development-session-service.cjs && node test-development-gateway.cjs",
     "test:mcp:v3": "node test-client-mcp-v3.cjs",
-    "test:all": "npm run test:architecture && npm run test:gateway && npm run test:exec && npm run test:client && npm run test:jobs && npm run test:lifecycle && npm run test:mcp:v3",
+    "test:all": "npm run test:architecture && npm run test:gateway && npm run test:exec && npm run test:client && npm run test:jobs && npm run test:sessions && npm run test:lifecycle && npm run test:mcp:v3",
     "test:lifecycle": "node test-cli-lifecycle.cjs",
     "test:mcp": "node test-mcp-windowless.cjs",
     "test:mcp:remote": "node test-mcp-windowless.cjs --remote",
