@@ -1,2 +1,2 @@
 export * from "./daemon-http.js";
-export * from "./lazy-ssh.js";
+export { createLazySshTransport, createLazySshTransport as createSshTransport } from "./lazy-ssh.js";
