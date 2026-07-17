@@ -1,0 +1,41 @@
+{
+  "servers": [
+    {
+      "id": "debian-main",
+      "workspaceId": "leon-projects",
+      "description": "Primary Linux development server",
+      "endpoints": [
+        {
+          "id": "debian-main-lan",
+          "type": "daemon",
+          "scope": "lan",
+          "url": "http://192.168.31.183:3183",
+          "priority": 10,
+          "clientId": "windows-codex",
+          "authToken": "YOUR_CLIENT_TOKEN"
+        },
+        {
+          "id": "debian-main-virtual-lan",
+          "type": "daemon",
+          "scope": "virtual-lan",
+          "url": "http://100.64.0.10:3183",
+          "priority": 20,
+          "clientId": "windows-codex",
+          "authToken": "YOUR_CLIENT_TOKEN"
+        },
+        {
+          "id": "debian-main-ssh",
+          "type": "ssh",
+          "scope": "recovery",
+          "host": "100.64.0.10",
+          "port": 22,
+          "username": "leon",
+          "privateKey": "~/.ssh/id_rsa",
+          "workspaceRoot": "/home/leon/projects",
+          "priority": 30
+        }
+      ]
+    }
+  ],
+  "defaultServer": "debian-main"
+}
