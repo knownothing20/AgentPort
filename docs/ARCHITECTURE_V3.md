@@ -16,19 +16,22 @@ AI desktop application
 ## Repository boundaries
 
 ```text
-client/                     Explicit local-client entrypoints and documentation
-daemon/                     Explicit remote-daemon entrypoint and modular gateway
+client/                     Client bootstraps, modular MCP, and project-aware CLI
+packages/client-core/       Registry, state, endpoint selection, project runtime
+packages/client-transport/  Daemon HTTP and lazy SSH transports
 packages/shared/            Request context and operation safety policy
-packages/client-core/       Endpoint selection and project profiles
-packages/daemon-core/       Files, search, execution, queue, and persistent jobs
+
+daemon/                     Remote daemon entrypoint and modular Gateway
+packages/daemon-core/       Files, search, execution, queue, and persistent Jobs
+server/server.js            Legacy dashboard/config/diagnostics behind proxy
+
 index.js                    Legacy-compatible MCP implementation
 cli.js                      Legacy-compatible CLI implementation
-server/server.js            Legacy dashboard/config/diagnostics behind proxy
 ```
 
-The old client entrypoints remain compatible. The daemon uses a staged public
-Gateway: extracted route groups run in small modules while the legacy service
-remains available on loopback for functionality not yet moved.
+Both root client implementations remain available. `client/mcp-entry.js` and
+`client/cli-entry.js` select modular functionality without removing the old
+behavior.
 
 ## Read/search/write separation
 
@@ -64,7 +67,7 @@ The daemon core separates filesystem responsibilities:
 
 ## Execution and Job separation
 
-Execution is now divided into focused components:
+Execution is divided into focused components:
 
 - `command-policy.cjs`
   - execution enable/disable
@@ -81,55 +84,90 @@ Execution is now divided into focused components:
   - output limits and timeouts
   - process-tree cleanup
 - `job-store.cjs`
-  - persistent metadata, result, logs, and idempotency references
+  - persistent metadata, results, logs, and idempotency references
   - compatibility with the existing Job directory
 - `job-worker.cjs`
   - detached command process
   - direct stdout/stderr streaming to disk
   - timeout and cancellation handling
 - `job-service.cjs`
-  - Job submission, reconciliation, listing, cancellation, deletion
+  - submission, reconciliation, listing, cancellation, deletion
   - idempotency conflict detection
   - cursor-based incremental logs
 
-A public Gateway restart no longer requires the command ChildProcess to remain in
+A Gateway restart no longer requires command ChildProcess objects to remain in
 Gateway memory. New tasks are reconciled through metadata, Worker PIDs, and
 result files.
 
-## Modular daemon gateway
+## Modular daemon Gateway
 
-The source-tree daemon entrypoint now starts:
+The source-tree daemon entrypoint starts:
 
 ```text
-public modular gateway
+public modular Gateway
   -> daemon-core file/search APIs
   -> daemon-core synchronous execution
-  -> daemon-core persistent jobs
+  -> daemon-core persistent Jobs
   -> loopback legacy daemon for dashboard, config, and diagnostics
 ```
 
 The Gateway owns existing file, execution, batch, and Job aliases. Unextracted
 paths are transparently proxied to the legacy daemon without changing client
-URLs.
-
-The legacy process binds only to `127.0.0.1` and uses either a configured
-`AGENTPORT_LEGACY_PORT` or an automatically selected free port.
+URLs. The compatibility process binds only to `127.0.0.1`.
 
 See:
 
 - `PHASE2_MODULAR_GATEWAY.md`
 - `PHASE3_EXEC_JOBS.md`
 
+## Modular client runtime
+
+The client now has the same separation of responsibilities:
+
+- `connection-registry.js`
+  - V3 logical servers and endpoints
+  - legacy `connections[]` compatibility
+  - server-or-endpoint name resolution
+- `client-state.js`
+  - session-scoped selected server and endpoint
+  - atomic local state updates
+- `client-runtime.js`
+  - immutable request context per call
+  - health cache and identity validation
+  - endpoint choice, retry, and verified failover
+  - project-relative paths and standard actions
+- `daemon-http.js`
+  - authentication and trace headers
+  - response limits and request timeouts
+  - idempotency and cursor parameters
+  - transport-vs-HTTP error classification
+- `ssh.js` / `lazy-ssh.js`
+  - on-demand SSH loading
+  - identity discovery
+  - file/search/synchronous execution recovery
+
+```text
+client/mcp-entry.js
+  -> V3 MCP when connections.v3.json exists
+  -> legacy index.js otherwise
+
+client/cli-entry.js
+  -> modular server/project/v3 commands
+  -> legacy cli.js for all other commands
+```
+
+See `PHASE4_CLIENT_RUNTIME.md`.
+
 ## Client request model
 
-Every tool call should eventually create one immutable request context:
+Every modular call creates one immutable context:
 
 ```text
 requestId
 traceId
 sessionId
 clientId
-operation and policy
+operation and safety policy
 logical serverId
 workspaceId
 selected endpoint
@@ -137,9 +175,8 @@ route
 idempotencyKey
 ```
 
-The context is passed through functions rather than stored in mutable global
-variables. This prevents concurrent MCP calls from sharing the wrong trace or
-connection state.
+The context is passed through the runtime and transport. Concurrent MCP calls do
+not share a mutable trace or per-call connection value.
 
 ## Logical servers and endpoint selection
 
@@ -152,28 +189,37 @@ debian-main
   - SSH recovery endpoint
 ```
 
-The client selects the healthiest compatible endpoint by priority and latency.
-Mutating operations require matching server and workspace identity. Read-only
-operations may fail over more freely, but an explicit identity mismatch is
-always rejected.
+The runtime probes and selects by health, priority, latency, route type, and
+identity. Mutating operations require matching server/workspace identity.
+Persistent Jobs, Job logs, and config operations require a daemon endpoint.
 
-The modular daemon health response supplies stable `serverId`, `workspaceId`,
-execution state, Job runtime, and capability fields for validation.
+Read-only operations can move to another verified endpoint. Synchronous commands
+are not retried after send. Persistent Job submissions use one idempotency key
+for safe response-loss retry.
 
 ## Project profiles
 
-`local/projects.json` gives agents stable project names instead of repeatedly
-constructing remote paths and commands. Profiles contain:
+`local/projects.json` gives Agents stable project names instead of repeatedly
+constructing paths and commands. Profiles contain:
 
 - logical server
 - project root
 - default branch
-- agent instruction files
+- Agent instruction files
 - package manager
 - standard install, lint, test, and build commands
 
-A later Client phase can expose `agentport project connect|status|build` while
-reusing the profile parser introduced here.
+The modular interfaces now expose:
+
+```text
+agentport project list
+agentport project status <project>
+agentport project run <project> <action>
+agentport project follow <job-id>
+```
+
+MCP equivalents are `remote_project_list`, `remote_project_status`, and
+`remote_project_run`.
 
 ## Migration plan
 
@@ -181,66 +227,64 @@ reusing the profile parser introduced here.
 
 Completed:
 
-- explicit Client and Daemon directories
-- compatibility entrypoints
-- operation policy
-- request-scoped context model
-- logical endpoint selector
-- project profile parser
-- read/write daemon services
-- atomic writes and symlink-safe path checks
-- cross-platform architecture tests
+1. explicit Client and Daemon directories
+2. compatibility entrypoints
+3. operation policy and immutable request context
+4. logical endpoint selector and project parser
+5. atomic writes and symlink-safe paths
+6. cross-platform architecture tests
 
 ### Phase 2 — file route extraction
 
-Completed in the source-tree daemon entrypoint:
+Completed:
 
 1. health identity and capability augmentation
-2. read/stat routes
-3. streamed range and byte reads
-4. manifest routes
-5. glob/grep routes
-6. write and guarded delete routes
-7. loopback legacy process and transparent compatibility proxy
-8. cross-platform Gateway integration tests
+2. read/stat/range/byte/manifest routes
+3. glob and grep routes
+4. write and guarded delete routes
+5. loopback legacy process and compatibility proxy
+6. cross-platform Gateway tests
 
 ### Phase 3 — execution and Job extraction
 
 Completed:
 
-1. shared command policy
-2. synchronous execution queue
-3. command and script execution service
-4. modular batch execution
-5. persistent Job store and detached Worker
-6. cursor-based incremental logs
-7. idempotent Job submission
-8. Gateway restart reconciliation
-9. legacy Job directory compatibility
-10. cross-platform execution and Linux Worker tests
+1. shared command policy and synchronous queue
+2. command, script, and batch services
+3. persistent Job store and detached Worker
+4. cursor logs and idempotent submission
+5. Gateway restart reconciliation
+6. legacy Job directory compatibility
+7. cross-platform execution and Linux Worker tests
 
 ### Phase 4 — Client extraction
 
-Next, move from `index.js` and `cli.js` into:
+Completed:
 
-1. connection registry
+1. V3 and legacy connection registry
 2. daemon HTTP transport
-3. SSH transport
-4. MCP tool adapters
-5. CLI command adapters
-6. live logical-server endpoint selection
-7. idempotency and cursor options in client interfaces
+3. lazy SSH transport adapter
+4. live logical-server endpoint selection
+5. immutable per-call contexts in the modular MCP runtime
+6. idempotency and cursor options in MCP and CLI
+7. project-aware CLI and MCP commands
+8. automatic legacy fallback when no V3 config is present
+9. cross-platform runtime and MCP integration tests
 
-### Phase 5 — remote development experience
+### Phase 5 — remote development sessions
 
-- project commands
-- Git Worktree sessions per Agent task
-- project-aware install/lint/test/build actions
-- optional Streamable HTTP MCP endpoint
-- Dashboard project, Agent, endpoint, and task views
+Next:
+
+1. per-task Git Worktrees
+2. project and branch locks
+3. active Agent session registry
+4. standard setup/lint/test/build workflows with progress
+5. project-aware diff, commit, merge, and cleanup helpers
+6. optional Streamable HTTP MCP endpoint
+7. Dashboard project, Agent, endpoint, Worktree, queue, and Job views
 
 ## Non-goals
 
-This design is for trusted physical or virtual LAN development. It does not add
+This design targets trusted physical or virtual LAN development. It does not add
 multi-tenant SaaS accounts, billing, enterprise SSO, Kubernetes, or public
 internet exposure requirements.
