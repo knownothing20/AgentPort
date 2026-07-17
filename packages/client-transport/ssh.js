@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import path from "node:path";
 import { SSHClient } from "../../ssh-client.js";
 
 function shellQuote(value) {
@@ -48,6 +47,7 @@ export function createSshTransport(endpoint, { timeoutMs = Number(endpoint?.time
     const ssh = client();
     try {
       await ssh.connect();
+      if (endpoint.workspaceRoot && !ssh.workspaceRoot) ssh.workspaceRoot = endpoint.workspaceRoot;
       return await fn(ssh);
     } finally {
       ssh.disconnect();
@@ -72,77 +72,72 @@ export function createSshTransport(endpoint, { timeoutMs = Number(endpoint?.time
         serverId: identity.serverId || endpoint.serverId || null,
         workspaceId: identity.workspaceId || endpoint.workspaceId || null,
         workspaceRoot: identity.workspaceRoot || ssh.workspaceRoot || endpoint.workspaceRoot || null,
-        capabilities: {
-          files: true,
-          exec: true,
-          persistentJobs: false,
-        },
+        capabilities: { files: true, exec: true, persistentJobs: false },
         data: result,
       };
     });
   }
 
-  async function invoke(operation, args = {}) {
-    return withClient(async (ssh) => {
-      if (endpoint.workspaceRoot && !ssh.workspaceRoot) ssh.workspaceRoot = endpoint.workspaceRoot;
-      switch (operation) {
-        case "remote_health": return health();
-        case "remote_read": return { success: true, content: await ssh.readFile(args.path) };
-        case "remote_write": {
-          await ssh.writeFile(args.path, String(args.content ?? ""));
-          return { success: true, message: "File written successfully", path: args.path };
-        }
-        case "remote_stat": return { success: true, path: args.path, ...(await ssh.stat(args.path)) };
-        case "remote_glob": {
-          const files = await ssh.glob(args.pattern, args.cwd);
-          return { success: true, files, entries: files };
-        }
-        case "remote_grep": {
-          const cwd = ssh.resolveWorkspaceCwd(args.cwd) || args.cwd;
-          const result = await ssh.exec(grepCommand(args), { cwd });
-          const matches = parseGrep(result.stdout);
-          return { success: true, engine: "grep", pattern: args.pattern, cwd: cwd || ".", matches, truncated: matches.length >= Number(args.maxResults || 200) };
-        }
-        case "remote_bash": return { success: true, ...(await ssh.exec(args.command, { cwd: args.cwd, timeoutMs: args.timeoutMs })) };
-        case "remote_script": {
-          const interpreter = String(args.interpreter || "bash");
-          const baseDir = ssh.workspaceRoot
-            ? `${ssh.resolveWorkspaceCwd(args.cwd) || ssh.workspaceRoot}/.agentport-tmp`
-            : "~/.agentport/tmp";
-          const scriptPath = `${baseDir}/client-v3-${randomUUID()}.${interpreter.includes("python") ? "py" : interpreter === "node" ? "js" : "sh"}`;
-          await ssh.mkdir(baseDir);
-          await ssh.writeFile(scriptPath, String(args.content || ""));
-          try {
-            return { success: true, ...(await ssh.exec(`${shellQuote(interpreter)} ${shellQuote(scriptPath)}`, { cwd: args.cwd, timeoutMs: args.timeoutMs })) };
-          } finally {
-            ssh.rm(scriptPath).catch(() => {});
-          }
-        }
-        case "remote_batch": {
-          const results = [];
-          for (const item of args.operations || []) {
-            const mapping = {
-              read: "remote_read", write: "remote_write", stat: "remote_stat", glob: "remote_glob", grep: "remote_grep", bash: "remote_bash",
-            };
-            const mapped = mapping[item.type];
-            if (!mapped) results.push({ type: item.type, status: 400, error: "Unsupported operation" });
-            else {
-              try { results.push({ type: item.type, status: 200, ...(await invoke(mapped, item)) }); }
-              catch (error) { results.push({ type: item.type, status: 500, error: error.message }); }
-            }
-          }
-          return { success: true, results };
-        }
-        default: {
-          const error = new Error(`Operation '${operation}' requires a daemon endpoint`);
-          error.code = "EDAEMON_REQUIRED";
-          throw error;
+  async function invokeWithClient(ssh, operation, args = {}) {
+    switch (operation) {
+      case "remote_read": return { success: true, content: await ssh.readFile(args.path) };
+      case "remote_write": {
+        await ssh.writeFile(args.path, String(args.content ?? ""));
+        return { success: true, message: "File written successfully", path: args.path };
+      }
+      case "remote_stat": return { success: true, path: args.path, ...(await ssh.stat(args.path)) };
+      case "remote_glob": {
+        const files = await ssh.glob(args.pattern, args.cwd);
+        return { success: true, files, entries: files };
+      }
+      case "remote_grep": {
+        const cwd = ssh.resolveWorkspaceCwd(args.cwd) || args.cwd;
+        const result = await ssh.exec(grepCommand(args), { cwd });
+        const matches = parseGrep(result.stdout);
+        return { success: true, engine: "grep", pattern: args.pattern, cwd: cwd || ".", matches, truncated: matches.length >= Number(args.maxResults || 200) };
+      }
+      case "remote_bash": return { success: true, ...(await ssh.exec(args.command, { cwd: args.cwd, timeoutMs: args.timeoutMs })) };
+      case "remote_script": {
+        const interpreter = String(args.interpreter || "bash");
+        const baseDir = ssh.workspaceRoot
+          ? `${ssh.resolveWorkspaceCwd(args.cwd) || ssh.workspaceRoot}/.agentport-tmp`
+          : "~/.agentport/tmp";
+        const scriptPath = `${baseDir}/client-v3-${randomUUID()}.${interpreter.includes("python") ? "py" : interpreter === "node" ? "js" : "sh"}`;
+        await ssh.mkdir(baseDir);
+        await ssh.writeFile(scriptPath, String(args.content || ""));
+        try {
+          return { success: true, ...(await ssh.exec(`${shellQuote(interpreter)} ${shellQuote(scriptPath)}`, { cwd: args.cwd, timeoutMs: args.timeoutMs })) };
+        } finally {
+          ssh.rm(scriptPath).catch(() => {});
         }
       }
-    });
+      case "remote_batch": {
+        const results = [];
+        const mapping = { read: "remote_read", write: "remote_write", stat: "remote_stat", glob: "remote_glob", grep: "remote_grep", bash: "remote_bash" };
+        for (const item of args.operations || []) {
+          const mapped = mapping[item.type];
+          if (!mapped) results.push({ type: item.type, status: 400, error: "Unsupported operation" });
+          else {
+            try { results.push({ type: item.type, status: 200, ...(await invokeWithClient(ssh, mapped, item)) }); }
+            catch (error) { results.push({ type: item.type, status: 500, error: error.message }); }
+          }
+        }
+        return { success: true, results };
+      }
+      default: {
+        const error = new Error(`Operation '${operation}' requires a daemon endpoint`);
+        error.code = "EDAEMON_REQUIRED";
+        throw error;
+      }
+    }
+  }
+
+  async function invoke(operation, args = {}) {
+    if (operation === "remote_health") return health();
+    return withClient((ssh) => invokeWithClient(ssh, operation, args));
   }
 
   return Object.freeze({ endpoint, health, invoke });
 }
 
-export const sshTransportInternals = Object.freeze({ parseGrep, parseIdentity, shellQuote });
+export const sshTransportInternals = Object.freeze({ grepCommand, parseGrep, parseIdentity, shellQuote });
