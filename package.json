@@ -10,7 +10,8 @@
     "start:client": "node client/mcp-entry.js",
     "client:cli": "node client/cli-entry.js",
     "start:daemon": "node daemon/server-entry.cjs",
-    "cli": "node cli.js",
+    "cli": "node client/cli-entry.js",
+    "cli:legacy": "node cli.js",
     "doctor": "node cli.js doctor",
     "setup": "node setup.js",
     "test": "node test.cjs",
@@ -18,7 +19,9 @@
     "test:gateway": "node test-daemon-gateway.cjs",
     "test:exec": "node test-exec-core.cjs",
     "test:jobs": "node test-job-service.cjs && node test-daemon-exec-jobs.cjs",
-    "test:all": "npm run test:architecture && npm run test:gateway && npm run test:exec && npm run test:jobs && npm run test:lifecycle",
+    "test:client": "node test-client-runtime.cjs",
+    "test:mcp:v3": "node test-client-mcp-v3.cjs",
+    "test:all": "npm run test:architecture && npm run test:gateway && npm run test:exec && npm run test:client && npm run test:jobs && npm run test:lifecycle && npm run test:mcp:v3",
     "test:lifecycle": "node test-cli-lifecycle.cjs",
     "test:mcp": "node test-mcp-windowless.cjs",
     "test:mcp:remote": "node test-mcp-windowless.cjs --remote",
@@ -28,7 +31,7 @@
     "sync:skills": "node sync.cjs --skills"
   },
   "bin": {
-    "agentport": "./cli.js"
+    "agentport": "./client/cli-entry.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
