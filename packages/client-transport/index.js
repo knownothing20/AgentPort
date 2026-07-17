@@ -1,2 +1,2 @@
 export * from "./daemon-http.js";
-export * from "./ssh.js";
+export * from "./lazy-ssh.js";
