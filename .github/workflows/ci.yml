@@ -21,9 +21,10 @@ jobs:
           node-version: ${{ matrix.node }}
       - run: node test-architecture.cjs
       - run: node test-daemon-gateway.cjs
+      - run: node test-exec-core.cjs
 
-  legacy-linux:
-    name: Legacy lifecycle (Ubuntu, Node 22)
+  durable-linux:
+    name: Legacy and durable jobs (Ubuntu, Node 22)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,3 +34,5 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run test:lifecycle
+      - run: node test-job-service.cjs
+      - run: node test-daemon-exec-jobs.cjs
