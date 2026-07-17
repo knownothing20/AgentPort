@@ -1,5 +1,8 @@
+const crypto = require("node:crypto");
+const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
 const path = require("node:path");
+const { StringDecoder } = require("node:string_decoder");
 const { resolveWorkspacePath } = require("./path-guard.cjs");
 const { sha256 } = require("./atomic-write.cjs");
 
@@ -7,6 +10,44 @@ function positiveInt(value, fallback, min = 1, max = Number.MAX_SAFE_INTEGER) {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.min(Math.max(parsed, min), max);
+}
+
+async function readLineRangeWithHash(filePath, startLine, requestedEndLine) {
+  const decoder = new StringDecoder("utf8");
+  const hash = crypto.createHash("sha256");
+  const selected = [];
+  let pending = "";
+  let lineNumber = 0;
+  let endedWithNewline = false;
+
+  function acceptLine(rawLine) {
+    lineNumber += 1;
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    if (lineNumber >= startLine && lineNumber <= requestedEndLine) selected.push(line);
+  }
+
+  const stream = fsSync.createReadStream(filePath);
+  for await (const chunk of stream) {
+    hash.update(chunk);
+    const text = pending + decoder.write(chunk);
+    const parts = text.split("\n");
+    pending = parts.pop();
+    for (const part of parts) acceptLine(part);
+    endedWithNewline = text.endsWith("\n");
+  }
+
+  pending += decoder.end();
+  if (pending.length > 0 || endedWithNewline || lineNumber === 0) acceptLine(pending);
+
+  const actualStartLine = Math.min(startLine, Math.max(lineNumber, 1));
+  const actualEndLine = Math.min(requestedEndLine, Math.max(lineNumber, actualStartLine));
+  return {
+    content: selected.join("\n"),
+    etag: hash.digest("hex"),
+    totalLines: lineNumber,
+    startLine: actualStartLine,
+    endLine: actualEndLine,
+  };
 }
 
 function createFileReadService({ workspaceRoot, defaultMaxBytes = 2 * 1024 * 1024 } = {}) {
@@ -35,44 +76,67 @@ function createFileReadService({ workspaceRoot, defaultMaxBytes = 2 * 1024 * 102
       throw error;
     }
 
+    const hasRange = options.startLine !== undefined || options.endLine !== undefined;
     const maxBytes = positiveInt(options.maxBytes, defaultMaxBytes, 1, 50 * 1024 * 1024);
-    if (value.size > maxBytes && !options.startLine && !options.endLine) {
-      const error = new Error(`File size ${value.size} exceeds maxBytes ${maxBytes}; use a line range`);
+    if (value.size > maxBytes && !hasRange) {
+      const error = new Error(`File size ${value.size} exceeds maxBytes ${maxBytes}; use a line range or byte range`);
       error.code = "EFILESIZE";
       error.statusCode = 413;
       throw error;
     }
 
+    if (hasRange) {
+      const startLine = positiveInt(options.startLine, 1, 1);
+      const requestedEndLine = positiveInt(options.endLine, Number.MAX_SAFE_INTEGER, startLine);
+      const ranged = await readLineRangeWithHash(resolved.realPath, startLine, requestedEndLine);
+      return {
+        path: path.relative(resolved.root, resolved.realPath).replace(/\\/g, "/"),
+        ...ranged,
+        size: value.size,
+        ranged: true,
+        streamed: true,
+      };
+    }
+
     const fullContent = await fs.readFile(resolved.realPath, "utf8");
     const lines = fullContent.split(/\r?\n/);
-    const startLine = positiveInt(options.startLine, 1, 1, Math.max(lines.length, 1));
-    const endLine = positiveInt(options.endLine, lines.length, startLine, Math.max(lines.length, startLine));
-    const ranged = options.startLine || options.endLine
-      ? lines.slice(startLine - 1, endLine).join("\n")
-      : fullContent;
-
     return {
       path: path.relative(resolved.root, resolved.realPath).replace(/\\/g, "/"),
-      content: ranged,
+      content: fullContent,
       etag: sha256(Buffer.from(fullContent, "utf8")),
       size: value.size,
       totalLines: lines.length,
-      startLine,
-      endLine,
-      ranged: Boolean(options.startLine || options.endLine),
+      startLine: 1,
+      endLine: lines.length,
+      ranged: false,
+      streamed: false,
     };
   }
 
   async function readBytes(inputPath, options = {}) {
     const resolved = await resolveWorkspacePath(workspaceRoot, inputPath, { mustExist: true });
     const value = await fs.stat(resolved.realPath);
-    if (!value.isFile()) throw new Error("Target is not a file");
+    if (!value.isFile()) {
+      const error = new Error("Target is not a file");
+      error.statusCode = 400;
+      throw error;
+    }
 
     const offset = positiveInt(options.offset, 0, 0, value.size);
-    const length = positiveInt(options.length, Math.min(64 * 1024, value.size - offset), 1, 5 * 1024 * 1024);
+    const remaining = Math.max(0, value.size - offset);
+    if (remaining === 0) {
+      return {
+        path: path.relative(resolved.root, resolved.realPath).replace(/\\/g, "/"),
+        offset,
+        bytesRead: 0,
+        size: value.size,
+        contentBase64: "",
+      };
+    }
+    const length = positiveInt(options.length, Math.min(64 * 1024, remaining), 1, 5 * 1024 * 1024);
     const handle = await fs.open(resolved.realPath, "r");
     try {
-      const buffer = Buffer.alloc(Math.min(length, Math.max(0, value.size - offset)));
+      const buffer = Buffer.alloc(Math.min(length, remaining));
       const result = await handle.read(buffer, 0, buffer.length, offset);
       return {
         path: path.relative(resolved.root, resolved.realPath).replace(/\\/g, "/"),
@@ -89,7 +153,11 @@ function createFileReadService({ workspaceRoot, defaultMaxBytes = 2 * 1024 * 102
   async function manifest(inputPath = ".", options = {}) {
     const root = await resolveWorkspacePath(workspaceRoot, inputPath, { mustExist: true });
     const rootStat = await fs.stat(root.realPath);
-    if (!rootStat.isDirectory()) throw new Error("Manifest target must be a directory");
+    if (!rootStat.isDirectory()) {
+      const error = new Error("Manifest target must be a directory");
+      error.statusCode = 400;
+      throw error;
+    }
 
     const maxEntries = positiveInt(options.maxEntries, 2000, 1, 20_000);
     const maxDepth = positiveInt(options.maxDepth, 8, 0, 64);
@@ -140,4 +208,4 @@ function createFileReadService({ workspaceRoot, defaultMaxBytes = 2 * 1024 * 102
   return Object.freeze({ stat, readText, readBytes, manifest });
 }
 
-module.exports = { createFileReadService };
+module.exports = { createFileReadService, readLineRangeWithHash };
