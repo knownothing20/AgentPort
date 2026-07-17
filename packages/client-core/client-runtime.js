@@ -1,7 +1,7 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { bindRequestEndpoint, createRequestContext } from "../shared/request-context.js";
-import { canFallbackOperation, canRetryOperation, getOperationPolicy } from "../shared/operation-policy.js";
+import { canFallbackOperation, canRetryOperation } from "../shared/operation-policy.js";
 import { createDaemonHttpTransport, createSshTransport, isTransportError } from "../client-transport/index.js";
 import { selectEndpoint } from "./endpoint-selector.js";
 import { createClientState } from "./client-state.js";
@@ -38,6 +38,18 @@ function enrichProjectArgs(operation, args, profile) {
     "remote_glob", "remote_grep",
   ]).has(operation)) next.cwd = profile.root;
   return next;
+}
+
+function stableScriptToken({ idempotencyKey, content, interpreter, cwd }) {
+  return createHash("sha256")
+    .update(JSON.stringify({
+      idempotencyKey: String(idempotencyKey || ""),
+      content: String(content || ""),
+      interpreter: String(interpreter || "bash"),
+      cwd: String(cwd || ""),
+    }))
+    .digest("hex")
+    .slice(0, 32);
 }
 
 function asyncScriptWrapper(content, interpreter, marker) {
@@ -145,10 +157,7 @@ export async function createClientRuntime({
       endpointId(endpoint),
       await probeEndpoint(target.server, endpoint, { force }),
     ]));
-    return {
-      server: target.server,
-      healthByEndpoint: Object.fromEntries(rows),
-    };
+    return { server: target.server, healthByEndpoint: Object.fromEntries(rows) };
   }
 
   async function chooseEndpoint({ server, operation, explicitEndpointId = null, forceProbe = false, excluded = new Set() }) {
@@ -187,8 +196,14 @@ export async function createClientRuntime({
       }
       const cwd = args.cwd || selection.health?.workspaceRoot;
       if (!cwd) throw new Error("remote_script_async requires cwd or a daemon workspaceRoot");
-      const marker = `AGENTPORT_${randomUUID().replace(/-/g, "")}`;
-      const wrapperPath = `${String(cwd).replace(/\/+$/, "")}/.agentport-tmp/client-v3-${randomUUID()}.sh`;
+      const token = args.__scriptToken || stableScriptToken({
+        idempotencyKey: bound.idempotencyKey,
+        content: args.content,
+        interpreter: args.interpreter,
+        cwd,
+      });
+      const marker = `AGENTPORT_${token.toUpperCase()}`;
+      const wrapperPath = `${String(cwd).replace(/\/+$/, "")}/.agentport-tmp/client-v3-${token}.sh`;
       const wrapper = asyncScriptWrapper(args.content, args.interpreter || "bash", marker);
       const writeContext = createRequestContext({
         operation: "remote_write",
@@ -231,6 +246,14 @@ export async function createClientRuntime({
       idempotencyKey ||= randomUUID();
       args.idempotencyKey = idempotencyKey;
     }
+    if (operation === "remote_script_async") {
+      args.__scriptToken = stableScriptToken({
+        idempotencyKey,
+        content: args.content,
+        interpreter: args.interpreter,
+        cwd: args.cwd,
+      });
+    }
     const context = createRequestContext({
       operation,
       serverId: server.id,
@@ -268,7 +291,6 @@ export async function createClientRuntime({
         const accepted = Boolean(error.requestAccepted);
         const retrySame = isTransportError(error) && attempts === 1 && canRetryOperation({ operation, requestAccepted: accepted, idempotencyKey });
         if (retrySame) continue;
-
         const fallbackAllowed = isTransportError(error)
           && canFallbackOperation({ operation, identityMatch: selection.identityMatch });
         if (!fallbackAllowed) throw error;
@@ -357,4 +379,10 @@ export async function createClientRuntime({
   });
 }
 
-export const clientRuntimeInternals = Object.freeze({ asyncScriptWrapper, enrichProjectArgs, operationNeedsDaemon, shellQuote });
+export const clientRuntimeInternals = Object.freeze({
+  asyncScriptWrapper,
+  enrichProjectArgs,
+  operationNeedsDaemon,
+  shellQuote,
+  stableScriptToken,
+});
