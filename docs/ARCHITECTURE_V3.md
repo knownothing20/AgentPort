@@ -17,33 +17,41 @@ AI desktop application
 
 ```text
 client/                     Explicit local-client entrypoints and documentation
-daemon/                     Explicit remote-daemon entrypoint and documentation
+daemon/                     Explicit remote-daemon entrypoint and modular gateway
 packages/shared/            Request context and operation safety policy
 packages/client-core/       Endpoint selection and project profiles
-packages/daemon-core/       Path guard, read service, write service, atomic writes
+packages/daemon-core/       Path guard and read/search/write services
 index.js                    Legacy-compatible MCP implementation
 cli.js                      Legacy-compatible CLI implementation
-server/server.js            Legacy-compatible daemon implementation
+server/server.js            Legacy daemon behind the compatibility proxy
 ```
 
-The old entrypoints remain authoritative in the first phase. New entrypoints are
-thin facades so installations can migrate immediately while implementation code
-is extracted in small reviewable steps.
+The old client entrypoints remain compatible. The daemon has moved to a staged
+public-gateway model: extracted route groups run in small modules while the
+legacy service remains available on loopback for functionality not yet moved.
 
-## Read/write separation
+## Read/search/write separation
 
-The daemon core is now separated by responsibility:
+The daemon core is separated by responsibility:
 
 - `file-read-service.cjs`
-  - text reads with line ranges
+  - full text reads with size limits
+  - streamed line-range reads
   - byte-range reads
   - file metadata
   - directory manifests
+- `file-search-service.cjs`
+  - built-in glob matching
+  - content grep
+  - excluded build/cache directories
+  - symlink skipping
+  - result and scan limits
 - `file-write-service.cjs`
   - optimistic concurrency through ETags
   - create-only writes
   - per-path locks
   - verified atomic replacement
+  - existing permission preservation
   - guarded file removal
 - `path-guard.cjs`
   - lexical workspace checks
@@ -56,6 +64,24 @@ The daemon core is now separated by responsibility:
 
 This removes the assumption that all filesystem behavior must live inside one
 Express file.
+
+## Modular daemon gateway
+
+The source-tree daemon entrypoint now starts:
+
+```text
+public modular gateway
+  -> daemon-core file APIs
+  -> loopback legacy daemon for exec, jobs, dashboard, config, and diagnostics
+```
+
+The gateway owns the existing read/stat/glob/grep/write aliases plus new byte
+range, manifest, and guarded-delete routes. Unextracted paths are transparently
+proxied to the legacy daemon without changing client URLs.
+
+The legacy process binds only to `127.0.0.1` and uses either a configured
+`AGENTPORT_LEGACY_PORT` or an automatically selected free port. See
+`PHASE2_MODULAR_GATEWAY.md` for route and deployment details.
 
 ## Client request model
 
@@ -94,6 +120,9 @@ Mutating operations require matching server and workspace identity. Read-only
 operations may fail over more freely, but an explicit identity mismatch is
 always rejected.
 
+The modular daemon health response now supplies stable `serverId` and
+`workspaceId` fields for this validation.
+
 ## Project profiles
 
 `local/projects.json` gives agents stable project names instead of repeatedly
@@ -111,7 +140,9 @@ reusing the profile parser introduced here.
 
 ## Migration plan
 
-### Phase 1 — included in this refactor
+### Phase 1 — repository and core boundaries
+
+Completed:
 
 - explicit Client and Daemon directories
 - compatibility entrypoints
@@ -123,21 +154,36 @@ reusing the profile parser introduced here.
 - atomic writes and symlink-safe path checks
 - cross-platform architecture tests
 
-### Phase 2 — route extraction
+### Phase 2 — file route extraction
 
-Move the following handlers out of `server/server.js` without changing URLs:
+Completed in the source-tree daemon entrypoint:
 
-1. health and capabilities
-2. read/stat/glob/grep routes
-3. write routes
-4. exec routes
-5. job routes
-6. admin/config routes
-7. dashboard and diagnostics
+1. health identity and capability augmentation
+2. read/stat routes
+3. streamed range and byte reads
+4. manifest routes
+5. glob/grep routes
+6. write and guarded delete routes
+7. loopback legacy process and transparent compatibility proxy
+8. cross-platform gateway integration tests
 
-Each extraction should leave a compatibility route registration in the old app.
+Existing deployments that copy only `server/` remain on the legacy single
+process until they deploy `daemon/`, `packages/daemon-core/`, and `server/`
+together.
 
-### Phase 3 — client extraction
+### Phase 3 — execution and job extraction
+
+Next:
+
+1. command policy module
+2. execution queue module
+3. script execution adapter
+4. job store and runner
+5. cursor-based log reads
+6. idempotent job submission
+7. daemon restart reconciliation
+
+### Phase 4 — client extraction
 
 Move from `index.js` and `cli.js` into:
 
@@ -148,15 +194,13 @@ Move from `index.js` and `cli.js` into:
 5. CLI command adapters
 6. project commands
 
-### Phase 4 — remote development experience
+### Phase 5 — remote development experience
 
-- server/workspace identity endpoint
 - project commands
 - Git worktree sessions per agent task
-- cursor-based incremental job logs
-- idempotent job submission
 - daemon job worker separated from the HTTP process
 - optional Streamable HTTP MCP endpoint
+- dashboard project, agent, endpoint, and task views
 
 ## Non-goals
 
