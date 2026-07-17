@@ -25,6 +25,7 @@ async function main() {
   const projects = path.join(temp, "projects.json");
   const state = path.join(temp, "state.json");
   let receivedKey = null;
+  let sessionCreateBody = null;
 
   const daemon = http.createServer((req, res) => {
     const chunks = [];
@@ -38,11 +39,21 @@ async function main() {
         serverId: "mcp-server",
         workspaceId: "mcp-workspace",
         workspaceRoot: "/srv/projects",
-        capabilities: { persistentJobs: true },
+        capabilities: { persistentJobs: true, developmentSessions: true },
       });
       if (req.url === "/api/exec/async") {
         receivedKey = req.headers["idempotency-key"];
         return sendJson(res, 200, { success: true, jobId: "mcp-job", taskId: "mcp-job", status: "running" });
+      }
+      if (req.url === "/api/dev/sessions" && req.method === "POST") {
+        sessionCreateBody = body;
+        return sendJson(res, 200, { success: true, session: { id: "session-1", projectName: body.projectName, worktreePath: "/srv/worktrees/session-1", status: "active" } });
+      }
+      if (req.url === "/api/dev/sessions/session-1") {
+        return sendJson(res, 200, { success: true, session: { id: "session-1", status: "active", git: { branch: "agentport/demo/codex" } } });
+      }
+      if (req.url === "/api/dev/sessions/session-1/diff") {
+        return sendJson(res, 200, { success: true, diff: "demo patch" });
       }
       return sendJson(res, 404, { error: `not found ${req.url}`, body });
     });
@@ -64,7 +75,17 @@ async function main() {
       }],
     }],
   }, null, 2));
-  await fs.writeFile(projects, JSON.stringify({ projects: {} }, null, 2));
+  await fs.writeFile(projects, JSON.stringify({
+    projects: {
+      demo: {
+        server: "mcp-server",
+        root: "/srv/projects/demo",
+        defaultBranch: "main",
+        commands: { build: "npm run build" },
+        agentRules: ["AGENTS.md"],
+      },
+    },
+  }, null, 2));
 
   const child = spawn(process.execPath, [path.join(__dirname, "client", "mcp-entry.js")], {
     cwd: __dirname,
@@ -117,6 +138,8 @@ async function main() {
     const names = listed.result.tools.map((tool) => tool.name);
     assert.ok(names.includes("remote_project_run"));
     assert.ok(names.includes("remote_job_logs"));
+    assert.ok(names.includes("remote_session_create"));
+    assert.ok(names.includes("remote_session_merge"));
     const asyncTool = listed.result.tools.find((tool) => tool.name === "remote_exec_async");
     assert.ok(asyncTool.inputSchema.properties.idempotencyKey);
 
@@ -133,6 +156,29 @@ async function main() {
     assert.equal(startedData.data.jobId, "mcp-job");
     assert.equal(startedData.meta.idempotencyKey, "mcp:key:1");
     assert.equal(receivedKey, "mcp:key:1");
+
+    const created = await request("tools/call", {
+      name: "remote_session_create",
+      arguments: { project: "demo", agentId: "codex", task: "implement feature" },
+    });
+    const createdData = JSON.parse(created.result.content[0].text);
+    assert.equal(createdData.data.session.id, "session-1");
+    assert.equal(sessionCreateBody.projectRoot, "/srv/projects/demo");
+    assert.equal(sessionCreateBody.commands.build, "npm run build");
+
+    const status = await request("tools/call", {
+      name: "remote_session_status",
+      arguments: { sessionId: "session-1", server: "mcp-server" },
+    });
+    const statusData = JSON.parse(status.result.content[0].text);
+    assert.equal(statusData.data.session.status, "active");
+
+    const diff = await request("tools/call", {
+      name: "remote_session_diff",
+      arguments: { sessionId: "session-1", server: "mcp-server" },
+    });
+    const diffData = JSON.parse(diff.result.content[0].text);
+    assert.equal(diffData.data.diff, "demo patch");
   } finally {
     child.stdin.end();
     await new Promise((resolve) => {
@@ -142,7 +188,7 @@ async function main() {
     await close(daemon);
     await fs.rm(temp, { recursive: true, force: true });
   }
-  console.log("PASS modular MCP tools, health routing, and idempotent Job submission");
+  console.log("PASS modular MCP tools, idempotent Jobs, and Worktree session calls");
 }
 
 main().catch((error) => {
