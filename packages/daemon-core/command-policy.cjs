@@ -14,10 +14,13 @@ function boolValue(value, fallback = false) {
 }
 
 function stringSet(value, fallback = []) {
-  if (value instanceof Set) return new Set([...value].map((item) => String(item).trim()).filter(Boolean));
-  if (Array.isArray(value)) return new Set(value.map((item) => String(item).trim()).filter(Boolean));
-  if (typeof value === "string") return new Set(value.split(",").map((item) => item.trim()).filter(Boolean));
-  return new Set(fallback);
+  let values = [];
+  if (value instanceof Set) values = [...value];
+  else if (Array.isArray(value)) values = value;
+  else if (typeof value === "string") values = value.split(",");
+  else values = fallback;
+  const normalized = values.map((item) => String(item).trim()).filter(Boolean);
+  return new Set(normalized.length > 0 ? normalized : fallback);
 }
 
 function policyError(message, statusCode = 403, code = "ECOMMAND_POLICY") {
@@ -27,9 +30,13 @@ function policyError(message, statusCode = 403, code = "ECOMMAND_POLICY") {
   return error;
 }
 
+function normalizeBinaryName(value) {
+  return path.basename(String(value || "").replace(/\\/g, "/")).replace(/\.exe$/i, "");
+}
+
 function commandBase(command) {
   const first = String(command || "").trim().split(/\s+/)[0] || "";
-  return path.basename(first.replace(/^['"]|['"]$/g, ""));
+  return normalizeBinaryName(first.replace(/^['"]|['"]$/g, ""));
 }
 
 function createCommandPolicy({
@@ -38,8 +45,10 @@ function createCommandPolicy({
   allowedInterpreters = DEFAULT_INTERPRETERS,
 } = {}) {
   const execEnabled = boolValue(allowExec, true);
-  const commandAllowlist = stringSet(allowedCommands);
-  const interpreterAllowlist = stringSet(allowedInterpreters, DEFAULT_INTERPRETERS);
+  const commandAllowlist = new Set([...stringSet(allowedCommands)].map(normalizeBinaryName));
+  const interpreterAllowlist = new Set(
+    [...stringSet(allowedInterpreters, DEFAULT_INTERPRETERS)].map(normalizeBinaryName),
+  );
 
   function validateCommand(command) {
     if (typeof command !== "string" || !command.trim()) {
@@ -64,7 +73,7 @@ function createCommandPolicy({
 
   function validateInterpreter(interpreter) {
     const raw = String(interpreter || "bash").trim();
-    const base = path.basename(raw.replace(/\\/g, "/"));
+    const base = normalizeBinaryName(raw);
     if (!interpreterAllowlist.has(base)) {
       throw policyError(
         `Interpreter not allowed: ${raw}. Allowed: ${[...interpreterAllowlist].join(", ")}`,
@@ -90,5 +99,6 @@ module.exports = {
   boolValue,
   commandBase,
   createCommandPolicy,
+  normalizeBinaryName,
   stringSet,
 };
