@@ -20,6 +20,7 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - run: node test-architecture.cjs
+      - run: node test-daemon-gateway.cjs
 
   legacy-linux:
     name: Legacy lifecycle (Ubuntu, Node 22)
