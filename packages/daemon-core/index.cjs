@@ -11,4 +11,5 @@ module.exports = {
   ...require("./exec-service.cjs"),
   ...require("./job-store.cjs"),
   ...require("./job-service.cjs"),
+  ...require("./development-session-service.cjs"),
 };
