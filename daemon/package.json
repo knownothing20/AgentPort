@@ -3,6 +3,7 @@
   "private": true,
   "main": "server-entry.cjs",
   "scripts": {
-    "start": "node server-entry.cjs"
+    "start": "node server-entry.cjs",
+    "test": "node ../test-daemon-gateway.cjs"
   }
 }
