@@ -92,7 +92,13 @@ async function main() {
 
     process.env.AGENTPORT_CLIENT_STATE_PATH = statePath;
     const { loadConnectionRegistry } = await import("./packages/client-core/connection-registry.js");
-    const { createClientRuntime } = await import("./packages/client-core/client-runtime.js");
+    const { createClientRuntime, clientRuntimeInternals } = await import("./packages/client-core/client-runtime.js");
+
+    const tokenA = clientRuntimeInternals.stableScriptToken({ idempotencyKey: "key-1", content: "echo one", interpreter: "bash", cwd: "/srv/projects/demo" });
+    const tokenA2 = clientRuntimeInternals.stableScriptToken({ idempotencyKey: "key-1", content: "echo one", interpreter: "bash", cwd: "/srv/projects/demo" });
+    const tokenB = clientRuntimeInternals.stableScriptToken({ idempotencyKey: "key-1", content: "echo two", interpreter: "bash", cwd: "/srv/projects/demo" });
+    assert.equal(tokenA, tokenA2);
+    assert.notEqual(tokenA, tokenB);
 
     const registry = await loadConnectionRegistry({ filePath: connectionsPath, baseDir: root });
     assert.equal(registry.defaultServerId, "srv-main");
@@ -152,7 +158,7 @@ async function main() {
     await fs.rm(root, { recursive: true, force: true });
   }
 
-  console.log("PASS modular client registry, runtime, project actions, idempotency, cursor logs, and CLI");
+  console.log("PASS modular client registry, runtime, stable script identity, project actions, idempotency, cursor logs, and CLI");
 }
 
 main().catch((error) => {
