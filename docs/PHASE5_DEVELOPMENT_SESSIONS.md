@@ -74,17 +74,7 @@ agentport session create script2shorts \
   --task "Fix provider retries"
 ```
 
-MCP:
-
-```json
-{
-  "project": "script2shorts",
-  "agentId": "codex-main",
-  "task": "Fix provider retries"
-}
-```
-
-Tool: `remote_session_create`.
+MCP tool: `remote_session_create`.
 
 ## Agent leases and active-session registry
 
@@ -156,15 +146,8 @@ agentport session status <session-id>
 agentport session diff <session-id>
 ```
 
-The Diff response contains:
-
-- short branch/status output
-- Diff stat
-- unstaged Diff
-- staged Diff
-- truncation and byte information
-
-Diff output is bounded by `AGENTPORT_MAX_DIFF_BYTES`.
+The Diff response contains short status, Diff stat, unstaged Diff, staged Diff,
+and truncation information. Output is bounded by `AGENTPORT_MAX_DIFF_BYTES`.
 
 ## Commit
 
@@ -176,10 +159,8 @@ agentport session commit <session-id> \
 ```
 
 The server uses argument-array Git execution rather than shell command
-construction. By default all Worktree changes are added before commit. Author
-name and email may be supplied explicitly.
-
-AgentPort does not push automatically.
+construction. By default all Worktree changes are added before commit. AgentPort
+does not push automatically.
 
 ## Merge safety
 
@@ -191,18 +172,13 @@ Merge is intentionally stricter than commit. It requires:
 - a clean primary project checkout
 - the primary checkout already on the requested target branch
 
-Example:
-
 ```bash
 agentport session merge <session-id> \
   --confirm <session-id> \
   --target main
 ```
 
-Supported strategies:
-
-- `no-ff` (default)
-- `ff-only`
+Supported strategies are `no-ff` (default) and `ff-only`.
 
 AgentPort does not silently checkout another branch in the primary project. This
 avoids replacing a user's current branch behind their back.
@@ -280,8 +256,7 @@ Tests cover:
 
 - real Git repository and Worktree creation
 - primary branch isolation
-- rule-file discovery
-- lease renewal
+- rule-file discovery and lease renewal
 - Diff generation
 - explicit rollback confirmation
 - commit on the Agent branch
@@ -292,10 +267,15 @@ Tests cover:
 - client idempotent retry
 - MCP Session tool calls
 
+A full spawned three-layer production-entrypoint smoke-test file was attempted
+during this phase but was not added because the connected GitHub write action
+was blocked. The committed tests validate the Session service, front Gateway,
+client adapter, persistent Job integration, and MCP tools separately. A real
+Debian gray deployment and restart test remains required before merging.
+
 ## Remaining work
 
-Phase 5 provides the core APIs and workflow. Later product work may add:
-
+- real Debian gray deployment and restart validation
 - a richer browser Dashboard over `/api/dev/overview`
 - automatic stale-session cleanup policies
 - review/approval states before merge
