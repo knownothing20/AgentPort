@@ -3,20 +3,22 @@
 This directory is the explicit **remote/server side** of AgentPort. It runs once
 on the Linux development server and serves multiple local AgentPort clients.
 
-## Public gateway and legacy compatibility
+## Public gateway and compatibility layers
 
-`server-entry.cjs` starts two cooperating processes:
+`server-entry.cjs` now starts three cooperating layers:
 
 ```text
 LAN / virtual-LAN clients
-  -> public modular gateway (PORT, default 3183)
-       -> daemon-core file, search, exec, and job services
-       -> loopback-only legacy daemon for dashboard, config, and diagnostics
+  -> public development gateway (PORT, default 3183)
+       -> Worktree development-session API
+       -> loopback modular gateway
+            -> daemon-core file, search, exec, and Job services
+            -> loopback legacy daemon for dashboard, config, token, and diagnostics
 ```
 
-The legacy daemon binds to `127.0.0.1` on a dynamically selected internal port.
-It is no longer exposed directly when the new source-tree entrypoint is used.
-Unextracted paths are proxied to it without changing the public URLs.
+Only the development gateway binds to the public LAN address. The modular and
+legacy services use dynamically selected `127.0.0.1` ports and remain private to
+the server.
 
 ## Routes owned by the modular gateway
 
@@ -40,9 +42,10 @@ Unextracted paths are proxied to it without changing the public URLs.
 - `/api/batch`
 
 The execution service applies one shared command policy, workspace-bound working
-directories, output limits, command timeouts, and a concurrency queue.
+directories, output limits, command timeouts, process-tree cleanup, and a
+concurrency queue.
 
-### Persistent jobs
+### Persistent Jobs
 
 - `GET|POST /api/jobs`
 - `POST /api/jobs/start`
@@ -53,11 +56,42 @@ directories, output limits, command timeouts, and a concurrency queue.
 - `POST /api/jobs/:jobId/delete`
 - `GET /api/task/:taskId`
 
-Every new job runs in an independent detached Worker. Its metadata, result, and
-stdout/stderr are stored on disk, so the public Gateway can restart without
+Every new Job runs in an independent detached Worker. Its metadata, result, and
+stdout/stderr are stored on disk, so the public gateways can restart without
 losing the task.
 
-## Idempotent job submission
+## Development-session routes
+
+The public development gateway owns:
+
+- `GET /api/dev/overview`
+- `GET|POST /api/dev/sessions`
+- `GET /api/dev/sessions/:sessionId`
+- `POST /api/dev/sessions/:sessionId/heartbeat`
+- `POST /api/dev/sessions/:sessionId/run`
+- `GET|POST /api/dev/sessions/:sessionId/diff`
+- `POST /api/dev/sessions/:sessionId/commit`
+- `POST /api/dev/sessions/:sessionId/rollback`
+- `POST /api/dev/sessions/:sessionId/merge`
+- `POST /api/dev/sessions/:sessionId/cleanup`
+
+Each Session creates a unique Git branch and Worktree. Standard project commands
+run as persistent Jobs with the Worktree forced as `cwd`.
+
+Short lease-aware project locks serialize Worktree creation, merge, cleanup, and
+branch deletion. Editing and builds in different Worktrees remain parallel.
+
+Merge safety requires:
+
+- explicit Session ID confirmation
+- no active attached Jobs unless force is explicit
+- a clean Session Worktree
+- a clean primary project checkout
+- the primary checkout already on the requested target branch
+
+AgentPort never silently switches the primary project's current branch.
+
+## Idempotent Job submission
 
 Long-running tasks may be submitted with a stable key:
 
@@ -74,10 +108,10 @@ Content-Type: application/json
 
 Repeating the same key and parameters returns the existing `jobId` with
 `reused: true`. Reusing the key with different parameters returns HTTP 409.
-The body fields `idempotencyKey` and `key`, plus `X-Idempotency-Key`, are also
-accepted for compatibility.
 
-## Cursor-based job logs
+Session actions use the same Job service and idempotency mechanism.
+
+## Cursor-based Job logs
 
 The first log request returns stdout, stderr, and a cursor:
 
@@ -96,15 +130,16 @@ The older `tailBytes` and `bytes` parameters remain supported.
 
 ## Entrypoints
 
-- `server-entry.cjs`: public modular gateway entrypoint.
-- `modular-gateway.cjs`: extracted HTTP routes, auth compatibility, audit, and
-  reverse proxy.
+- `server-entry.cjs`: public Phase 5 development gateway entrypoint.
+- `development-gateway.cjs`: Worktree Session API, Job attachment, overview, and
+  reverse proxy to the modular gateway.
+- `modular-gateway.cjs`: extracted file, execution, and Job routes plus proxy to
+  the remaining legacy management service.
 - `legacy-process.cjs`: starts and supervises the loopback legacy daemon.
 - `config-loader.cjs`: reloadable `.env`, tokens, identity, workspace, execution,
-  and job settings.
-- `../packages/daemon-core/`: filesystem, command policy, execution queue,
-  synchronous executor, persistent job store/service/Worker, and process-tree
-  controls.
+  and Job settings.
+- `../packages/daemon-core/development-session-service.cjs`: Git repository,
+  Worktree, lease, lock, Diff, commit, merge, rollback, and cleanup lifecycle.
 - `../server/`: legacy dashboard, config, diagnostics, and compatibility code.
 
 ## Start from the source tree
@@ -123,26 +158,27 @@ Useful optional variables:
 AGENTPORT_SERVER_ID=debian-main
 AGENTPORT_WORKSPACE_ID=projects
 AGENTPORT_PUBLIC_PORT=3183
-AGENTPORT_LEGACY_PORT=3184
 
 EXEC_MAX_CONCURRENCY=2
 JOB_MAX_CONCURRENCY=2
 JOB_DEFAULT_TIMEOUT_MS=1800000
+
+AGENTPORT_SESSIONS_DIR=/home/leon/.agentport/sessions
+AGENTPORT_WORKTREES_DIR=/home/leon/.agentport/worktrees
+AGENTPORT_SESSION_LEASE_MS=1800000
 ```
 
-If `AGENTPORT_LEGACY_PORT` is omitted, a free loopback port is selected.
 See `.env.example` for the complete settings.
 
 ## Deployment compatibility
 
 Existing installations that copy only `server/` continue to run the legacy
-single-process daemon. They do not receive the modular services until the new
-`daemon/`, `packages/daemon-core/`, and `server/` directories are deployed
-together and `daemon/server-entry.cjs` becomes the service entrypoint.
+single-process daemon. They do not receive modular file/exec/Job or Worktree
+Session services until `daemon/`, `packages/daemon-core/`, and `server/` are
+deployed together and `daemon/server-entry.cjs` becomes the service entrypoint.
 
-The modular Job service reuses the existing `JOBS_DIR` by default. It can read
-legacy job metadata and paths while all newly submitted jobs use detached
-Workers, idempotency records, and cursor logs.
+The modular Job service reuses the existing `JOBS_DIR` by default. Session and
+Worktree paths are separate and configurable.
 
 ## Validation
 
@@ -151,9 +187,13 @@ npm run test:architecture
 npm run test:gateway
 npm run test:exec
 npm run test:jobs
+npm run test:sessions
 npm run test:lifecycle
 ```
 
-Cross-platform tests cover the file gateway and synchronous execution on Windows
-and Linux. Linux additionally validates detached Worker lifecycle, persistent
-metadata, idempotency, cancellation, and cursor-based logs.
+Cross-platform tests cover the client runtime and synchronous execution on
+Windows and Linux. Linux additionally validates detached Workers, real Git
+Worktrees, project locks, Diff, commit, merge, cleanup, Session Job attachment,
+and MCP Session tool calls.
+
+See `docs/PHASE5_DEVELOPMENT_SESSIONS.md` for the full workflow and safety rules.
