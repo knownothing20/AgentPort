@@ -1,0 +1,8 @@
+{
+  "name": "@agentport/daemon",
+  "private": true,
+  "main": "server-entry.cjs",
+  "scripts": {
+    "start": "node server-entry.cjs"
+  }
+}
