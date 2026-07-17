@@ -59,6 +59,17 @@ function parseAdminTokens(values) {
   return new Set(String(values.ADMIN_TOKENS || "").split(",").map((item) => item.trim()).filter(Boolean));
 }
 
+function intValue(value, fallback, min = 0, max = Number.MAX_SAFE_INTEGER) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(Math.max(parsed, min), max);
+}
+
+function boolValue(value, fallback = false) {
+  if (value === undefined || value === null || value === "") return fallback;
+  return !/^(0|false|no|off)$/i.test(String(value).trim());
+}
+
 async function firstExisting(paths) {
   for (const candidate of paths) {
     if (!candidate) continue;
@@ -116,16 +127,40 @@ function createDaemonConfigLoader({ baseDir = __dirname, envPath } = {}) {
     if (legacyToken && tokenClientMap.size === 0) tokenClientMap.set(legacyToken, "legacy-client");
 
     const workspaceRoot = path.resolve(runtimeWorkspaceRoot || values.WORKSPACE_ROOT || "/home/user/workspace");
+    const jobsDir = path.resolve(values.AGENTPORT_JOBS_DIR || values.JOBS_DIR || path.join(baseDir, "..", "server", "jobs"));
+    const execTimeoutMs = intValue(values.EXEC_TIMEOUT_MS, 120_000, 1000, 24 * 60 * 60_000);
+    const jobMaxTimeoutMs = intValue(values.MAX_JOB_TIMEOUT_MS, 7 * 24 * 60 * 60_000, 1000, 30 * 24 * 60 * 60_000);
+
     return {
       envPath: file.filePath,
       values,
       workspaceRoot,
+      jobsDir,
       serverId: String(values.AGENTPORT_SERVER_ID || values.SERVER_ID || os.hostname()).trim(),
       workspaceId: String(values.AGENTPORT_WORKSPACE_ID || values.WORKSPACE_ID || workspaceRoot).trim(),
       auditLogPath: path.resolve(values.AUDIT_LOG_PATH || path.join(baseDir, "..", "server", "audit.log")),
       tokenClientMap,
       adminTokens: parseAdminTokens(values),
       dashboardEnabled: /^true$/i.test(String(values.ENABLE_DASHBOARD || "false")),
+      command: Object.freeze({
+        allowExec: boolValue(values.ALLOW_BASH_EXEC, true),
+        allowedCommands: String(values.ALLOWED_COMMANDS || ""),
+        allowedInterpreters: String(values.ALLOWED_INTERPRETERS || ""),
+      }),
+      exec: Object.freeze({
+        timeoutMs: execTimeoutMs,
+        maxTimeoutMs: intValue(values.MAX_EXEC_TIMEOUT_MS, 24 * 60 * 60_000, execTimeoutMs, 7 * 24 * 60 * 60_000),
+        maxConcurrency: intValue(values.EXEC_MAX_CONCURRENCY, 2, 1, 128),
+        queueTimeoutMs: intValue(values.EXEC_QUEUE_TIMEOUT_MS, 15_000, 0, 10 * 60_000),
+        maxBufferBytes: intValue(values.EXEC_MAX_BUFFER_BYTES, 10 * 1024 * 1024, 1024, 100 * 1024 * 1024),
+      }),
+      jobs: Object.freeze({
+        maxConcurrency: intValue(values.JOB_MAX_CONCURRENCY || values.AGENTPORT_JOB_MAX_CONCURRENCY, 2, 1, 64),
+        queueTimeoutMs: intValue(values.JOB_QUEUE_TIMEOUT_MS || values.AGENTPORT_JOB_QUEUE_TIMEOUT_MS, 15_000, 0, 10 * 60_000),
+        defaultTimeoutMs: intValue(values.JOB_DEFAULT_TIMEOUT_MS || values.AGENTPORT_JOB_DEFAULT_TIMEOUT_MS, 30 * 60_000, 0, jobMaxTimeoutMs),
+        maxTimeoutMs: jobMaxTimeoutMs,
+        logChunkBytes: intValue(values.JOB_LOG_CHUNK_BYTES || values.JOB_LOG_TAIL_BYTES, 64 * 1024, 1024, 5 * 1024 * 1024),
+      }),
     };
   }
 
@@ -137,17 +172,14 @@ function createDaemonConfigLoader({ baseDir = __dirname, envPath } = {}) {
     runtimeWorkspaceRoot = "";
   }
 
-  return Object.freeze({
-    load,
-    resolveEnvPath,
-    setWorkspaceRoot,
-    clearWorkspaceRootOverride,
-  });
+  return Object.freeze({ load, resolveEnvPath, setWorkspaceRoot, clearWorkspaceRootOverride });
 }
 
 module.exports = {
+  boolValue,
   createDaemonConfigLoader,
   decodeEnvValue,
+  intValue,
   parseAdminTokens,
   parseEnvText,
   parseTokenMap,
