@@ -98,11 +98,29 @@ async function main() {
     async load() {
       return {
         workspaceRoot: root,
+        jobsDir: path.join(root, '.jobs'),
         serverId: 'srv-test',
         workspaceId: 'ws-test',
         auditLogPath: path.join(root, 'audit.log'),
         tokenClientMap: new Map([['secret', 'client-a']]),
+        adminTokens: new Set(),
+        dashboardEnabled: false,
         values: {},
+        command: { allowExec: true, allowedCommands: '', allowedInterpreters: '' },
+        exec: {
+          timeoutMs: 5000,
+          maxTimeoutMs: 60_000,
+          maxConcurrency: 2,
+          queueTimeoutMs: 500,
+          maxBufferBytes: 1024 * 1024,
+        },
+        jobs: {
+          maxConcurrency: 1,
+          queueTimeoutMs: 500,
+          defaultTimeoutMs: 5000,
+          maxTimeoutMs: 60_000,
+          logChunkBytes: 4096,
+        },
       };
     },
     setWorkspaceRoot() {},
@@ -117,6 +135,7 @@ async function main() {
     assert.equal(health.status, 200);
     assert.equal(health.json.serverId, 'srv-test');
     assert.equal(health.json.capabilities.atomicWrite, true);
+    assert.equal(health.json.capabilities.persistentJobWorker, true);
 
     const unauthorized = await request(port, 'POST', '/api/fs/read', { path: 'src/a.js' });
     assert.equal(unauthorized.status, 401);
@@ -149,14 +168,19 @@ async function main() {
     const bytes = await request(port, 'POST', '/api/fs/read-bytes', { path: 'src/new.txt', offset: 4, length: 7 }, auth);
     assert.equal(Buffer.from(bytes.json.contentBase64, 'base64').toString(), 'content');
 
-    const proxied = await request(port, 'GET', '/api/jobs');
+    const jobs = await request(port, 'GET', '/api/jobs', undefined, auth);
+    assert.equal(jobs.status, 200);
+    assert.equal(jobs.json.success, true);
+    assert.equal(jobs.json.count, 0);
+
+    const proxied = await request(port, 'GET', '/legacy-route', undefined, auth);
     assert.equal(proxied.json.proxied, true);
   } finally {
     await close(gateway);
     await close(legacy);
     await fs.rm(root, { recursive: true, force: true });
   }
-  console.log('PASS daemon modular gateway and file search');
+  console.log('PASS daemon modular gateway, file search, and job compatibility');
 }
 
 main().catch((error) => { console.error(error.stack || error); process.exit(1); });
