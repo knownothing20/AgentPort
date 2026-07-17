@@ -3,5 +3,6 @@ module.exports = {
   ...require("./key-lock.cjs"),
   ...require("./atomic-write.cjs"),
   ...require("./file-read-service.cjs"),
+  ...require("./file-search-service.cjs"),
   ...require("./file-write-service.cjs"),
 };
