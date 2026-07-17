@@ -22,9 +22,10 @@ jobs:
       - run: node test-architecture.cjs
       - run: node test-daemon-gateway.cjs
       - run: node test-exec-core.cjs
+      - run: node test-client-runtime.cjs
 
   durable-linux:
-    name: Legacy and durable jobs (Ubuntu, Node 22)
+    name: Legacy, durable jobs, and MCP V3 (Ubuntu, Node 22)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,3 +37,4 @@ jobs:
       - run: npm run test:lifecycle
       - run: node test-job-service.cjs
       - run: node test-daemon-exec-jobs.cjs
+      - run: node test-client-mcp-v3.cjs
