@@ -19,8 +19,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
+      - run: node test-architecture.cjs
+
+  legacy-linux:
+    name: Legacy lifecycle (Ubuntu, Node 22)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run test:architecture
-      - if: runner.os == 'Linux'
-        run: npm run test:lifecycle
+      - run: npm run test:lifecycle
