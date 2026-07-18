@@ -37,6 +37,19 @@ jobs:
       - run: node test-development-gateway.cjs
       - run: node test-client-redaction.cjs
       - run: node test-daemon-response-redaction.cjs
+
+  windows-jobs:
+    name: Job Service (windows-latest, Node ${{ matrix.node }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
       - run: node test-job-service.cjs
 
   durable-linux:
