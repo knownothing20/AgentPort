@@ -4,6 +4,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { URL } = require('node:url');
 const { createDevelopmentSessionService } = require('../packages/daemon-core/development-session-service.cjs');
+const { assertResourceOwner, filterOwnedResources, normalizeAuthContext } = require('./auth-context.cjs');
 
 function readBody(req, maxBytes = 10 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
@@ -102,10 +103,10 @@ function route(pathname) {
   return match ? { action: match[2] || 'item', sessionId: decodeURIComponent(match[1]) } : null;
 }
 
-function createDevelopmentFrontServer({ baseOrigin, configLoader, authorizeApi, serviceFactory, maxBodyBytes = 10 * 1024 * 1024 } = {}) {
+function createDevelopmentFrontServer({ baseOrigin, configLoader, authorizeApi, authorizeContext, serviceFactory, maxBodyBytes = 10 * 1024 * 1024 } = {}) {
   if (!baseOrigin) throw new TypeError('baseOrigin is required');
   if (!configLoader) throw new TypeError('configLoader is required');
-  if (!authorizeApi) throw new TypeError('authorizeApi is required');
+  if (!authorizeApi && !authorizeContext) throw new TypeError('authorizeApi or authorizeContext is required');
   const services = new Map();
   function serviceFor(config) {
     const home = config.values?.HOME || process.env.HOME || path.dirname(config.workspaceRoot);
@@ -119,6 +120,7 @@ function createDevelopmentFrontServer({ baseOrigin, configLoader, authorizeApi, 
         worktreesDir,
         defaultLeaseMs: Number(config.values?.AGENTPORT_SESSION_LEASE_MS || 1_800_000),
         lockTimeoutMs: Number(config.values?.AGENTPORT_PROJECT_LOCK_TIMEOUT_MS || 15_000),
+        projectLockLeaseMs: Number(config.values?.AGENTPORT_PROJECT_LOCK_LEASE_MS || 300_000),
         maxDiffBytes: Number(config.values?.AGENTPORT_MAX_DIFF_BYTES || 2_097_152),
       }));
     }
@@ -174,15 +176,17 @@ function createDevelopmentFrontServer({ baseOrigin, configLoader, authorizeApi, 
       if (!developmentRoute) return proxy(req, res, baseOrigin);
 
       const config = await configLoader.load();
-      const clientId = authorizeApi(req, url, config);
+      const auth = normalizeAuthContext(authorizeContext ? authorizeContext(req, url, config) : authorizeApi(req, url, config));
+      const clientId = auth.clientId;
       const service = serviceFor(config);
       const headers = authHeaders(req.headers);
 
       if (developmentRoute.action === 'overview' && req.method === 'GET') {
-        const [sessions, jobs] = await Promise.all([
-          service.list({ limit: url.searchParams.get('limit') || 100 }),
+        const [allSessions, jobs] = await Promise.all([
+          service.list({ limit: 500 }),
           baseRequest(baseOrigin, { route: '/api/jobs?limit=100', headers, timeoutMs: 10_000 }).catch((error) => ({ status: 502, data: { error: error.message, jobs: [] } })),
         ]);
+        const sessions = filterOwnedResources(allSessions, auth).slice(0, Math.min(Math.max(Number(url.searchParams.get('limit') || 100), 1), 500));
         return sendJson(res, 200, {
           success: true,
           serverId: config.serverId,
@@ -194,18 +198,16 @@ function createDevelopmentFrontServer({ baseOrigin, configLoader, authorizeApi, 
         });
       }
       if (developmentRoute.action === 'collection' && req.method === 'GET') {
-        return sendJson(res, 200, {
-          success: true,
-          sessions: await service.list({ limit: url.searchParams.get('limit'), status: url.searchParams.get('status'), projectName: url.searchParams.get('projectName') }),
-          runtime: await service.stats(),
-        });
+        const requestedLimit = Math.min(Math.max(Number(url.searchParams.get('limit') || 100), 1), 500);
+        const sessions = filterOwnedResources(await service.list({ limit: 500, status: url.searchParams.get('status'), projectName: url.searchParams.get('projectName') }), auth).slice(0, requestedLimit);
+        return sendJson(res, 200, { success: true, sessions, runtime: await service.stats() });
       }
       if (developmentRoute.action === 'collection' && req.method === 'POST') {
         const body = await readJson(req, maxBodyBytes);
         return sendJson(res, 200, { success: true, session: await service.create({ ...body, clientId }) });
       }
 
-      const session = await service.status(developmentRoute.sessionId);
+      const session = assertResourceOwner(await service.status(developmentRoute.sessionId), auth, "Session");
       if (developmentRoute.action === 'item' && req.method === 'GET') {
         return sendJson(res, 200, { success: true, session: { ...session, jobs: await jobsFor(session, headers) } });
       }
@@ -273,7 +275,7 @@ async function startDevelopmentGateway(options = {}) {
   const base = await modular.startAgentPortGateway({ port: internalPort, host: '127.0.0.1', configLoader });
   const publicPort = Number(options.port ?? process.env.AGENTPORT_PUBLIC_PORT ?? config.values.PORT ?? 3183);
   const publicHost = String(options.host ?? process.env.AGENTPORT_PUBLIC_HOST ?? config.values.BIND_HOST ?? '0.0.0.0');
-  const server = createDevelopmentFrontServer({ baseOrigin: `http://127.0.0.1:${internalPort}`, configLoader, authorizeApi: modular.authorizeApi });
+  const server = createDevelopmentFrontServer({ baseOrigin: `http://127.0.0.1:${internalPort}`, configLoader, authorizeApi: modular.authorizeApi, authorizeContext: modular.authorizeApiContext });
   await listen(server, publicPort, publicHost);
   console.log(`AgentPort development gateway running on ${publicHost}:${publicPort}`);
   console.log(`modular=http://127.0.0.1:${internalPort}`);
