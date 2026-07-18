@@ -5,31 +5,11 @@ on:
     branches: ["agent/refactor-dual-end-architecture"]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   export:
-    if: github.actor != 'github-actions[bot]'
+    if: false
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: agent/refactor-dual-end-architecture
-      - uses: actions/upload-artifact@v4
-        with:
-          name: agentport-source-${{ github.sha }}
-          path: |
-            .
-            !.git
-            !node_modules
-            !server/node_modules
-          include-hidden-files: true
-          retention-days: 1
-      - name: Record export run
-        run: |
-          printf '%s\n' '${{ github.run_id }}' > .source-export-run-id
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .source-export-run-id
-          git commit -m "chore: record source export run"
-          git push origin HEAD:agent/refactor-dual-end-architecture
+      - run: echo "Source export completed and disabled"
