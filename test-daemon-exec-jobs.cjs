@@ -29,8 +29,8 @@ async function main() {
     serverId: "server-test",
     workspaceId: "workspace-test",
     auditLogPath: path.join(root, "audit.log"),
-    tokenClientMap: new Map([["token", "client"]]),
-    adminTokens: new Set(),
+    tokenClientMap: new Map([["token-a", "client-a"], ["token-b", "client-b"]]),
+    adminTokens: new Set(["admin-token"]),
     dashboardEnabled: false,
     values: { PORT: "0", BIND_HOST: "127.0.0.1" },
     command: { allowExec: true, allowedCommands: "", allowedInterpreters: "" },
@@ -41,7 +41,9 @@ async function main() {
   const gateway = createAgentPortGateway({ legacyOrigin: `http://127.0.0.1:${legacyPort}`, configLoader });
   const gatewayPort = await listen(gateway);
   const base = `http://127.0.0.1:${gatewayPort}`;
-  const headers = { authorization: "Bearer token", "x-mcp-client-id": "client", "content-type": "application/json" };
+  const headers = { authorization: "Bearer token-a", "x-mcp-client-id": "client-a", "content-type": "application/json" };
+  const headersB = { authorization: "Bearer token-b", "x-mcp-client-id": "client-b", "content-type": "application/json" };
+  const adminHeaders = { authorization: "Bearer admin-token", "content-type": "application/json" };
 
   try {
     let response = await fetch(`${base}/healthz`);
@@ -75,6 +77,26 @@ async function main() {
       return value.status === "completed" ? value : null;
     });
     assert.match(task.stdout, /gateway-job/);
+
+    response = await fetch(`${base}/api/jobs`, { headers: headersB });
+    body = await response.json();
+    assert.equal(body.jobs.some((job) => job.id === jobId), false);
+    for (const [method, route] of [
+      ['GET', `/api/jobs/${jobId}`], ['GET', `/api/jobs/${jobId}/logs`], ['GET', `/api/task/${jobId}`],
+      ['POST', `/api/jobs/${jobId}/cancel`], ['POST', `/api/jobs/${jobId}/delete`],
+    ]) {
+      const denied = await fetch(`${base}${route}`, { method, headers: headersB });
+      const deniedBody = await denied.json();
+      assert.equal(denied.status, 403);
+      assert.equal(deniedBody.code, 'EOWNER');
+    }
+    const adminView = await fetch(`${base}/api/jobs/${jobId}`, { headers: adminHeaders });
+    assert.equal(adminView.status, 200);
+
+    response = await fetch(`${base}/api/exec/async`, { method: 'POST', headers: { ...headersB, 'idempotency-key': 'gateway-job' }, body: JSON.stringify({ command: jobCommand, cwd: root }) });
+    body = await response.json();
+    assert.equal(body.reused, false);
+    assert.notEqual(body.jobId, jobId);
 
     response = await fetch(`${base}/api/jobs/${jobId}/logs`, { headers });
     body = await response.json();
