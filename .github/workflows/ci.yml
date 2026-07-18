@@ -52,6 +52,8 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - run: node test-job-service.cjs
+      - run: node test-daemon-exec-jobs.cjs
+      - run: node test-daemon-exec-jobs.cjs
 
   durable-linux:
     name: Legacy, durable jobs, Worktrees, and MCP V3 (Ubuntu, Node 22)
