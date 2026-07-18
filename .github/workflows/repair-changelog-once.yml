@@ -18,6 +18,7 @@ jobs:
           fetch-depth: 0
       - name: Restore history and prepend 3.1.0
         run: |
+          echo "Repairing CHANGELOG from main history"
           git fetch origin main
           python - <<'PY'
           from pathlib import Path
