@@ -1,6 +1,8 @@
 # Local runtime config (never commit real secrets)
 local/agentport.json
 local/connections.json
+local/connections.v3.json
+local/projects.json
 local/cli-state.json
 local/runtime-mode.json
 local/runtime/
@@ -15,6 +17,7 @@ WHITEPAPER.md
 
 # Generated
 server/.env
+daemon/.env
 
 # Dependencies
 node_modules/

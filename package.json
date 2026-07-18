@@ -1,15 +1,29 @@
 {
   "name": "agentport",
-  "version": "2.5.0",
-  "description": "AgentPort remote development gateway for MCP, CLI, SSH recovery, and persistent daemon jobs",
+  "version": "3.1.0",
+  "description": "AgentPort dual-end remote development gateway for MCP, CLI, SSH recovery, persistent jobs, and Git Worktree sessions",
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "start": "node index.js",
-    "cli": "node cli.js",
+    "start": "node client/mcp-entry.js",
+    "start:legacy": "node index.js",
+    "start:client": "node client/mcp-entry.js",
+    "client:cli": "node client/cli-entry.js",
+    "start:daemon": "node daemon/server-entry.cjs",
+    "cli": "node client/cli-entry.js",
+    "cli:legacy": "node cli.js",
     "doctor": "node cli.js doctor",
     "setup": "node setup.js",
     "test": "node test.cjs",
+    "test:architecture": "node test-architecture.cjs",
+    "test:gateway": "node test-daemon-gateway.cjs",
+    "test:exec": "node test-exec-core.cjs",
+    "test:jobs": "node test-job-service.cjs && node test-daemon-exec-jobs.cjs",
+    "test:client": "node test-client-runtime.cjs && node test-client-development-sessions.cjs",
+    "test:sessions": "node test-project-lock.cjs && node test-development-session-service.cjs && node test-development-gateway.cjs",
+    "test:mcp:v3": "node test-client-mcp-v3.cjs",
+    "test:security": "node test-client-redaction.cjs && node test-mcp-redaction.cjs && node test-job-worker-readiness.cjs && node test-daemon-response-redaction.cjs",
+    "test:all": "npm run test:architecture && npm run test:gateway && npm run test:exec && npm run test:client && npm run test:jobs && npm run test:sessions && npm run test:security && npm run test:lifecycle && npm run test:mcp:v3",
     "test:lifecycle": "node test-cli-lifecycle.cjs",
     "test:mcp": "node test-mcp-windowless.cjs",
     "test:mcp:remote": "node test-mcp-windowless.cjs --remote",
@@ -19,11 +33,19 @@
     "sync:skills": "node sync.cjs --skills"
   },
   "bin": {
-    "agentport": "./cli.js"
+    "agentport": "./client/cli-entry.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "axios": "^1.6.8",
+    "axios": "^1.16.0",
     "ssh2": "1.15.0"
+  },
+  "overrides": {
+    "hono": "^4.12.30",
+    "express-rate-limit": "^8.6.0",
+    "fast-uri": "^3.1.3",
+    "form-data": "^4.0.6",
+    "ip-address": "^10.2.0",
+    "qs": "^6.15.3"
   }
 }

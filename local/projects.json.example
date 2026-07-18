@@ -1,0 +1,17 @@
+{
+  "projects": {
+    "script2shorts": {
+      "server": "debian-main",
+      "root": "/home/YOUR_USER/projects/script2shorts",
+      "defaultBranch": "main",
+      "packageManager": "pnpm",
+      "agentRules": ["AGENTS.md", "AI_INSTRUCTIONS.md"],
+      "commands": {
+        "install": "pnpm install",
+        "lint": "pnpm lint",
+        "test": "pnpm test",
+        "build": "pnpm build"
+      }
+    }
+  }
+}

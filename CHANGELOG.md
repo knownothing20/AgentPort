@@ -1,5 +1,24 @@
 # Changelog
 
+## [3.1.0] - 2026-07-18 | Dual-end daemon, durable Jobs, and Worktree Sessions
+
+### Added
+- Added the modular V3 file, execution, persistent Job, connection-registry, and Git Worktree Session architecture while retaining compatibility entrypoints.
+- Added owner/admin authorization boundaries for Session and Job resources, client-scoped idempotency, and adversarial two-client tests.
+- Added bounded line-range reads with explicit output and scan limits, metadata cache ETags, and no unbounded full-file hashing.
+- Added atomic owner-aware project locks that cannot expire while the owning operation is alive.
+
+### Fixed
+- Fixed zero-delay Job completion, Worker readiness diagnostics, process-tree cancellation, Windows 8.3 path handling, and temporary-directory cleanup races.
+- Fixed Session subprocess output races by waiting for stdout/stderr close before returning Git results.
+- Fixed server lockfile reproducibility and patched dependency audit findings.
+- Unified credential and command-response redaction across CLI, MCP, Runtime, Job, Session, and public daemon responses.
+
+### Validated
+- Passed Windows and Ubuntu Node.js 20/22 CI, clean server installation, moderate-level audits, repeated Windows Job cleanup tests, atomic-lock 1000-round contention tests, and physical Windows + Debian gray validation.
+
+---
+
 ## [2026-06-25] feat | Stable payload write and script channel
 
 ### Added

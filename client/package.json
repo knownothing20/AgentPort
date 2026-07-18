@@ -1,0 +1,9 @@
+{
+  "name": "@agentport/client",
+  "private": true,
+  "type": "module",
+  "main": "mcp-entry.js",
+  "bin": {
+    "agentport": "cli-entry.js"
+  }
+}

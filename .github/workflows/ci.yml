@@ -1,0 +1,83 @@
+name: AgentPort CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: agentport-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  architecture:
+    name: Architecture (${{ matrix.os }}, Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: node test-architecture.cjs
+      - run: node test-daemon-gateway.cjs
+      - run: node test-exec-core.cjs
+      - run: node test-client-runtime.cjs
+      - run: node test-client-development-sessions.cjs
+      - run: node test-project-lock.cjs
+      - run: node test-development-session-service.cjs
+      - run: node test-development-gateway.cjs
+      - run: node test-client-redaction.cjs
+      - run: node test-daemon-response-redaction.cjs
+
+  windows-jobs:
+    name: Job Service (windows-latest, Node ${{ matrix.node }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: node test-job-service.cjs
+      - run: node test-daemon-exec-jobs.cjs
+      - run: node test-daemon-exec-jobs.cjs
+
+  durable-linux:
+    name: Legacy, durable jobs, Worktrees, and MCP V3 (Ubuntu, Node 22)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run test:lifecycle
+      - run: node test-job-service.cjs
+      - run: node test-job-worker-readiness.cjs
+      - run: node test-daemon-exec-jobs.cjs
+      - run: node test-project-lock.cjs
+      - run: node test-development-session-service.cjs
+      - run: node test-development-gateway.cjs
+      - run: node test-client-mcp-v3.cjs
+      - run: node test-mcp-redaction.cjs
+      - run: node test-daemon-response-redaction.cjs
+      - run: npm audit --audit-level=moderate
+      - name: Clean-install and verify legacy daemon dependencies
+        run: |
+          npm --prefix server ci --ignore-scripts --no-audit --no-fund
+          node -e "const v=require('./server/node_modules/qs/package.json').version;if(v!=='6.15.3')throw new Error('Expected qs 6.15.3, got '+v)"
+      - run: npm --prefix server audit --audit-level=moderate
