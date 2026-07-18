@@ -14,6 +14,14 @@ const {
 } = require("../packages/daemon-core/index.cjs");
 const { createDaemonConfigLoader } = require("./config-loader.cjs");
 const { startLegacyProcess } = require("./legacy-process.cjs");
+const {
+  assertResourceOwner,
+  authorizeContext,
+  extractToken: extractAuthToken,
+  filterOwnedResources,
+  requestedClientId: requestedAuthClientId,
+  scopeIdempotencyKey,
+} = require("./auth-context.cjs");
 
 const FILE_ROUTES = Object.freeze({
   read: new Set(["/read", "/api/fs/read"]),
@@ -33,42 +41,10 @@ const EXEC_ROUTES = Object.freeze({
 
 function nowIso() { return new Date().toISOString(); }
 
-function extractToken(req, url) {
-  if (url.searchParams.get("token")) return url.searchParams.get("token");
-  const authorization = req.headers.authorization;
-  const alternate = req.headers["x-mcp-token"] || req.headers["x-niuma-token"];
-  const raw = (typeof authorization === "string" && authorization.trim())
-    || (typeof alternate === "string" && alternate.trim())
-    || "";
-  return raw.startsWith("Bearer ") ? raw.slice(7).trim() : raw;
-}
-
-function requestedClientId(req) {
-  const value = req.headers["x-mcp-client-id"] || req.headers["x-niuma-client-id"] || req.headers["x-client-id"];
-  return typeof value === "string" ? value.trim() : "";
-}
-
-function authorizeApi(req, url, config) {
-  if (config.tokenClientMap.size === 0) {
-    const error = new Error("Server auth not configured");
-    error.statusCode = 500;
-    throw error;
-  }
-  const token = extractToken(req, url);
-  const clientId = config.tokenClientMap.get(token);
-  if (!clientId) {
-    const error = new Error("Unauthorized");
-    error.statusCode = 401;
-    throw error;
-  }
-  const requested = requestedClientId(req);
-  if (requested && requested !== clientId) {
-    const error = new Error("Client ID mismatch");
-    error.statusCode = 403;
-    throw error;
-  }
-  return clientId;
-}
+function extractToken(req, url) { return extractAuthToken(req, url); }
+function requestedClientId(req) { return requestedAuthClientId(req); }
+function authorizeApiContext(req, url, config) { return authorizeContext(req, url, config); }
+function authorizeApi(req, url, config) { return authorizeApiContext(req, url, config).clientId; }
 
 function readBody(req, maxBytes = 50 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
@@ -367,11 +343,12 @@ async function handleJobRoute({
   pathname,
   config,
   services,
-  clientId,
+  auth,
   maxBodyBytes,
   startedAt,
 }) {
   const route = jobRoute(pathname);
+  const clientId = auth.clientId;
   if (!route) return false;
   try {
     if (
@@ -388,7 +365,7 @@ async function handleJobRoute({
         timeoutMs: body.timeoutMs,
         queueTimeoutMs: body.queueTimeoutMs,
         resourceClass: body.resourceClass,
-        idempotencyKey: idempotencyKey(req, body),
+        idempotencyKey: scopeIdempotencyKey(clientId, idempotencyKey(req, body)),
       });
       const job = services.jobs.publicJob(started.job);
       await appendAudit(config, {
@@ -412,10 +389,12 @@ async function handleJobRoute({
     }
 
     if (route.action === "collection" && req.method === "GET") {
-      const jobs = await services.jobs.list({
-        limit: url.searchParams.get("limit") || 50,
+      const requestedLimit = Math.min(Math.max(Number(url.searchParams.get("limit") || 50), 1), 500);
+      const candidates = await services.jobs.list({
+        limit: auth.isAdmin ? requestedLimit : 500,
         status: url.searchParams.get("status") || "",
       });
+      const jobs = filterOwnedResources(candidates, auth).slice(0, requestedLimit);
       sendJson(res, 200, {
         success: true,
         jobs,
@@ -426,12 +405,13 @@ async function handleJobRoute({
     }
 
     if (route.action === "item" && req.method === "GET") {
-      const job = await services.jobs.get(route.jobId);
+      const job = assertResourceOwner(await services.jobs.get(route.jobId), auth, "Job");
       sendJson(res, 200, { success: true, job, ...job });
       return true;
     }
 
     if (route.action === "logs" && req.method === "GET") {
+      assertResourceOwner(await services.jobs.get(route.jobId), auth, "Job");
       const value = await services.jobs.logs(route.jobId, {
         cursor: url.searchParams.get("cursor") || "",
         maxBytes: url.searchParams.get("maxBytes") || undefined,
@@ -444,6 +424,7 @@ async function handleJobRoute({
     }
 
     if (route.action === "cancel" && req.method === "POST") {
+      assertResourceOwner(await services.jobs.get(route.jobId), auth, "Job");
       const value = await services.jobs.cancel(route.jobId);
       await appendAudit(config, {
         type: "job.cancel",
@@ -461,6 +442,7 @@ async function handleJobRoute({
       (route.action === "delete" && req.method === "POST")
       || (route.action === "item" && req.method === "DELETE")
     ) {
+      assertResourceOwner(await services.jobs.get(route.jobId), auth, "Job");
       const value = await services.jobs.remove(route.jobId);
       await appendAudit(config, {
         type: "job.delete",
@@ -474,7 +456,7 @@ async function handleJobRoute({
     }
 
     if (route.action === "task" && req.method === "GET") {
-      const job = await services.jobs.get(route.jobId);
+      const job = assertResourceOwner(await services.jobs.get(route.jobId), auth, "Job");
       const logs = await services.jobs.logs(route.jobId, {
         tailBytes: config.jobs.logChunkBytes,
       });
@@ -708,6 +690,8 @@ function createAgentPortGateway({
             idempotentJobs: true,
             cursorJobLogs: true,
             restartRecoverableJobs: true,
+            resourceOwnership: true,
+            clientScopedIdempotency: true,
           },
         });
       }
@@ -756,7 +740,8 @@ function createAgentPortGateway({
       if (!extracted) return proxyRequest(req, res, legacyOrigin);
 
       const config = await configLoader.load();
-      const clientId = authorizeApi(req, url, config);
+      const auth = authorizeApiContext(req, url, config);
+      const clientId = auth.clientId;
       const services = servicesFor(config);
 
       if (await handleExecRoute({
@@ -777,7 +762,7 @@ function createAgentPortGateway({
         pathname,
         config,
         services,
-        clientId,
+        auth,
         maxBodyBytes,
         startedAt,
       })) return;
@@ -806,6 +791,7 @@ function createAgentPortGateway({
           startLine: body.startLine,
           endLine: body.endLine,
           maxBytes: body.maxBytes,
+          maxScanBytes: body.maxScanBytes,
         });
         const ifNoneMatch = String(
           req.headers["if-none-match"] || body.ifNoneMatch || "",
@@ -992,6 +978,7 @@ module.exports = {
   EXEC_ROUTES,
   FILE_ROUTES,
   authorizeApi,
+  authorizeApiContext,
   createAgentPortGateway,
   extractToken,
   jobRoute,
