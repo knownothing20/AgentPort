@@ -19,6 +19,8 @@ let finishing = false;
 let cancelled = false;
 let timedOut = false;
 let timeout = null;
+let startupReady = false;
+let pendingOutcome = null;
 
 function nowIso() { return new Date().toISOString(); }
 function pidAlive(pid) { try { process.kill(pid, 0); return true; } catch (error) { return error?.code === "EPERM"; } }
@@ -129,6 +131,16 @@ async function finish(status, code, signal, error) {
   process.exit(resultWritten && status === "completed" ? 0 : 1);
 }
 
+function requestFinish(status, code, signal, error) {
+  const outcome = { status, code, signal, error };
+  if (!startupReady) {
+    pendingOutcome ||= outcome;
+    diagnostic("command.finished_during_startup", error, { status, code, signal: signal || null });
+    return;
+  }
+  void finish(status, code, signal, error);
+}
+
 async function main() {
   diagnostic("worker.boot", null, { node: process.version, jobDir });
   const meta = JSON.parse((await fsp.readFile(metaPath, "utf8")).replace(/^\uFEFF/, ""));
@@ -149,21 +161,15 @@ async function main() {
     stdio: ["ignore", "pipe", "pipe"],
     env: { ...process.env, ...(meta.env || {}) },
   });
-  await writeJsonDurable(workerPath, {
-    workerPid: process.pid,
-    commandPid: child.pid || null,
-    phase: "running",
-    startedAt: nowIso(),
-  }, "worker_running");
-  diagnostic("command.started", null, { commandPid: child.pid || null });
 
-  child.stdout.pipe(stdout);
-  child.stderr.pipe(stderr);
-  child.once("error", (error) => { void finish("error", null, null, error); });
+  child.stdout?.pipe(stdout);
+  child.stderr?.pipe(stderr);
+  child.once("error", (error) => { requestFinish("error", null, null, error); });
   child.once("close", (code, signal) => {
     const status = cancelled ? "cancelled" : timedOut ? "timeout" : code === 0 ? "completed" : "error";
-    void finish(status, code, signal, null);
+    requestFinish(status, code, signal, null);
   });
+
   const timeoutMs = Number(meta.timeoutMs || 0);
   if (timeoutMs > 0) {
     timeout = setTimeout(async () => {
@@ -173,6 +179,21 @@ async function main() {
       setTimeout(() => { void stopChild("SIGKILL"); }, 1000).unref?.();
     }, timeoutMs);
     timeout.unref?.();
+  }
+
+  await writeJsonDurable(workerPath, {
+    workerPid: process.pid,
+    commandPid: child.pid || null,
+    phase: "running",
+    startedAt: nowIso(),
+  }, "worker_running");
+  diagnostic("command.started", null, { commandPid: child.pid || null });
+
+  startupReady = true;
+  if (pendingOutcome) {
+    const outcome = pendingOutcome;
+    pendingOutcome = null;
+    await finish(outcome.status, outcome.code, outcome.signal, outcome.error);
   }
 }
 
