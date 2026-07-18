@@ -12,21 +12,39 @@ function shellArg(value) {
   return `'${text.replace(/'/g, `'"'"'`)}'`;
 }
 
-async function waitFor(fn, timeoutMs = 10_000) {
+async function waitFor(fn, timeoutMs = 10_000, message = "Timed out waiting for condition") {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const value = await fn();
     if (value) return value;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error("Timed out waiting for job state");
+  throw new Error(message);
+}
+
+async function waitForWorkerExit(jobs, jobId, timeoutMs = 10_000) {
+  return waitFor(async () => {
+    const job = await jobs.get(jobId);
+    return job.processAlive === false ? job : null;
+  }, timeoutMs, `Timed out waiting for Job Worker '${jobId}' to exit`);
+}
+
+async function removeTempTree(root) {
+  await fs.rm(root, {
+    recursive: true,
+    force: true,
+    maxRetries: process.platform === "win32" ? 20 : 5,
+    retryDelay: 100,
+  });
 }
 
 async function main() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "agentport-job-service-"));
+  let jobs = null;
+  const startedJobIds = [];
   try {
     const policy = createCommandPolicy({ allowExec: true });
-    const jobs = createJobService({
+    jobs = createJobService({
       jobsDir: path.join(root, ".jobs"),
       workspaceRoot: root,
       policy,
@@ -37,14 +55,16 @@ async function main() {
 
     if (process.platform !== "win32") {
       const instant = await jobs.start({ command: "printf instant-job-ok", cwd: root, clientId: "instant-test" });
+      startedJobIds.push(instant.job.id);
       const instantCompleted = await waitFor(async () => {
         const job = await jobs.get(instant.job.id);
         return job.status === "completed" ? job : null;
-      });
+      }, 10_000, "Timed out waiting for instant Job completion");
       assert.equal(instantCompleted.exitCode, 0);
       const instantLogs = await jobs.logs(instantCompleted.id, { maxBytes: 4096 });
       assert.equal(instantLogs.stdout.content, "instant-job-ok");
       assert.equal(instantLogs.stderr.content, "");
+      await waitForWorkerExit(jobs, instantCompleted.id);
     }
 
     const script = path.join(root, "job.cjs");
@@ -53,6 +73,7 @@ async function main() {
     const command = `${shellArg(process.execPath)} ${shellArg(script)} --api-key ${shellArg(secret)}`;
 
     const started = await jobs.start({ command, cwd: root, clientId: "test", idempotencyKey: "same-job" });
+    startedJobIds.push(started.job.id);
     assert.equal(started.reused, false);
     assert.equal(started.job.commandPreview, "[REDACTED]");
     assert.equal(started.job.commandRedacted, true);
@@ -71,7 +92,7 @@ async function main() {
     const completed = await waitFor(async () => {
       const job = await jobs.get(started.job.id);
       return job.status === "completed" ? job : null;
-    });
+    }, 10_000, "Timed out waiting for Job completion");
     assert.equal(completed.exitCode, 0);
     assert.equal(completed.commandPreview, "[REDACTED]");
     assert.doesNotMatch(JSON.stringify(completed), new RegExp(secret));
@@ -88,17 +109,25 @@ async function main() {
     const next = await jobs.logs(completed.id, { cursor: logs.cursor, maxBytes: 4096 });
     assert.equal(next.stdout.content, "");
     assert.equal(next.stderr.content, "");
+    await waitForWorkerExit(jobs, completed.id);
 
     const longScript = path.join(root, "long.cjs");
     await fs.writeFile(longScript, "setInterval(() => {}, 1000)\n", "utf8");
     const running = await jobs.start({ command: `${shellArg(process.execPath)} ${shellArg(longScript)}`, cwd: root });
+    startedJobIds.push(running.job.id);
     const cancelled = await jobs.cancel(running.job.id);
     assert.equal(cancelled.cancelled, true);
     assert.equal((await jobs.get(running.job.id)).status, "cancelled");
+    await waitForWorkerExit(jobs, running.job.id);
 
-    console.log("PASS job service including zero-delay completion and command redaction");
+    console.log("PASS job service including zero-delay completion, command redaction, and worker shutdown");
   } finally {
-    await fs.rm(root, { recursive: true, force: true });
+    if (jobs) {
+      for (const jobId of [...new Set(startedJobIds)]) {
+        await waitForWorkerExit(jobs, jobId, 5000).catch(() => {});
+      }
+    }
+    await removeTempTree(root);
   }
 }
 
