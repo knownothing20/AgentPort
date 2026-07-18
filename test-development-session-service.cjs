@@ -11,6 +11,10 @@ function git(cwd, args) {
   return result.stdout.trim();
 }
 
+function normalizeEol(value) {
+  return String(value).replace(/\r\n/g, '\n');
+}
+
 async function main() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'agentport-session-'));
   const repo = path.join(root, 'repo');
@@ -18,6 +22,7 @@ async function main() {
   git(repo, ['init', '-b', 'main']);
   git(repo, ['config', 'user.name', 'AgentPort Test']);
   git(repo, ['config', 'user.email', 'agentport@example.com']);
+  git(repo, ['config', 'core.autocrlf', 'false']);
   await fs.writeFile(path.join(repo, 'README.md'), 'base\n');
   await fs.writeFile(path.join(repo, 'AGENTS.md'), 'rules\n');
   git(repo, ['add', '.']);
@@ -48,7 +53,7 @@ async function main() {
 
     await fs.writeFile(path.join(session.worktreePath, 'README.md'), 'changed\n');
     const diff = await service.diff(session.id);
-    assert.match(diff.diff, /changed/);
+    assert.match(normalizeEol(diff.diff), /changed/);
 
     await assert.rejects(
       () => service.rollback(session.id, { confirm: 'wrong' }),
@@ -71,7 +76,7 @@ async function main() {
 
     const merged = await service.merge(session.id, { confirm: session.id, targetBranch: 'main' });
     assert.equal(merged.merged, true);
-    assert.equal(await fs.readFile(path.join(repo, 'README.md'), 'utf8'), 'changed\n');
+    assert.equal(normalizeEol(await fs.readFile(path.join(repo, 'README.md'), 'utf8')), 'changed\n');
 
     const cleaned = await service.cleanup(session.id, { deleteBranch: true, confirm: session.id });
     assert.equal(cleaned.cleaned, true);
