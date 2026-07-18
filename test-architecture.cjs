@@ -99,8 +99,9 @@ async function testServerDependencyLock() {
   assert.equal(lockInfo.packages["node_modules/qs"].version, "6.15.3");
 
   if (process.env.CI) {
-    const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-    const install = spawnSync(npm, [
+    const npmCli = path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+    const install = spawnSync(process.execPath, [
+      npmCli,
       "--prefix", serverRoot,
       "ci",
       "--ignore-scripts",
@@ -111,7 +112,7 @@ async function testServerDependencyLock() {
       encoding: "utf8",
       windowsHide: true,
     });
-    assert.equal(install.status, 0, install.stderr || install.stdout);
+    assert.equal(install.status, 0, install.error?.stack || install.stderr || install.stdout);
     const installed = JSON.parse(await fs.readFile(path.join(serverRoot, "node_modules", "qs", "package.json"), "utf8"));
     assert.equal(installed.version, "6.15.3");
   }
