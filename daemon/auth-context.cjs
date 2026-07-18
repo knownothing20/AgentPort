@@ -48,7 +48,7 @@ function authorizeContext(req, url, config) {
     throw error;
   }
 
-  const clientId = mappedClientId || requested || adminClientId(token);
+  const clientId = mappedClientId || adminClientId(token);
   return Object.freeze({ clientId, isAdmin, role: isAdmin ? "admin" : "owner" });
 }
 
