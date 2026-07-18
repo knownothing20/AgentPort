@@ -6,6 +6,25 @@ on:
   pull_request:
 
 jobs:
+  lockfile-preview:
+    name: Generate patched lock files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+      - run: npm --prefix server install --package-lock-only --ignore-scripts --no-audit --no-fund
+      - uses: actions/upload-artifact@v4
+        with:
+          name: refreshed-lockfiles
+          path: |
+            package-lock.json
+            server/package-lock.json
+          if-no-files-found: error
+
   architecture:
     name: Architecture (${{ matrix.os }}, Node ${{ matrix.node }})
     runs-on: ${{ matrix.os }}
