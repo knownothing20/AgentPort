@@ -2,6 +2,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createClientRuntime } from "../packages/client-core/client-runtime.js";
+import { redactSensitive } from "../packages/client-core/redaction.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -39,7 +40,7 @@ function value(args, ...names) {
 }
 
 function printJson(payload) {
-  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify(redactSensitive(payload), null, 2)}\n`);
 }
 
 function printResult(result, args) {
