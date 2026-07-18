@@ -8,6 +8,12 @@ const path = require("node:path");
 
 const ROOT = __dirname;
 
+function shellArg(value) {
+  const text = String(value);
+  if (process.platform === "win32") return `"${text.replace(/"/g, '""')}"`;
+  return `'${text.replace(/'/g, `'"'"'`)}'`;
+}
+
 async function importModule(relativePath) {
   return import(new URL(relativePath, `file://${ROOT.replace(/\\/g, "/")}/`).href);
 }
@@ -99,18 +105,12 @@ async function testServerDependencyLock() {
   assert.equal(lockInfo.packages["node_modules/qs"].version, "6.15.3");
 
   if (process.env.CI) {
-    const npmCli = path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
-    const install = spawnSync(process.execPath, [
-      npmCli,
-      "--prefix", serverRoot,
-      "ci",
-      "--ignore-scripts",
-      "--no-audit",
-      "--no-fund",
-    ], {
+    const command = `npm --prefix ${shellArg(serverRoot)} ci --ignore-scripts --no-audit --no-fund`;
+    const install = spawnSync(command, {
       cwd: ROOT,
       encoding: "utf8",
       windowsHide: true,
+      shell: true,
     });
     assert.equal(install.status, 0, install.error?.stack || install.stderr || install.stdout);
     const installed = JSON.parse(await fs.readFile(path.join(serverRoot, "node_modules", "qs", "package.json"), "utf8"));
