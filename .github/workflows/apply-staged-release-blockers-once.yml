@@ -20,6 +20,7 @@ jobs:
           node-version: 22
       - name: Apply staged source changes
         run: |
+          echo "Applying verified release-blocker fixes"
           node scripts/release-blocker-part1.cjs
           node scripts/release-blocker-part2.cjs
           node scripts/release-blocker-part3.cjs
