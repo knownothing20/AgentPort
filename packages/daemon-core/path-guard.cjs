@@ -1,5 +1,11 @@
+const fsNative = require("node:fs");
 const fs = require("node:fs/promises");
 const path = require("node:path");
+const { promisify } = require("node:util");
+
+const nativeRealpath = fsNative.realpath?.native
+  ? promisify(fsNative.realpath.native)
+  : null;
 
 function comparisonPath(value) {
   let normalized = path.resolve(String(value || ""));
@@ -21,6 +27,14 @@ function accessDenied(inputPath, workspaceRoot) {
   return error;
 }
 
+async function canonicalRealpath(existingPath) {
+  const lexical = path.resolve(existingPath);
+  const resolved = process.platform === "win32" && nativeRealpath
+    ? await nativeRealpath(lexical)
+    : await fs.realpath(lexical);
+  return path.resolve(String(resolved).replace(/^\\\\\?\\/, ""));
+}
+
 function sameFileIdentity(left, right) {
   if (!left || !right) return false;
   if (typeof left.ino === "bigint" || typeof right.ino === "bigint") {
@@ -30,14 +44,18 @@ function sameFileIdentity(left, right) {
 }
 
 async function isWithinByIdentity(candidateExisting, rootExisting) {
-  if (isWithin(candidateExisting, rootExisting)) return true;
+  const [candidateCanonical, rootCanonical] = await Promise.all([
+    canonicalRealpath(candidateExisting),
+    canonicalRealpath(rootExisting),
+  ]);
+  if (isWithin(candidateCanonical, rootCanonical)) return true;
   if (process.platform !== "win32") return false;
 
   let rootStat;
-  try { rootStat = await fs.stat(rootExisting, { bigint: true }); }
+  try { rootStat = await fs.stat(rootCanonical, { bigint: true }); }
   catch { return false; }
 
-  let current = path.resolve(candidateExisting);
+  let current = candidateCanonical;
   while (true) {
     try {
       const currentStat = await fs.stat(current, { bigint: true });
@@ -78,7 +96,7 @@ async function resolveWorkspacePath(workspaceRoot, inputPath, { mustExist = fals
   }
 
   const rootLexical = path.resolve(workspaceRoot);
-  const rootReal = await fs.realpath(rootLexical);
+  const rootReal = await canonicalRealpath(rootLexical);
   const candidateLexical = path.isAbsolute(inputPath)
     ? path.resolve(inputPath)
     : path.resolve(rootLexical, inputPath);
@@ -88,7 +106,7 @@ async function resolveWorkspacePath(workspaceRoot, inputPath, { mustExist = fals
   }
 
   if (mustExist) {
-    const candidateReal = await fs.realpath(candidateLexical);
+    const candidateReal = await canonicalRealpath(candidateLexical);
     if (!(await isWithinByIdentity(candidateReal, rootReal))) {
       throw accessDenied(inputPath, rootReal);
     }
@@ -96,7 +114,7 @@ async function resolveWorkspacePath(workspaceRoot, inputPath, { mustExist = fals
   }
 
   const ancestorLexical = await nearestExistingAncestor(candidateLexical);
-  const ancestorReal = await fs.realpath(ancestorLexical);
+  const ancestorReal = await canonicalRealpath(ancestorLexical);
   if (!(await isWithinByIdentity(ancestorReal, rootReal))) {
     throw accessDenied(inputPath, rootReal);
   }
@@ -109,6 +127,7 @@ async function resolveWorkspacePath(workspaceRoot, inputPath, { mustExist = fals
 }
 
 module.exports = {
+  canonicalRealpath,
   isWithin,
   isWithinByIdentity,
   resolveWorkspacePath,
