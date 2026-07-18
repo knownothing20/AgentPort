@@ -1,0 +1,73 @@
+name: Repair changelog once
+
+on:
+  push:
+    branches: ["agent/refactor-dual-end-architecture"]
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/refactor-dual-end-architecture
+          fetch-depth: 0
+      - name: Restore history and prepend 3.1.0
+        run: |
+          git fetch origin main
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+
+          base = subprocess.check_output(
+              ["git", "show", "origin/main:CHANGELOG.md"],
+              text=True,
+              encoding="utf-8",
+          )
+          marker = "# Changelog\n\n"
+          if not base.startswith(marker):
+              raise SystemExit("Unexpected main CHANGELOG header")
+
+          section = """## [3.1.0] - 2026-07-18 | Dual-end daemon, durable Jobs, and Worktree Sessions
+
+### Added
+- Added the modular V3 file, execution, persistent Job, connection-registry, and Git Worktree Session architecture while retaining compatibility entrypoints.
+- Added owner/admin authorization boundaries for Session and Job resources, client-scoped idempotency, and adversarial two-client tests.
+- Added bounded line-range reads with explicit output and scan limits, metadata cache ETags, and no unbounded full-file hashing.
+- Added atomic owner-aware project locks that cannot expire while the owning operation is alive.
+
+### Fixed
+- Fixed zero-delay Job completion, Worker readiness diagnostics, process-tree cancellation, Windows 8.3 path handling, and temporary-directory cleanup races.
+- Fixed Session subprocess output races by waiting for stdout/stderr close before returning Git results.
+- Fixed server lockfile reproducibility and patched dependency audit findings.
+- Unified credential and command-response redaction across CLI, MCP, Runtime, Job, Session, and public daemon responses.
+
+### Validated
+- Passed Windows and Ubuntu Node.js 20/22 CI, clean server installation, moderate-level audits, repeated Windows Job cleanup tests, atomic-lock 1000-round contention tests, and physical Windows + Debian gray validation.
+
+---
+
+"""
+          Path("CHANGELOG.md").write_text(marker + section + base[len(marker):], encoding="utf-8", newline="\n")
+          PY
+          git diff --check
+          python - <<'PY'
+          from pathlib import Path
+          text = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          assert text.count("## [3.1.0]") == 1
+          assert "## [2026-05-18] feat | Stable development gateway jobs" in text
+          assert "Added dashboard diagnostics panel `断链诊断摘要`" in text
+          assert "## [1.0.0] - 2026-03" in text
+          PY
+      - name: Commit repaired changelog and remove task
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/repair-changelog-once.yml
+          git add CHANGELOG.md
+          git commit -m "docs: restore changelog history and add 3.1.0"
+          git push origin HEAD:agent/refactor-dual-end-architecture
