@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -5,8 +6,10 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { createClientRuntime } from "../packages/client-core/client-runtime.js";
 import { createDevelopmentSessionClient } from "../packages/client-core/development-sessions.js";
+import { redactSensitive } from "../packages/client-core/redaction.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const packageInfo = JSON.parse((await fs.readFile(path.join(ROOT, "package.json"), "utf8")).replace(/^\uFEFF/, ""));
 const targetProperties = {
   server: { type: "string", description: "Logical server id. Defaults to the selected server." },
   connection: { type: "string", description: "Compatibility alias for server or endpoint id." },
@@ -15,7 +18,7 @@ const targetProperties = {
 };
 const idempotencyProperties = { idempotencyKey: { type: "string", description: "Stable key for safe retry of a long-running task." } };
 function objectSchema(properties = {}, required = []) { return { type: "object", properties: { ...targetProperties, ...properties }, required }; }
-function textResult(value, isError = false) { const text = typeof value === "string" ? value : JSON.stringify(value, null, 2); return { content: [{ type: "text", text }], ...(isError ? { isError: true } : {}) }; }
+function textResult(value, isError = false) { const safe = redactSensitive(value); const text = typeof safe === "string" ? safe : JSON.stringify(safe, null, 2); return { content: [{ type: "text", text }], ...(isError ? { isError: true } : {}) }; }
 function tools() { return [
   { name: "remote_connect", description: "Select a logical server or one of its LAN, virtual-LAN, or SSH endpoints for this MCP client session.", inputSchema: objectSchema({ connection: { type: "string", description: "Logical server or endpoint id." } }) },
   { name: "remote_health", description: "Probe every endpoint of a logical server and report identity, latency, and capabilities.", inputSchema: objectSchema({ force: { type: "boolean" } }) },
@@ -53,7 +56,7 @@ function tools() { return [
 
 const runtime = await createClientRuntime({ baseDir: ROOT, connectionsPath: process.env.MCP_REMOTE_V3_CONNECTIONS_PATH || process.env.AGENTPORT_CONNECTIONS_PATH, projectsPath: process.env.AGENTPORT_PROJECTS_PATH || undefined });
 const sessions = createDevelopmentSessionClient(runtime);
-const server = new Server({ name: "agentport", version: "3.1.0-development-sessions" }, { capabilities: { tools: {} } });
+const server = new Server({ name: "agentport", version: packageInfo.version }, { capabilities: { tools: {} } });
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: tools() }));
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const name = request.params.name;
