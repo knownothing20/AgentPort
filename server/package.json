@@ -12,5 +12,8 @@
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "fast-glob": "^3.3.3"
+  },
+  "overrides": {
+    "qs": "6.15.3"
   }
 }
