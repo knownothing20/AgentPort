@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const assert = require("node:assert/strict");
+const { spawnSync } = require("node:child_process");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
@@ -87,6 +88,35 @@ async function testProjectProfile() {
   assert.throws(() => resolveProjectPath(profile, "../../.ssh"), (error) => error?.code === "EPROJECTPATH");
 }
 
+async function testServerDependencyLock() {
+  const serverRoot = path.join(ROOT, "server");
+  const packageInfo = JSON.parse(await fs.readFile(path.join(serverRoot, "package.json"), "utf8"));
+  const lockInfo = JSON.parse(await fs.readFile(path.join(serverRoot, "package-lock.json"), "utf8"));
+
+  assert.equal(packageInfo.dependencies.qs, "6.15.3");
+  assert.equal(packageInfo.overrides.qs, "6.15.3");
+  assert.equal(lockInfo.packages[""].dependencies.qs, "6.15.3");
+  assert.equal(lockInfo.packages["node_modules/qs"].version, "6.15.3");
+
+  if (process.env.CI) {
+    const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+    const install = spawnSync(npm, [
+      "--prefix", serverRoot,
+      "ci",
+      "--ignore-scripts",
+      "--no-audit",
+      "--no-fund",
+    ], {
+      cwd: ROOT,
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    assert.equal(install.status, 0, install.stderr || install.stdout);
+    const installed = JSON.parse(await fs.readFile(path.join(serverRoot, "node_modules", "qs", "package.json"), "utf8"));
+    assert.equal(installed.version, "6.15.3");
+  }
+}
+
 async function testDaemonFileServices() {
   const { createFileReadService, createFileWriteService } = require("./packages/daemon-core/index.cjs");
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "agentport-core-"));
@@ -158,6 +188,7 @@ async function main() {
     ["request context", testRequestContext],
     ["endpoint selection", testEndpointSelection],
     ["project profile", testProjectProfile],
+    ["server dependency lock", testServerDependencyLock],
     ["daemon file services", testDaemonFileServices],
     ["symlink escape guard", testSymlinkEscapeGuard],
   ];
