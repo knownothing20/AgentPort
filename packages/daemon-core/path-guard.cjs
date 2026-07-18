@@ -20,6 +20,11 @@ function isWithin(candidate, root) {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+function isWithinAny(candidate, roots) {
+  return [...new Set((roots || []).filter(Boolean).map(comparisonPath))]
+    .some((root) => isWithin(candidate, root));
+}
+
 function accessDenied(inputPath, workspaceRoot) {
   const error = new Error(`Access denied: '${inputPath}' is outside workspace root '${workspaceRoot}'`);
   error.code = "EWORKSPACE";
@@ -43,23 +48,27 @@ function sameFileIdentity(left, right) {
   return Number(left.dev) === Number(right.dev) && Number(left.ino) === Number(right.ino);
 }
 
-async function isWithinByIdentity(candidateExisting, rootExisting) {
+async function isWithinByIdentity(candidateExisting, rootExisting, rootAliases = []) {
   const [candidateCanonical, rootCanonical] = await Promise.all([
     canonicalRealpath(candidateExisting),
     canonicalRealpath(rootExisting),
   ]);
-  if (isWithin(candidateCanonical, rootCanonical)) return true;
+  if (isWithinAny(candidateCanonical, [rootCanonical, rootExisting, ...rootAliases])) return true;
   if (process.platform !== "win32") return false;
 
-  let rootStat;
-  try { rootStat = await fs.stat(rootCanonical, { bigint: true }); }
-  catch { return false; }
+  const identityRoots = [...new Set([rootCanonical, rootExisting, ...rootAliases].filter(Boolean))];
+  const rootStats = [];
+  for (const root of identityRoots) {
+    try { rootStats.push(await fs.stat(root, { bigint: true })); }
+    catch {}
+  }
+  if (!rootStats.length) return false;
 
   let current = candidateCanonical;
   while (true) {
     try {
       const currentStat = await fs.stat(current, { bigint: true });
-      if (sameFileIdentity(currentStat, rootStat)) return true;
+      if (rootStats.some((rootStat) => sameFileIdentity(currentStat, rootStat))) return true;
     } catch {
       return false;
     }
@@ -107,7 +116,7 @@ async function resolveWorkspacePath(workspaceRoot, inputPath, { mustExist = fals
 
   if (mustExist) {
     const candidateReal = await canonicalRealpath(candidateLexical);
-    if (!(await isWithinByIdentity(candidateReal, rootReal))) {
+    if (!(await isWithinByIdentity(candidateReal, rootReal, [rootLexical]))) {
       throw accessDenied(inputPath, rootReal);
     }
     return { root: rootReal, path: candidateLexical, realPath: candidateReal };
@@ -115,7 +124,7 @@ async function resolveWorkspacePath(workspaceRoot, inputPath, { mustExist = fals
 
   const ancestorLexical = await nearestExistingAncestor(candidateLexical);
   const ancestorReal = await canonicalRealpath(ancestorLexical);
-  if (!(await isWithinByIdentity(ancestorReal, rootReal))) {
+  if (!(await isWithinByIdentity(ancestorReal, rootReal, [rootLexical]))) {
     throw accessDenied(inputPath, rootReal);
   }
 
@@ -129,6 +138,7 @@ async function resolveWorkspacePath(workspaceRoot, inputPath, { mustExist = fals
 module.exports = {
   canonicalRealpath,
   isWithin,
+  isWithinAny,
   isWithinByIdentity,
   resolveWorkspacePath,
   sameFileIdentity,
