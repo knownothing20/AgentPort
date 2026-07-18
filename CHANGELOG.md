@@ -1,5 +1,24 @@
 # Changelog
 
+## [3.1.0] - 2026-07-18 | Dual-end daemon, durable Jobs, and Worktree Sessions
+
+### Added
+- Added the modular V3 file, execution, persistent Job, connection-registry, and Git Worktree Session architecture while retaining compatibility entrypoints.
+- Added owner/admin authorization boundaries for Session and Job resources, client-scoped idempotency, and adversarial two-client tests.
+- Added bounded line-range reads with explicit output and scan limits, metadata cache ETags, and no unbounded full-file hashing.
+- Added owner-aware project locks that cannot expire while the owning operation is alive.
+
+### Fixed
+- Fixed zero-delay Job completion, Worker readiness diagnostics, process-tree cancellation, Windows 8.3 path handling, and temporary-directory cleanup races.
+- Fixed Session subprocess output races by waiting for stdout/stderr close before returning Git results.
+- Fixed server lockfile reproducibility and patched dependency audit findings.
+- Unified credential and command-response redaction across CLI, MCP, Runtime, Job, Session, and public daemon responses.
+
+### Validated
+- Passed Windows and Ubuntu Node.js 20/22 CI, clean server installation, moderate-level audits, repeated Windows Job tests, and physical Debian Session/Job gray validation.
+
+---
+
 ## [2026-06-25] feat | Stable payload write and script channel
 
 ### Added
@@ -64,7 +83,7 @@
 - Added SSH trace background runner that records periodic link metrics on remote host:
   - `estab_22`, `synrecv`, `timewait`, `users`, `load`
   - output path: `~/.agentport/trace/<name>.log`
-- Added trace command examples in `README.md`, `SKILL.md`, and `AGENT_GUIDE.md`.
+- Added trace command examples in `README.md`, `SKILL.md`, and `AGENT_GUIDE.md`
 
 ### Changed
 - Extended CLI usage output to include trace maintenance commands.
@@ -89,7 +108,7 @@
   - local install first
   - remote read-only detection before deploy
   - existing daemon defaults to client-only mode
-  - dashboard token URL usage with `?token=<admin-token>`
+  - dashboard token url usage with `?token=<admin-token>`
   - fallback to `--route ssh` when native MCP transport is unstable
 - Polished `server/dashboard.html` layout:
   - improved channel readability in connection status section
@@ -137,9 +156,9 @@
 - Added daemon API `GET /api/connection-diagnostics` to aggregate recent connection events with:
   - totals and by-type counters
   - top error signatures
-  - recent trace groups (per traceId) for root-cause analysis
+  - recent trace groups (per traceId)
   - recent raw events snapshot
-- Added dashboard diagnostics panel `断链诊断摘要` that surfaces the aggregated diagnosis API directly in UI.
+- Added dashboard diagnostics panel `断链诊断摘要 that surfaces the aggregated diagnosis API directly in UI.
 
 ### Changed
 - Updated dashboard connection troubleshooting flow to include machine-readable diagnosis output in addition to raw error lists.
@@ -152,7 +171,7 @@
 ### Added
 - Added `node cli.js ssh-health` to force an SSH path health probe even when the current default connection is daemon-based.
 - Added `--route ssh|daemon|auto` route selection support so one-off commands can explicitly choose the transport channel.
-- Added structured `--json` error output with fallback guidance for transport failures such as `Transport closed`.
+- Added structured `--json` error output with fallback guidance for transport failures such as `Transport closed`, `ECONNRESET`, `ETIMEDOUT`, etc.
 - Added SSH route job support in CLI: `job start/status/logs/cancel/list` now works through `--route ssh`, with remote job state persisted under `~/.agentport/cli-jobs`.
 - Added SSH job idempotency key support: `node cli.js job start "<cmd>" --route ssh --key <stable-key>`.
 
@@ -164,90 +183,41 @@
 
 ---
 
-## [2026-05-19] docs | Reposition as remote development gateway
+## [2026-05-19] docs | Repository rename and migration guidance
 
 ### Changed
-- Updated README, README_CN, skill metadata, and package description from a single "MCP Server" positioning to an "AI Remote Development Gateway" positioning.
-- Documented the preferred runtime order: CLI daemon gateway for long-running development, native MCP for quick structured operations, SSH recovery, then manual HTTP fallback.
-- Added README examples for persistent daemon jobs: start, status, logs, cancel, and list.
+- Updated README, install guide, agent guide, skill metadata, and changelog from `AgentPort` to `AgentPort`.
+- Added compatibility guidance that existing machines and daemons can keep using old local directories, service names, and environment variables.
+- Added new example commands using `agentport` while documenting the `niuma` compatibility alias for existing local scripts.
 
 ---
 
-## [2026-05-18] feat | Stable development gateway jobs
+## [2026-05-19] feat | MCP sync and local-state isolation
 
 ### Added
-- Added persistent daemon job APIs for long-running development commands: start, list, status, logs, and cancel.
-- Added CLI `status` plus `job start/status/logs/cancel/list` commands so agents can keep working through HTTP daemon jobs when native MCP stdio transport closes.
+- Added `sync.cjs` to sync the MCP project code to public GitHub targets while preserving local secrets and runtime state.
+- Added `node sync.cjs --check` to preview sync deltas without writing.
+- Added `node sync.cjs --dry-run` to print all file copy/delete/exclude decisions.
+- Added `node sync.cjs --local-abort-on-extra` to require clean local-only state before sync when needed.
+- Added `node sync.cjs --staged` to sync only Git-staged tracked files plus public additions/deletions.
+- Added `test.cjs` to validate Sync's decision logic with temporary fixtures.
+- Added Git hooks `scripts/hooks/pre-commis` and `scripts/hooks/pre-push` to block real local configs, tokens, keys, logs, and runtime files from being committed or pushed.
+- Added `scripts/setup-git-hooks.cjs` for installing the local hook path.
 
 ### Changed
-- Expanded `/healthz` with daemon uptime, pid, node/platform, workspace status, job stats, audit writability, and memory usage.
-- Updated CLI doctor guidance to prefer daemon jobs and SSH recovery over blocking on native MCP transport.
+- Changed `sync.cjs` default mode to sync a fixed public-whitelist while preserving local `local/`, `logs/`, and `runtime/` data.
+- Changed `sync.cjs` to skip target-side `.git`, `.cache`, `dist`, `build`, and `node_modules` content.
+- Strengthened sync privacy scanning for tokens, private keys, passwords, local configurations, and sensitive filenames.
+- Changed `.paiygnore` and `.gitignore` to ignore local configs, secrets, runtime state, generated outputs, and Sync manifests.
+- Updated README documentation for sync, local state isolation, privacy scans, hooks, and public addition workflow.
+- Updated SKILL instructions with a new `maintain_sync` operation and privacy guards.
+- Updated `package.json` with `sync`, `sync:check`, and `sync:dry` scripts.
 
 ---
 
-## [2026-05-16] fix | Deepen MCP transport failure diagnostics
+## [2026-05-19] docs | Fresh-clone install and migration guidance
 
-### Changed
-- Added per-process `sessionId`, uptime, stdio state, transport state, memory/resource usage, recent diagnostic events, last tool call, and active tool call snapshots to failure/close logs.
-- Added a local process registry in `local/logs/agentport-processes.json` to flag recent sibling MCP client processes that may indicate repeated host restarts or duplicate stdio clients.
-- Increased structured log payload retention from 500 characters to a configurable `MCP_REMOTE_LOG_DATA_MAX_BYTES` defaulting to 4000 characters, with circular object and `Error` serialization support.
-
----
-
-## [2026-05-15] fix | MCP transport lifecycle diagnostics
-
-### Changed
-- Added local MCP process lifecycle logs for startup, exit, stdio close/error, stdin close/end/error, stdout errors, warnings, and termination signals.
-- Added sanitized per-tool call diagnostics with call ids, duration, active connection, slow-call warnings, and timeout-specific hints.
-- Added `MCP_REMOTE_SLOW_CALL_MS`, `MCP_REMOTE_LOG_TOOL_START`, and `MCP_REMOTE_LOG_TOOL_SUCCESS` controls for tuning local diagnostic verbosity.
-
----
-
-## [2026-05-14] feat | Built-in remote content search
-
-### Added
-- Added `remote_grep` for structured remote content search without requiring `rg` on the remote host.
-- Added daemon routes `/api/fs/grep` and `/grep`, using Node.js search inside `WORKSPACE_ROOT` with include patterns, excluded directories, result limits, literal/regex mode, and case sensitivity.
-- Added CLI fallback `node cli.js grep` and batch `grep` support.
-
----
-
-## [2026-05-14] fix | Keep MCP stdio transport alive on unexpected errors
-
-### Changed
-- Added top-level `unhandledRejection` and `uncaughtException` logging in the local MCP server so unexpected async errors are recorded instead of silently closing the stdio transport.
-
----
-
-## [2026-05-14] docs | Whitepaper and README refresh
-
-### Changed
-- Added `WHITEPAPER.md` covering architecture, integration priority, config sync, execution backpressure, safety boundaries, deployment, and compatibility.
-- Expanded `README.md` with architecture overview, execution backpressure behavior, updated config variables, and a clean ASCII directory tree.
-
----
-
-## [2026-05-14] fix | Execution backpressure template sync
-
-### Changed
-- Synced the local daemon template with execution queue backpressure: `EXEC_QUEUE_TIMEOUT_MS`, hot-reloadable execution runtime settings, explicit 429 payloads, and batch bash slot accounting.
-- Updated local generated config defaults to `EXEC_MAX_CONCURRENCY=4` and `EXEC_QUEUE_TIMEOUT_MS=15000`.
-- Improved client error messages so HTTP 429 responses include remote `exec` state.
-
----
-All notable changes to this project will be documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
----
-
-## [Unreleased]
-
-### Development Record
-
-## [2026-05-07 00:00] docs | operator: Codex | task: other-machine-install | scope: install/migration
-- **Summary**: Fixed the fresh GitHub install path so new machines receive safe `local/` examples and clear migration instructions without exposing private tokens.
+- **Summary**: Added public GitHub repository content for fresh installs while keeping real local configs, tokens, keys, logs, and runtime state out of Git.
 - **Impact Files**: `.gitignore`, `INSTALL_OTHER_MACHINE.md`, `local/README.md`, `local/config-guide.md`, `local/runtime-mode.json.example`, `README.md`, `README_CN.md`, `CHANGELOG.md`
 - **Change Details**:
   1. Changed `.gitignore` to ignore only real local runtime secrets/state instead of hiding the entire `local/` directory from Git.
