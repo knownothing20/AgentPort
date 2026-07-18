@@ -50,7 +50,7 @@ function createJobService(options = {}) {
   async function workerFailure(job, reason) {
     const workerLogPath = path.join(store.paths.jobDir(job.id), "worker.log");
     const workerDiagnostic = await readTail(workerLogPath);
-    const message = workerDiagnostic
+    let message = workerDiagnostic
       ? `${reason}\n${workerDiagnostic}`
       : reason;
     const result = {
@@ -62,9 +62,10 @@ function createJobService(options = {}) {
       error: message,
       finishedAt: nowIso(),
     };
-    try { await store.writeResult(job.id, result); }
-    catch (error) {
-      message.concat(`\nFailed to persist fallback result: ${error.message}`);
+    try {
+      await store.writeResult(job.id, result);
+    } catch (error) {
+      message += `\nFailed to persist fallback result: ${error.message}`;
     }
     const updated = await store.update(job.id, {
       status: "error",
