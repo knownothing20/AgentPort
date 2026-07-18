@@ -194,7 +194,7 @@ function createJobService({
 
   async function createAndStart(input) {
     policy.validateCommand(input.command);
-    const cwd = await resolveCwd(input.cwd);
+    const cwd = input.cwd;
     const timeoutMs = timeoutValue(input.timeoutMs);
     const id = createJobId();
     const job = await store.create({
