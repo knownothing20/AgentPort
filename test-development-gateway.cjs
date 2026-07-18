@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { createDevelopmentFrontServer } = require('./daemon/development-gateway.cjs');
+const { authorizeContext } = require('./daemon/auth-context.cjs');
 
 function git(cwd, args) {
   const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
@@ -24,7 +25,7 @@ function request(port, method, requestPath, body, headers = {}) {
     const req = http.request({
       host: '127.0.0.1', port, method, path: requestPath,
       headers: {
-        authorization: 'Bearer secret',
+        authorization: 'Bearer secret-a',
         'x-mcp-client-id': 'client-a',
         ...(payload ? { 'content-type': 'application/json', 'content-length': payload.length } : {}),
         ...headers,
@@ -78,17 +79,12 @@ async function main() {
         serverId: 'server-main',
         workspaceId: 'workspace-main',
         values: { HOME: root },
-        tokenClientMap: new Map([['secret', 'client-a']]),
+        tokenClientMap: new Map([['secret-a', 'client-a'], ['secret-b', 'client-b']]),
+        adminTokens: new Set(['admin-secret']),
       };
     },
   };
-  const authorizeApi = (req, _url, config) => {
-    const token = String(req.headers.authorization || '').replace(/^Bearer\s+/, '');
-    const clientId = config.tokenClientMap.get(token);
-    if (!clientId) { const error = new Error('Unauthorized'); error.statusCode = 401; throw error; }
-    return clientId;
-  };
-  const front = createDevelopmentFrontServer({ baseOrigin: `http://127.0.0.1:${basePort}`, configLoader, authorizeApi });
+  const front = createDevelopmentFrontServer({ baseOrigin: `http://127.0.0.1:${basePort}`, configLoader, authorizeContext });
   const port = await listen(front);
 
   try {
@@ -104,6 +100,23 @@ async function main() {
     });
     assert.equal(created.status, 200);
     const session = created.data.session;
+
+    const clientBHeaders = { authorization: 'Bearer secret-b', 'x-mcp-client-id': 'client-b' };
+    const adminHeaders = { authorization: 'Bearer admin-secret' };
+    const hiddenList = await request(port, 'GET', '/api/dev/sessions', undefined, clientBHeaders);
+    assert.equal(hiddenList.data.sessions.length, 0);
+    for (const [method, suffix, payload] of [
+      ['GET', '', undefined], ['GET', '/diff', undefined], ['POST', '/run', { command: 'echo denied' }],
+      ['POST', '/commit', { message: 'denied' }], ['POST', '/rollback', { confirm: session.id }],
+      ['POST', '/merge', { confirm: session.id }], ['POST', '/cleanup', { confirm: session.id, force: true }],
+    ]) {
+      const denied = await request(port, method, `/api/dev/sessions/${session.id}${suffix}`, payload, clientBHeaders);
+      assert.equal(denied.status, 403);
+      assert.equal(denied.data.code, 'EOWNER');
+    }
+    const adminVisible = await request(port, 'GET', `/api/dev/sessions/${session.id}`, undefined, adminHeaders);
+    assert.equal(adminVisible.status, 200);
+
     await fs.writeFile(path.join(session.worktreePath, 'README.md'), 'changed\n');
 
     const diff = await request(port, 'GET', `/api/dev/sessions/${session.id}/diff`);
