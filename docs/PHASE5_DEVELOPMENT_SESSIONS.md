@@ -59,7 +59,7 @@ The client resolves the project profile and sends the server:
 The server then:
 
 1. verifies that the project is a Git repository inside `WORKSPACE_ROOT`
-2. acquires a short project operation lock
+2. acquires an owner-aware project operation lock
 3. resolves the base commit
 4. creates a unique `agentport/...` branch
 5. creates an isolated Worktree under `AGENTPORT_WORKTREES_DIR`
@@ -98,7 +98,7 @@ the session.
 
 ## Project operation locks
 
-Short-lived lock files serialize operations that change repository-level Git
+Owner-aware lock files serialize operations that change repository-level Git
 state:
 
 - Worktree creation
@@ -106,9 +106,16 @@ state:
 - Worktree removal
 - branch deletion
 
-The lock contains a PID and expiry. A lock is reclaimed when its owner process is
-gone or its expiry has passed. Normal editing and builds in different Worktrees
-do not hold the project lock, so parallel Agents remain possible.
+Each lock records a random owner id, process id, acquisition time, and lease
+metadata. A lock owned by a live operation cannot be reclaimed merely because a
+fixed timestamp has passed. A lock is reclaimed only when its external owner
+process is gone, or when a same-process lock is no longer registered as active
+and its lease has expired. Release verifies the owner id before removing the
+lock file. `AGENTPORT_PROJECT_LOCK_LEASE_MS` controls the recovery lease, not the
+maximum duration of a valid operation.
+
+Normal editing and builds in different Worktrees do not hold the project lock,
+so parallel Agents remain possible.
 
 ## Running project workflows
 
@@ -124,11 +131,23 @@ The development gateway submits the command to the existing persistent Job
 service with:
 
 - `cwd` forced to the session Worktree
-- one idempotency key
+- an idempotency key scoped to the authenticated client
 - normal queue, timeout, resource-class, and log behavior
 - the returned Job attached to the session registry
 
 The command can also be supplied explicitly when no standard action exists.
+
+## Resource ownership
+
+Each Session and Job records the authenticated `clientId` that created it.
+Normal client tokens can list, inspect, run, commit, rollback, merge, cancel, or
+clean up only resources owned by that client. Other clients receive `403
+EOWNER`, and list/overview responses omit resources owned by other clients.
+
+Tokens configured through `ADMIN_TOKENS` receive an administrator authorization
+context and may inspect or operate resources across clients. The administrator
+identity is derived by the server from the token rather than trusted from a
+caller-supplied client-id header.
 
 ## Status and Diff
 
@@ -148,6 +167,8 @@ agentport session diff <session-id>
 
 The Diff response contains short status, Diff stat, unstaged Diff, staged Diff,
 and truncation information. Output is bounded by `AGENTPORT_MAX_DIFF_BYTES`.
+The subprocess helper waits for the ChildProcess `close` event, ensuring Git
+stdout and stderr pipes have drained before results are returned.
 
 ## Commit
 
@@ -171,6 +192,7 @@ Merge is intentionally stricter than commit. It requires:
 - a clean session Worktree
 - a clean primary project checkout
 - the primary checkout already on the requested target branch
+- ownership by the authenticated client, or an administrator token
 
 ```bash
 agentport session merge <session-id> \
@@ -230,7 +252,8 @@ The public development gateway owns:
 - `POST /api/dev/sessions/:sessionId/cleanup`
 
 All development routes use the same daemon authentication and client-id
-verification as file, execution, and Job APIs.
+verification as file, execution, and Job APIs, plus owner/admin authorization
+for resource operations.
 
 ## MCP tools
 
@@ -257,28 +280,37 @@ Tests cover:
 - real Git repository and Worktree creation
 - primary branch isolation
 - rule-file discovery and lease renewal
-- Diff generation
+- Diff generation and 50 rapid Diff/status reads
 - explicit rollback confirmation
 - commit on the Agent branch
 - rejection when the primary checkout is dirty
 - merge into the target branch
 - Worktree and branch cleanup
 - persistent Job attachment
-- client idempotent retry
+- client-scoped idempotent retry
 - MCP Session tool calls
+- live project operations exceeding the recovery lease without lock theft
+- dead-owner lock recovery
+- owner/admin boundaries for Session and Job APIs
+- two-client adversarial access attempts
+- bounded ranged reads and bounded line scanning
 
-A full spawned three-layer production-entrypoint smoke-test file was attempted
-during this phase but was not added because the connected GitHub write action
-was blocked. The committed tests validate the Session service, front Gateway,
-client adapter, persistent Job integration, and MCP tools separately. A real
-Debian gray deployment and restart test remains required before merging.
+Validation includes the spawned public Gateway components, Windows and Ubuntu
+Node.js 20/22 matrices, persistent Job lifecycle tests, owner/admin
+authorization boundaries, client-scoped Job idempotency, bounded ranged file
+reads, and long-running project-lock contention.
+
+Physical Windows + Debian gray validation completed for instant Jobs,
+process-tree cleanup, clean dependency installation, credential redaction, and
+the full Worktree Session lifecycle. Debian Session Service and Gateway repeated
+runs passed, including 30/30 real Diff reads with non-empty status, branch, and
+HEAD values.
 
 ## Remaining work
 
-- real Debian gray deployment and restart validation
 - a richer browser Dashboard over `/api/dev/overview`
 - automatic stale-session cleanup policies
-- review/approval states before merge
 - push and pull-request helpers
 - conflict-resolution workflows
 - optional Streamable HTTP MCP transport
+- production deployment and rollback execution after merge approval
