@@ -55,5 +55,9 @@ jobs:
       - run: node test-development-gateway.cjs
       - run: node test-client-mcp-v3.cjs
       - run: node test-mcp-redaction.cjs
-      - run: npm audit --audit-level=high
-      - run: npm --prefix server audit --audit-level=high
+      - run: npm audit --audit-level=moderate
+      - name: Install and verify legacy daemon dependencies
+        run: |
+          npm --prefix server install --ignore-scripts --no-fund --no-audit
+          node -e "const v=require('./server/node_modules/qs/package.json').version;if(v!=='6.15.3')throw new Error('Expected qs 6.15.3, got '+v)"
+      - run: npm --prefix server audit --audit-level=moderate
