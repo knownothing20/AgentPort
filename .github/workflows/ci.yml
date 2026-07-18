@@ -26,6 +26,7 @@ jobs:
       - run: node test-client-development-sessions.cjs
       - run: node test-development-session-service.cjs
       - run: node test-development-gateway.cjs
+      - run: node test-client-redaction.cjs
 
   durable-linux:
     name: Legacy, durable jobs, Worktrees, and MCP V3 (Ubuntu, Node 22)
@@ -39,6 +40,7 @@ jobs:
       - run: npm ci
       - run: npm run test:lifecycle
       - run: node test-job-service.cjs
+      - run: node test-job-worker-readiness.cjs
       - run: node test-daemon-exec-jobs.cjs
       - run: node test-development-session-service.cjs
       - run: node test-development-gateway.cjs
