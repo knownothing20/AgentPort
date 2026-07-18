@@ -4,10 +4,83 @@ const { createJobService: createBaseJobService, jobError } = require("./job-serv
 const { createJobStore, nowIso } = require("./job-store.cjs");
 const { pidAlive, terminateProcessTree } = require("./process-utils.cjs");
 
+const REDACTED = "[REDACTED]";
+const SECRET_OUTPUT_KEYS = new Set([
+  "authorization",
+  "authtoken",
+  "accesstoken",
+  "refreshtoken",
+  "bearertoken",
+  "token",
+  "password",
+  "passphrase",
+  "privatekey",
+  "privatekeydata",
+  "apikey",
+  "clientsecret",
+  "secret",
+  "credential",
+  "credentials",
+  "command",
+  "commandpreview",
+  "env",
+]);
+
 function intValue(value, fallback, min, max) {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.min(Math.max(parsed, min), max);
+}
+
+function normalizedKey(value) {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function sanitizeUrl(value) {
+  if (typeof value !== "string" || !/^https?:\/\//i.test(value)) return value;
+  try {
+    const parsed = new URL(value);
+    for (const key of [...parsed.searchParams.keys()]) {
+      if (SECRET_OUTPUT_KEYS.has(normalizedKey(key))) parsed.searchParams.set(key, REDACTED);
+    }
+    if (parsed.username) parsed.username = REDACTED;
+    if (parsed.password) parsed.password = REDACTED;
+    return parsed.toString();
+  } catch {
+    return value;
+  }
+}
+
+function sanitizePublicValue(value) {
+  const seen = new WeakMap();
+
+  function visit(current, parentKey = "") {
+    const key = normalizedKey(parentKey);
+    if (SECRET_OUTPUT_KEYS.has(key)) return current === undefined ? undefined : REDACTED;
+    if (typeof current === "string") return sanitizeUrl(current);
+    if (current === null || typeof current !== "object") return current;
+    if (seen.has(current)) return seen.get(current);
+
+    if (Array.isArray(current)) {
+      const next = [];
+      seen.set(current, next);
+      for (const item of current) next.push(visit(item));
+      return next;
+    }
+
+    const next = {};
+    seen.set(current, next);
+    let commandRedacted = false;
+    for (const [childKey, item] of Object.entries(current)) {
+      const normalized = normalizedKey(childKey);
+      if (["command", "commandpreview"].includes(normalized)) commandRedacted = item !== undefined && item !== null && item !== "";
+      next[childKey] = visit(item, childKey);
+    }
+    if (commandRedacted) next.commandRedacted = true;
+    return next;
+  }
+
+  return visit(value);
 }
 
 async function readJsonIfExists(filePath) {
@@ -107,7 +180,7 @@ function createJobService(options = {}) {
 
   async function start(input = {}) {
     const started = await base.start(input);
-    if (started.reused) return started;
+    if (started.reused) return sanitizePublicValue(started);
     const ready = await waitForWorker(started.job);
     if (ready.status === "error" && ready.orphanReason) {
       throw jobError(ready.error || "Job worker failed during startup", "EJOB_WORKER_START", 500, {
@@ -115,14 +188,29 @@ function createJobService(options = {}) {
         workerError: ready.workerError || null,
       });
     }
-    return { ...started, job: ready };
+    return sanitizePublicValue({ ...started, job: ready });
   }
+
+  async function get(...args) { return sanitizePublicValue(await base.get(...args)); }
+  async function list(...args) { return sanitizePublicValue(await base.list(...args)); }
+  async function logs(...args) { return sanitizePublicValue(await base.logs(...args)); }
+  async function cancel(...args) { return sanitizePublicValue(await base.cancel(...args)); }
+  async function remove(...args) { return sanitizePublicValue(await base.remove(...args)); }
+  async function reconcile(...args) { return sanitizePublicValue(await base.reconcile(...args)); }
+  function publicJob(job) { return sanitizePublicValue(base.publicJob(job)); }
 
   return Object.freeze({
     ...base,
     start,
+    get,
+    list,
+    logs,
+    cancel,
+    remove,
+    reconcile,
+    publicJob,
     workerReadyTimeoutMs: readyTimeoutMs,
   });
 }
 
-module.exports = { createJobService };
+module.exports = { createJobService, sanitizePublicValue };
