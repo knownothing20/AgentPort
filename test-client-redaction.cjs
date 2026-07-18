@@ -78,6 +78,31 @@ async function main() {
     }, null, 2));
     await fs.writeFile(projectsPath, JSON.stringify({ projects: {} }));
 
+    const { loadConnectionRegistry } = await import("./packages/client-core/connection-registry.js");
+    const registry = await loadConnectionRegistry({ filePath: connectionsPath, baseDir: root });
+    const internalEndpoint = registry.getEndpoint("redaction-lan").endpoint;
+    assert.equal(internalEndpoint.authToken, secret);
+    const serializedRegistry = JSON.stringify(registry.getServer("redaction-server"));
+    assert.doesNotMatch(serializedRegistry, new RegExp(secret));
+    assert.match(serializedRegistry, /REDACTED/);
+
+    process.env.AGENTPORT_CLIENT_STATE_PATH = statePath;
+    const { createClientRuntime } = await import("./packages/client-core/client-runtime.js");
+    const runtime = await createClientRuntime({
+      baseDir: root,
+      connectionsPath,
+      projectsPath,
+      healthTtlMs: 1,
+    });
+    try {
+      const probed = await runtime.probeServer("redaction-server", { force: true });
+      const serializedRuntime = JSON.stringify(probed);
+      assert.doesNotMatch(serializedRuntime, new RegExp(secret));
+      assert.match(serializedRuntime, /REDACTED/);
+    } finally {
+      runtime.close();
+    }
+
     const cli = await run(process.execPath, [
       path.join(__dirname, "client", "cli-entry.js"),
       "server", "health", "redaction-server", "--force", "--json",
@@ -99,7 +124,7 @@ async function main() {
     await fs.rm(root, { recursive: true, force: true });
   }
 
-  console.log("PASS centralized client credential redaction");
+  console.log("PASS centralized client and runtime credential redaction");
 }
 
 main().catch((error) => {
