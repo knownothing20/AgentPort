@@ -1,0 +1,38 @@
+name: Refresh server lock once
+
+on:
+  push:
+    branches: ["agent/refactor-dual-end-architecture"]
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/refactor-dual-end-architecture
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - name: Regenerate server lock
+        run: npm --prefix server install --package-lock-only --ignore-scripts --no-audit --no-fund
+      - name: Verify clean install and audit
+        run: |
+          rm -rf server/node_modules
+          npm --prefix server ci --ignore-scripts --no-audit --no-fund
+          node -e "const v=require('./server/node_modules/qs/package.json').version;if(v!=='6.15.3')throw new Error('Expected qs 6.15.3, got '+v)"
+          npm --prefix server audit --audit-level=moderate
+      - name: Commit server lock
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add server/package-lock.json
+          git diff --cached --quiet && exit 0
+          git commit -m "chore: refresh patched server dependency lock"
+          git push origin HEAD:agent/refactor-dual-end-architecture
