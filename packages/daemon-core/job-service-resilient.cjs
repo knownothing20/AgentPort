@@ -191,10 +191,62 @@ function createJobService(options = {}) {
     return sanitizePublicValue({ ...started, job: ready });
   }
 
+  async function cancel(jobId, input = {}) {
+    let job = await base.reconcile(await store.read(jobId));
+    if (!["running", "starting", "cancelling"].includes(job.status)) {
+      return sanitizePublicValue({ cancelled: false, alreadyFinished: true, job: base.publicJob(job) });
+    }
+
+    const requestedAt = nowIso();
+    job = await store.update(jobId, { status: "cancelling", cancelRequestedAt: requestedAt });
+    await store.writeCancelRequest(jobId, {
+      requestedAt,
+      signal: input.signal || "SIGTERM",
+      requestedBy: input.clientId || null,
+    });
+
+    const workerPid = job.workerPid || job.pid;
+    const workerStatePath = path.join(store.paths.jobDir(jobId), "worker.json");
+    const deadline = Date.now() + intValue(input.waitTimeoutMs, 5000, 500, 30_000);
+    let lastCommandPid = null;
+
+    while (Date.now() < deadline) {
+      const result = await store.readResult(jobId);
+      if (result) break;
+
+      const workerState = await readJsonIfExists(workerStatePath);
+      const commandPid = Number(workerState?.commandPid || 0);
+      if (commandPid > 0 && commandPid !== lastCommandPid && pidAlive(commandPid)) {
+        lastCommandPid = commandPid;
+        await terminateProcessTree(commandPid, { forceAfterMs: 1000 }).catch(() => {});
+      }
+
+      if (!pidAlive(workerPid)) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+
+    if (!(await store.readResult(jobId)) && pidAlive(workerPid)) {
+      await terminateProcessTree(workerPid, { forceAfterMs: 1000 }).catch(() => {});
+    }
+
+    if (!(await store.readResult(jobId))) {
+      await store.writeResult(jobId, {
+        status: "cancelled",
+        exitCode: null,
+        signal: input.signal || "SIGTERM",
+        cancelled: true,
+        timedOut: false,
+        finishedAt: nowIso(),
+      });
+    }
+
+    job = await base.reconcile(await store.read(jobId));
+    return sanitizePublicValue({ cancelled: true, job: base.publicJob(job) });
+  }
+
   async function get(...args) { return sanitizePublicValue(await base.get(...args)); }
   async function list(...args) { return sanitizePublicValue(await base.list(...args)); }
   async function logs(...args) { return sanitizePublicValue(await base.logs(...args)); }
-  async function cancel(...args) { return sanitizePublicValue(await base.cancel(...args)); }
   async function remove(...args) { return sanitizePublicValue(await base.remove(...args)); }
   async function reconcile(...args) { return sanitizePublicValue(await base.reconcile(...args)); }
   function publicJob(job) { return sanitizePublicValue(base.publicJob(job)); }
