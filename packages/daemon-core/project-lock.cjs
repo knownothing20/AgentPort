@@ -3,6 +3,8 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { pidAlive } = require("./process-utils.cjs");
 
+const LINK_FALLBACK_CODES = new Set(["ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EPERM", "EXDEV"]);
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -26,7 +28,63 @@ async function readLock(lockPath) {
     return JSON.parse(await fs.readFile(lockPath, "utf8"));
   } catch (error) {
     if (error?.code === "ENOENT") return null;
-    return { invalid: true };
+    try {
+      const stat = await fs.stat(lockPath);
+      return {
+        invalid: true,
+        size: stat.size,
+        mtimeMs: stat.mtimeMs,
+        ctimeMs: stat.ctimeMs,
+        birthtimeMs: stat.birthtimeMs,
+      };
+    } catch (statError) {
+      if (statError?.code === "ENOENT") return null;
+      throw statError;
+    }
+  }
+}
+
+async function writePreparedLock(tempPath, metadata) {
+  let handle = null;
+  try {
+    handle = await fs.open(tempPath, "wx", 0o600);
+    await handle.writeFile(`${JSON.stringify(metadata)}\n`, "utf8");
+    await handle.sync();
+    await handle.close();
+    handle = null;
+  } catch (error) {
+    try { await handle?.close(); } catch {}
+    try { await fs.rm(tempPath, { force: true }); } catch {}
+    throw error;
+  }
+}
+
+async function createLockFile(lockPath, metadata) {
+  const tempPath = `${lockPath}.${process.pid}.${metadata.ownerId}.tmp`;
+  await writePreparedLock(tempPath, metadata);
+  try {
+    try {
+      await fs.link(tempPath, lockPath);
+      return true;
+    } catch (error) {
+      if (error?.code === "EEXIST") return false;
+      if (!LINK_FALLBACK_CODES.has(error?.code)) throw error;
+    }
+
+    let handle = null;
+    try {
+      handle = await fs.open(lockPath, "wx", 0o600);
+      await handle.writeFile(`${JSON.stringify(metadata)}\n`, "utf8");
+      await handle.sync();
+      return true;
+    } catch (error) {
+      if (error?.code === "EEXIST") return false;
+      throw error;
+    } finally {
+      try { await handle?.close(); } catch {}
+    }
+  } finally {
+    try { await fs.rm(tempPath, { force: true }); } catch {}
   }
 }
 
@@ -34,10 +92,14 @@ function createProjectLockManager({
   locksDir,
   lockTimeoutMs = 15_000,
   lockLeaseMs = 5 * 60_000,
+  lockInitializationGraceMs = 5_000,
+  lockRetryMs = 100,
 } = {}) {
   if (!locksDir) throw new TypeError("locksDir is required");
   const timeoutMs = intValue(lockTimeoutMs, 15_000, 0, 10 * 60_000);
   const leaseMs = intValue(lockLeaseMs, 5 * 60_000, 1000, 60 * 60_000);
+  const initializationGraceMs = intValue(lockInitializationGraceMs, 5_000, 100, 60_000);
+  const retryMs = intValue(lockRetryMs, 100, 1, 5_000);
   const activeOwners = new Set();
 
   function lockPathFor(projectRoot) {
@@ -46,7 +108,11 @@ function createProjectLockManager({
   }
 
   function isStale(info, now = Date.now()) {
-    if (!info || info.invalid) return true;
+    if (!info) return true;
+    if (info.invalid) {
+      const createdAtMs = Number(info.birthtimeMs || info.ctimeMs || info.mtimeMs || 0);
+      return createdAtMs > 0 && now - createdAtMs >= initializationGraceMs;
+    }
     const pid = Number(info.pid || 0);
     const ownerId = String(info.ownerId || "");
     const expired = Date.parse(info.expiresAt || 0) <= now;
@@ -61,55 +127,65 @@ function createProjectLockManager({
     const lockPath = lockPathFor(normalizedRoot);
     const deadline = Date.now() + timeoutMs;
     const ownerId = crypto.randomUUID();
-    let handle = null;
+    const metadata = {
+      version: 3,
+      ownerId,
+      pid: process.pid,
+      projectRoot: normalizedRoot,
+      acquiredAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + leaseMs).toISOString(),
+    };
+    let acquired = false;
 
-    while (!handle) {
-      try {
-        handle = await fs.open(lockPath, "wx", 0o600);
+    while (!acquired) {
+      acquired = await createLockFile(lockPath, metadata);
+      if (acquired) {
         activeOwners.add(ownerId);
-        await handle.writeFile(JSON.stringify({
-          version: 2,
-          ownerId,
-          pid: process.pid,
-          projectRoot: normalizedRoot,
-          acquiredAt: new Date().toISOString(),
-          expiresAt: new Date(Date.now() + leaseMs).toISOString(),
-        }));
-      } catch (error) {
-        if (handle) {
-          try { await handle.close(); } catch {}
-          handle = null;
-        }
-        activeOwners.delete(ownerId);
-        if (error?.code !== "EEXIST") throw error;
-        const current = await readLock(lockPath);
-        if (isStale(current)) {
-          await fs.rm(lockPath, { force: true });
-          continue;
-        }
-        if (Date.now() >= deadline) {
-          throw lockError("Project operation lock timed out", "EPROJECT_LOCKED", 423, {
-            projectRoot: normalizedRoot,
-            ownerPid: current?.pid || null,
-            ownerId: current?.ownerId || null,
-            acquiredAt: current?.acquiredAt || null,
-          });
-        }
-        await sleep(100);
+        break;
       }
+
+      const current = await readLock(lockPath);
+      if (isStale(current)) {
+        await fs.rm(lockPath, { force: true });
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw lockError("Project operation lock timed out", "EPROJECT_LOCKED", 423, {
+          projectRoot: normalizedRoot,
+          ownerPid: current?.pid || null,
+          ownerId: current?.ownerId || null,
+          acquiredAt: current?.acquiredAt || null,
+          initializing: Boolean(current?.invalid),
+        });
+      }
+      await sleep(retryMs);
     }
 
     try {
       return await fn({ ownerId, lockPath, leaseMs });
     } finally {
       activeOwners.delete(ownerId);
-      try { await handle.close(); } catch {}
       const current = await readLock(lockPath);
       if (current?.ownerId === ownerId) await fs.rm(lockPath, { force: true });
     }
   }
 
-  return Object.freeze({ activeOwners, isStale, leaseMs, lockPathFor, timeoutMs, withLock });
+  return Object.freeze({
+    activeOwners,
+    initializationGraceMs,
+    isStale,
+    leaseMs,
+    lockPathFor,
+    retryMs,
+    timeoutMs,
+    withLock,
+  });
 }
 
-module.exports = { createProjectLockManager, lockError, readLock };
+module.exports = {
+  createLockFile,
+  createProjectLockManager,
+  lockError,
+  readLock,
+  writePreparedLock,
+};
