@@ -5,6 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { createCommandPolicy } = require("./packages/daemon-core/command-policy.cjs");
 const { createJobService } = require("./packages/daemon-core/job-service-resilient.cjs");
+const { pidAlive, terminateProcessTree } = require("./packages/daemon-core/process-utils.cjs");
 
 function shellArg(value) {
   const text = String(value);
@@ -22,18 +23,64 @@ async function waitFor(fn, timeoutMs = 10_000, message = "Timed out waiting for 
   throw new Error(message);
 }
 
-async function waitForWorkerExit(jobs, jobId, timeoutMs = 10_000) {
-  return waitFor(async () => {
-    const job = await jobs.get(jobId);
-    return job.processAlive === false ? job : null;
-  }, timeoutMs, `Timed out waiting for Job Worker '${jobId}' to exit`);
+async function readWorkerState(root, jobId) {
+  try {
+    return JSON.parse(await fs.readFile(path.join(root, ".jobs", jobId, "worker.json"), "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function processState(jobs, root, jobId) {
+  const [job, workerState] = await Promise.all([
+    jobs.get(jobId),
+    readWorkerState(root, jobId),
+  ]);
+  const workerPid = Number(job.workerPid || job.pid || 0);
+  const commandPid = Number(workerState?.commandPid || 0);
+  return {
+    job,
+    workerPid,
+    commandPid,
+    workerAlive: pidAlive(workerPid),
+    commandAlive: pidAlive(commandPid),
+  };
+}
+
+async function waitForProcessesExit(jobs, root, jobId, timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs;
+  let state = null;
+  while (Date.now() < deadline) {
+    state = await processState(jobs, root, jobId);
+    if (!state.workerAlive && !state.commandAlive) return state;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(
+    `Timed out waiting for Job processes to exit: job=${jobId} `
+    + `workerPid=${state?.workerPid || "none"} workerAlive=${Boolean(state?.workerAlive)} `
+    + `commandPid=${state?.commandPid || "none"} commandAlive=${Boolean(state?.commandAlive)}`,
+  );
+}
+
+async function forceStopJobProcesses(jobs, root, jobId) {
+  let state;
+  try { state = await processState(jobs, root, jobId); }
+  catch { return; }
+  if (state.commandAlive) {
+    await terminateProcessTree(state.commandPid, { forceAfterMs: 1000 }).catch(() => {});
+  }
+  if (state.workerAlive) {
+    await terminateProcessTree(state.workerPid, { forceAfterMs: 1000 }).catch(() => {});
+  }
+  await waitForProcessesExit(jobs, root, jobId, 5000).catch(() => {});
 }
 
 async function removeTempTree(root) {
   await fs.rm(root, {
     recursive: true,
     force: true,
-    maxRetries: process.platform === "win32" ? 20 : 5,
+    maxRetries: process.platform === "win32" ? 30 : 5,
     retryDelay: 100,
   });
 }
@@ -64,7 +111,7 @@ async function main() {
       const instantLogs = await jobs.logs(instantCompleted.id, { maxBytes: 4096 });
       assert.equal(instantLogs.stdout.content, "instant-job-ok");
       assert.equal(instantLogs.stderr.content, "");
-      await waitForWorkerExit(jobs, instantCompleted.id);
+      await waitForProcessesExit(jobs, root, instantCompleted.id);
     }
 
     const script = path.join(root, "job.cjs");
@@ -109,7 +156,7 @@ async function main() {
     const next = await jobs.logs(completed.id, { cursor: logs.cursor, maxBytes: 4096 });
     assert.equal(next.stdout.content, "");
     assert.equal(next.stderr.content, "");
-    await waitForWorkerExit(jobs, completed.id);
+    await waitForProcessesExit(jobs, root, completed.id);
 
     const longScript = path.join(root, "long.cjs");
     await fs.writeFile(longScript, "setInterval(() => {}, 1000)\n", "utf8");
@@ -118,13 +165,13 @@ async function main() {
     const cancelled = await jobs.cancel(running.job.id);
     assert.equal(cancelled.cancelled, true);
     assert.equal((await jobs.get(running.job.id)).status, "cancelled");
-    await waitForWorkerExit(jobs, running.job.id);
+    await waitForProcessesExit(jobs, root, running.job.id);
 
-    console.log("PASS job service including zero-delay completion, command redaction, and worker shutdown");
+    console.log("PASS job service including zero-delay completion, command redaction, and process-tree shutdown");
   } finally {
     if (jobs) {
       for (const jobId of [...new Set(startedJobIds)]) {
-        await waitForWorkerExit(jobs, jobId, 5000).catch(() => {});
+        await forceStopJobProcesses(jobs, root, jobId);
       }
     }
     await removeTempTree(root);
