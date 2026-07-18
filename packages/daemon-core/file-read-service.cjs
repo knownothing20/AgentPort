@@ -1,8 +1,6 @@
-const crypto = require("node:crypto");
 const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
 const path = require("node:path");
-const { StringDecoder } = require("node:string_decoder");
 const { resolveWorkspacePath } = require("./path-guard.cjs");
 const { sha256 } = require("./atomic-write.cjs");
 
@@ -12,39 +10,131 @@ function positiveInt(value, fallback, min = 1, max = Number.MAX_SAFE_INTEGER) {
   return Math.min(Math.max(parsed, min), max);
 }
 
-async function readLineRangeWithHash(filePath, startLine, requestedEndLine) {
-  const decoder = new StringDecoder("utf8");
-  const hash = crypto.createHash("sha256");
-  const selected = [];
-  let pending = "";
-  let lineNumber = 0;
-  let endedWithNewline = false;
+function metadataEtag(stat) {
+  const identity = [
+    Number(stat.dev || 0),
+    Number(stat.ino || 0),
+    Number(stat.size || 0),
+    Math.trunc(Number(stat.mtimeMs || 0)),
+    Math.trunc(Number(stat.ctimeMs || 0)),
+  ].join(":");
+  return `meta-${sha256(Buffer.from(identity, "utf8"))}`;
+}
 
-  function acceptLine(rawLine) {
-    lineNumber += 1;
-    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
-    if (lineNumber >= startLine && lineNumber <= requestedEndLine) selected.push(line);
+function rangeLimitError(message, code, details = {}) {
+  const error = new Error(message);
+  error.code = code;
+  error.statusCode = 413;
+  Object.assign(error, details);
+  return error;
+}
+
+async function readLineRangeWithHash(filePath, startLine, requestedEndLine, options = {}) {
+  const maxBytes = positiveInt(options.maxBytes, 2 * 1024 * 1024, 1, 50 * 1024 * 1024);
+  const maxScanBytes = positiveInt(
+    options.maxScanBytes,
+    Math.max(64 * 1024 * 1024, maxBytes),
+    maxBytes,
+    512 * 1024 * 1024,
+  );
+  const stream = fsSync.createReadStream(filePath, { highWaterMark: 64 * 1024 });
+  const selectedLines = [];
+  let selectedLineChunks = [];
+  let selectedLineBytes = 0;
+  let outputBytes = 0;
+  let scannedBytes = 0;
+  let currentLine = 1;
+  let lastSelectedLine = 0;
+  let reachedRequestedEnd = false;
+  let reachedEof = true;
+
+  function lineSelected() {
+    return currentLine >= startLine && currentLine <= requestedEndLine;
   }
 
-  const stream = fsSync.createReadStream(filePath);
-  for await (const chunk of stream) {
-    hash.update(chunk);
-    const text = pending + decoder.write(chunk);
-    const parts = text.split("\n");
-    pending = parts.pop();
-    for (const part of parts) acceptLine(part);
-    endedWithNewline = text.endsWith("\n");
+  function appendSelected(segment) {
+    if (!lineSelected() || segment.length === 0) return;
+    const separatorBytes = selectedLines.length > 0 ? 1 : 0;
+    if (outputBytes + separatorBytes + selectedLineBytes + segment.length > maxBytes) {
+      throw rangeLimitError(
+        `Selected line range exceeds maxBytes ${maxBytes}; narrow the line range or use read-bytes`,
+        "ERANGE_BYTES",
+        { maxBytes, scannedBytes, startLine, requestedEndLine },
+      );
+    }
+    selectedLineChunks.push(segment);
+    selectedLineBytes += segment.length;
   }
 
-  pending += decoder.end();
-  if (pending.length > 0 || endedWithNewline || lineNumber === 0) acceptLine(pending);
+  function finishCurrentLine({ advance }) {
+    if (lineSelected()) {
+      let line = selectedLineBytes > 0
+        ? Buffer.concat(selectedLineChunks, selectedLineBytes)
+        : Buffer.alloc(0);
+      if (line.length > 0 && line[line.length - 1] === 0x0d) line = line.subarray(0, line.length - 1);
+      const separatorBytes = selectedLines.length > 0 ? 1 : 0;
+      if (outputBytes + separatorBytes + line.length > maxBytes) {
+        throw rangeLimitError(
+          `Selected line range exceeds maxBytes ${maxBytes}; narrow the line range or use read-bytes`,
+          "ERANGE_BYTES",
+          { maxBytes, scannedBytes, startLine, requestedEndLine },
+        );
+      }
+      selectedLines.push(line.toString("utf8"));
+      outputBytes += separatorBytes + line.length;
+      lastSelectedLine = currentLine;
+    }
+    selectedLineChunks = [];
+    selectedLineBytes = 0;
+    if (currentLine >= requestedEndLine) return true;
+    if (advance) currentLine += 1;
+    return false;
+  }
 
-  const actualStartLine = Math.min(startLine, Math.max(lineNumber, 1));
-  const actualEndLine = Math.min(requestedEndLine, Math.max(lineNumber, actualStartLine));
+  outer: for await (const chunk of stream) {
+    scannedBytes += chunk.length;
+    if (scannedBytes > maxScanBytes) {
+      throw rangeLimitError(
+        `Line-range scan exceeds maxScanBytes ${maxScanBytes}; use a nearer line range or read-bytes`,
+        "ESCAN_LIMIT",
+        { maxScanBytes, scannedBytes, startLine, requestedEndLine },
+      );
+    }
+
+    let offset = 0;
+    while (offset < chunk.length) {
+      const newline = chunk.indexOf(0x0a, offset);
+      if (newline < 0) {
+        appendSelected(chunk.subarray(offset));
+        break;
+      }
+      appendSelected(chunk.subarray(offset, newline));
+      if (finishCurrentLine({ advance: true })) {
+        reachedRequestedEnd = true;
+        reachedEof = false;
+        break outer;
+      }
+      offset = newline + 1;
+    }
+  }
+
+  if (!reachedRequestedEnd) finishCurrentLine({ advance: false });
+
+  const totalLines = reachedEof ? currentLine : null;
+  const actualStartLine = totalLines === null
+    ? startLine
+    : Math.min(startLine, Math.max(totalLines, 1));
+  const actualEndLine = lastSelectedLine || actualStartLine;
   return {
-    content: selected.join("\n"),
-    etag: hash.digest("hex"),
-    totalLines: lineNumber,
+    content: selectedLines.join("\n"),
+    etag: options.etag || null,
+    etagKind: "metadata",
+    writeEtag: null,
+    totalLines,
+    totalLinesKnown: reachedEof,
+    scannedBytes,
+    maxBytes,
+    maxScanBytes,
     startLine: actualStartLine,
     endLine: actualEndLine,
   };
@@ -88,7 +178,11 @@ function createFileReadService({ workspaceRoot, defaultMaxBytes = 2 * 1024 * 102
     if (hasRange) {
       const startLine = positiveInt(options.startLine, 1, 1);
       const requestedEndLine = positiveInt(options.endLine, Number.MAX_SAFE_INTEGER, startLine);
-      const ranged = await readLineRangeWithHash(resolved.realPath, startLine, requestedEndLine);
+      const ranged = await readLineRangeWithHash(resolved.realPath, startLine, requestedEndLine, {
+        maxBytes,
+        maxScanBytes: options.maxScanBytes,
+        etag: metadataEtag(value),
+      });
       return {
         path: path.relative(resolved.root, resolved.realPath).replace(/\\/g, "/"),
         ...ranged,
@@ -104,8 +198,11 @@ function createFileReadService({ workspaceRoot, defaultMaxBytes = 2 * 1024 * 102
       path: path.relative(resolved.root, resolved.realPath).replace(/\\/g, "/"),
       content: fullContent,
       etag: sha256(Buffer.from(fullContent, "utf8")),
+      etagKind: "content",
+      writeEtag: sha256(Buffer.from(fullContent, "utf8")),
       size: value.size,
       totalLines: lines.length,
+      totalLinesKnown: true,
       startLine: 1,
       endLine: lines.length,
       ranged: false,
@@ -208,4 +305,4 @@ function createFileReadService({ workspaceRoot, defaultMaxBytes = 2 * 1024 * 102
   return Object.freeze({ stat, readText, readBytes, manifest });
 }
 
-module.exports = { createFileReadService, readLineRangeWithHash };
+module.exports = { createFileReadService, metadataEtag, readLineRangeWithHash };
