@@ -10,6 +10,7 @@ const metaPath = path.join(jobDir, "meta.json");
 const resultPath = path.join(jobDir, "result.json");
 const workerPath = path.join(jobDir, "worker.json");
 const workerLogPath = path.join(jobDir, "worker.log");
+const cancelPath = path.join(jobDir, "cancel.json");
 const stdoutPath = path.join(jobDir, "stdout.log");
 const stderrPath = path.join(jobDir, "stderr.log");
 let child = null;
@@ -24,6 +25,7 @@ let pendingOutcome = null;
 
 function nowIso() { return new Date().toISOString(); }
 function pidAlive(pid) { try { process.kill(pid, 0); return true; } catch (error) { return error?.code === "EPERM"; } }
+function cancellationRequested() { return cancelled || fs.existsSync(cancelPath); }
 
 function diagnostic(phase, error, extra = {}) {
   const record = {
@@ -106,6 +108,10 @@ async function finish(status, code, signal, error) {
   if (finishing) return;
   finishing = true;
   if (timeout) clearTimeout(timeout);
+  if (cancellationRequested() && status !== "timeout") {
+    cancelled = true;
+    status = "cancelled";
+  }
   if (error) diagnostic("finish.error", error);
   await Promise.all([closeStream(stdout), closeStream(stderr)]);
 
@@ -128,7 +134,7 @@ async function finish(status, code, signal, error) {
     finishedAt: result.finishedAt,
   }, "worker_state");
   diagnostic("finish.complete", null, { status, resultWritten });
-  process.exit(resultWritten && status === "completed" ? 0 : 1);
+  process.exit(resultWritten && ["completed", "cancelled"].includes(status) ? 0 : 1);
 }
 
 function requestFinish(status, code, signal, error) {
@@ -166,6 +172,7 @@ async function main() {
   child.stderr?.pipe(stderr);
   child.once("error", (error) => { requestFinish("error", null, null, error); });
   child.once("close", (code, signal) => {
+    if (cancellationRequested()) cancelled = true;
     const status = cancelled ? "cancelled" : timedOut ? "timeout" : code === 0 ? "completed" : "error";
     requestFinish(status, code, signal, null);
   });
@@ -190,6 +197,11 @@ async function main() {
   diagnostic("command.started", null, { commandPid: child.pid || null });
 
   startupReady = true;
+  if (cancellationRequested() && child?.pid && pidAlive(child.pid)) {
+    cancelled = true;
+    diagnostic("cancel.request_detected", null);
+    await stopChild("SIGTERM");
+  }
   if (pendingOutcome) {
     const outcome = pendingOutcome;
     pendingOutcome = null;
