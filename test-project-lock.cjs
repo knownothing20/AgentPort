@@ -5,6 +5,20 @@ const path = require('node:path');
 const { createProjectLockManager } = require('./packages/daemon-core/project-lock.cjs');
 
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+async function waitUntil(timestampMs) {
+  while (Date.now() <= timestampMs) {
+    await sleep(Math.min(25, Math.max(1, timestampMs - Date.now() + 1)));
+  }
+}
 
 async function main() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'agentport-project-lock-'));
@@ -27,11 +41,29 @@ async function main() {
       lockLeaseMs: 1000,
       lockRetryMs: 5,
     });
-    let entered = false;
-    const first = manager.withLock(project, async () => { entered = true; await sleep(1400); return 'first'; });
-    while (!entered) await sleep(5);
-    await sleep(1100);
-    await assert.rejects(() => manager.withLock(project, async () => 'stolen'), (error) => error?.code === 'EPROJECT_LOCKED');
+    const entered = deferred();
+    const release = deferred();
+    const first = manager.withLock(project, async () => {
+      entered.resolve();
+      await release.promise;
+      return 'first';
+    });
+    await entered.promise;
+
+    const liveLockPath = manager.lockPathFor(project);
+    const liveLock = JSON.parse(await fs.readFile(liveLockPath, 'utf8'));
+    const expiresAtMs = Date.parse(liveLock.expiresAt);
+    assert.ok(Number.isFinite(expiresAtMs), 'lock metadata must include a valid expiresAt');
+    await waitUntil(expiresAtMs + 25);
+
+    try {
+      await assert.rejects(
+        () => manager.withLock(project, async () => 'stolen'),
+        (error) => error?.code === 'EPROJECT_LOCKED',
+      );
+    } finally {
+      release.resolve();
+    }
     assert.equal(await first, 'first');
     assert.equal(await manager.withLock(project, async () => 'after-release'), 'after-release');
 
@@ -90,7 +122,7 @@ async function main() {
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
-  console.log('PASS atomic lock initialization, 1000-round contention, live ownership, and dead-owner recovery');
+  console.log('PASS deterministic expired-live-lock gate, atomic initialization, 1000-round contention, and dead-owner recovery');
 }
 
 main().catch((error) => { console.error(error.stack || error.message); process.exit(1); });
