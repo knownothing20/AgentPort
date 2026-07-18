@@ -45,5 +45,6 @@ jobs:
       - run: node test-development-session-service.cjs
       - run: node test-development-gateway.cjs
       - run: node test-client-mcp-v3.cjs
+      - run: node test-mcp-redaction.cjs
       - run: npm audit --audit-level=high
       - run: npm --prefix server audit --audit-level=high
