@@ -4,7 +4,7 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const { createCommandPolicy } = require("./packages/daemon-core/command-policy.cjs");
-const { createJobService } = require("./packages/daemon-core/job-service.cjs");
+const { createJobService } = require("./packages/daemon-core/job-service-resilient.cjs");
 
 function shellArg(value) {
   const text = String(value);
@@ -49,14 +49,19 @@ async function main() {
 
     const script = path.join(root, "job.cjs");
     await fs.writeFile(script, "console.log('job-out'); console.error('job-err')\n", "utf8");
-    const command = `${shellArg(process.execPath)} ${shellArg(script)}`;
+    const secret = "job-token-must-never-leak";
+    const command = `${shellArg(process.execPath)} ${shellArg(script)} --api-key ${shellArg(secret)}`;
 
     const started = await jobs.start({ command, cwd: root, clientId: "test", idempotencyKey: "same-job" });
     assert.equal(started.reused, false);
+    assert.equal(started.job.commandPreview, "[REDACTED]");
+    assert.equal(started.job.commandRedacted, true);
+    assert.doesNotMatch(JSON.stringify(started), new RegExp(secret));
 
     const reused = await jobs.start({ command, cwd: root, clientId: "test", idempotencyKey: "same-job" });
     assert.equal(reused.reused, true);
     assert.equal(reused.job.id, started.job.id);
+    assert.doesNotMatch(JSON.stringify(reused), new RegExp(secret));
 
     await assert.rejects(
       () => jobs.start({ command: `${command} different`, cwd: root, idempotencyKey: "same-job" }),
@@ -68,11 +73,17 @@ async function main() {
       return job.status === "completed" ? job : null;
     });
     assert.equal(completed.exitCode, 0);
+    assert.equal(completed.commandPreview, "[REDACTED]");
+    assert.doesNotMatch(JSON.stringify(completed), new RegExp(secret));
+
+    const listed = await jobs.list({ limit: 10 });
+    assert.doesNotMatch(JSON.stringify(listed), new RegExp(secret));
 
     const logs = await jobs.logs(completed.id, { maxBytes: 4096 });
     assert.match(logs.stdout.content, /job-out/);
     assert.match(logs.stderr.content, /job-err/);
     assert.ok(logs.cursor);
+    assert.doesNotMatch(JSON.stringify(logs.job), new RegExp(secret));
 
     const next = await jobs.logs(completed.id, { cursor: logs.cursor, maxBytes: 4096 });
     assert.equal(next.stdout.content, "");
@@ -85,7 +96,7 @@ async function main() {
     assert.equal(cancelled.cancelled, true);
     assert.equal((await jobs.get(running.job.id)).status, "cancelled");
 
-    console.log("PASS job service including zero-delay shell completion");
+    console.log("PASS job service including zero-delay completion and command redaction");
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
