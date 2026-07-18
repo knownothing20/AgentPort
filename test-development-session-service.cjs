@@ -52,6 +52,7 @@ async function main() {
     assert.equal(git(repo, ['branch', '--show-current']), 'main');
 
     await fs.writeFile(path.join(session.worktreePath, 'README.md'), 'changed\n');
+    // Repeated fast Git reads guard against resolving on child exit before pipes close.
     for (let iteration = 0; iteration < 50; iteration += 1) {
       const diff = await service.diff(session.id);
       assert.match(normalizeEol(diff.diff), /changed/, `fast diff iteration ${iteration + 1} returned incomplete stdout`);
