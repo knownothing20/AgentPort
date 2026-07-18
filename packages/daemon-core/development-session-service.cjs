@@ -5,10 +5,10 @@ const { spawn } = require('node:child_process');
 const { atomicWriteFile } = require('./atomic-write.cjs');
 const { resolveWorkspacePath, isWithin } = require('./path-guard.cjs');
 const { pidAlive, terminateProcessTree } = require('./process-utils.cjs');
+const { createProjectLockManager } = require('./project-lock.cjs');
 
 function nowIso() { return new Date().toISOString(); }
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
-function hash(value) { return crypto.createHash('sha256').update(String(value)).digest('hex'); }
 function safeId(value, label = 'id') {
   const normalized = String(value || '').trim();
   if (!normalized || !/^[A-Za-z0-9._-]{1,120}$/.test(normalized)) {
@@ -92,6 +92,7 @@ function createDevelopmentSessionService({
   worktreesDir,
   defaultLeaseMs = 30 * 60 * 1000,
   lockTimeoutMs = 15_000,
+  projectLockLeaseMs = 5 * 60_000,
   gitTimeoutMs = 60_000,
   maxDiffBytes = 2 * 1024 * 1024,
 } = {}) {
@@ -116,29 +117,10 @@ function createDevelopmentSessionService({
     try { return JSON.parse(await fs.readFile(sessionPath(id), 'utf8')); }
     catch (error) { if (error?.code === 'ENOENT') throw errorWith(`Session '${id}' not found`, 'ENOENT', 404); throw error; }
   }
+  const projectLocks = createProjectLockManager({ locksDir, lockTimeoutMs, lockLeaseMs: projectLockLeaseMs });
   async function withProjectLock(projectRoot, fn) {
     await init();
-    const lockPath = path.join(locksDir, `${hash(path.resolve(projectRoot)).slice(0, 24)}.lock`);
-    const deadline = Date.now() + lockTimeoutMs;
-    let handle = null;
-    while (!handle) {
-      try {
-        handle = await fs.open(lockPath, 'wx', 0o600);
-        await handle.writeFile(JSON.stringify({ pid: process.pid, projectRoot: path.resolve(projectRoot), acquiredAt: nowIso(), expiresAt: new Date(Date.now() + Math.max(lockTimeoutMs * 2, 30_000)).toISOString() }));
-      } catch (error) {
-        if (error?.code !== 'EEXIST') throw error;
-        let stale = false;
-        try {
-          const info = JSON.parse(await fs.readFile(lockPath, 'utf8'));
-          stale = Date.parse(info.expiresAt || 0) < Date.now() || (info.pid && !pidAlive(info.pid));
-        } catch { stale = true; }
-        if (stale) { await fs.rm(lockPath, { force: true }); continue; }
-        if (Date.now() >= deadline) throw errorWith('Project operation lock timed out', 'EPROJECT_LOCKED', 423, { projectRoot });
-        await sleep(100);
-      }
-    }
-    try { return await fn(); }
-    finally { try { await handle.close(); } catch {} await fs.rm(lockPath, { force: true }); }
+    return projectLocks.withLock(projectRoot, fn);
   }
   async function git(cwd, args, options = {}) { return run('git', args, { cwd, timeoutMs: options.timeoutMs || gitTimeoutMs, maxBytes: options.maxBytes || 4 * 1024 * 1024, allowCodes: options.allowCodes || [0], env: options.env }); }
   async function resolveRepository(projectRoot) {
@@ -314,7 +296,7 @@ function createDevelopmentSessionService({
   }
   async function stats() {
     const sessions = await list({ limit: 500 });
-    return { total: sessions.length, active: sessions.filter((item) => item.status === 'active').length, merged: sessions.filter((item) => item.status === 'merged').length, closed: sessions.filter((item) => item.status === 'closed').length, leaseActive: sessions.filter((item) => item.leaseActive).length, sessionsDir: sessionRoot, worktreesDir: worktreeRoot };
+    return { total: sessions.length, active: sessions.filter((item) => item.status === 'active').length, merged: sessions.filter((item) => item.status === 'merged').length, closed: sessions.filter((item) => item.status === 'closed').length, leaseActive: sessions.filter((item) => item.leaseActive).length, sessionsDir: sessionRoot, worktreesDir: worktreeRoot, projectLockLeaseMs: projectLocks.leaseMs };
   }
 
   return Object.freeze({ init, create, status, list, heartbeat, attachJob, diff, commit, rollback, merge, cleanup, stats });
