@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { redactSensitive } from "./redaction.js";
 
 function expandHome(value) {
   const text = String(value || "").trim();
@@ -26,6 +27,19 @@ function normalizedPriority(value, fallback = 100) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function attachSafeJson(value) {
+  Object.defineProperty(value, "toJSON", {
+    enumerable: false,
+    configurable: false,
+    writable: false,
+    value() {
+      const plain = { ...this };
+      return redactSensitive(plain);
+    },
+  });
+  return value;
+}
+
 function normalizeEndpoint(endpoint, serverId, index = 0) {
   if (!endpoint || typeof endpoint !== "object" || Array.isArray(endpoint)) {
     throw new Error(`Endpoint ${index + 1} on server '${serverId}' must be an object`);
@@ -42,7 +56,7 @@ function normalizeEndpoint(endpoint, serverId, index = 0) {
   if (type === "ssh" && !String(endpoint.host || "").trim()) {
     throw new Error(`SSH endpoint '${id}' is missing host`);
   }
-  return Object.freeze({
+  const normalized = {
     ...endpoint,
     id,
     name: String(endpoint.name || id).trim(),
@@ -57,7 +71,8 @@ function normalizeEndpoint(endpoint, serverId, index = 0) {
     privateKey: endpoint.privateKey ? expandHome(endpoint.privateKey) : undefined,
     workspaceRoot: endpoint.workspaceRoot ? String(endpoint.workspaceRoot).trim() : undefined,
     enabled: endpoint.enabled !== false,
-  });
+  };
+  return Object.freeze(attachSafeJson(normalized));
 }
 
 function normalizeServer(server, index = 0) {
@@ -222,6 +237,7 @@ export async function loadConnectionRegistry({ baseDir = process.cwd(), filePath
 }
 
 export const connectionRegistryInternals = Object.freeze({
+  attachSafeJson,
   normalizeEndpoint,
   normalizeLegacyConfig,
   normalizeServer,
