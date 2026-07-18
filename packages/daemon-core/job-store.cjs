@@ -40,6 +40,7 @@ function createJobStore({ jobsDir } = {}) {
   function jobDir(jobId) { return path.join(root, safeJobId(jobId)); }
   function metaPath(jobId) { return path.join(jobDir(jobId), "meta.json"); }
   function resultPath(jobId) { return path.join(jobDir(jobId), "result.json"); }
+  function cancelPath(jobId) { return path.join(jobDir(jobId), "cancel.json"); }
   function stdoutPath(jobId) { return path.join(jobDir(jobId), "stdout.log"); }
   function stderrPath(jobId) { return path.join(jobDir(jobId), "stderr.log"); }
   function keyHash(key) { return sha256(Buffer.from(String(key), "utf8")); }
@@ -96,6 +97,21 @@ function createJobStore({ jobsDir } = {}) {
 
   async function readResult(jobId) { return readJsonIfExists(resultPath(jobId)); }
 
+  async function writeCancelRequest(jobId, request = {}) {
+    const id = safeJobId(jobId);
+    const value = {
+      requested: true,
+      jobId: id,
+      requestedAt: request.requestedAt || nowIso(),
+      signal: request.signal || "SIGTERM",
+      requestedBy: request.requestedBy || null,
+    };
+    await writeJsonAtomic(cancelPath(id), value);
+    return value;
+  }
+
+  async function readCancelRequest(jobId) { return readJsonIfExists(cancelPath(jobId)); }
+
   async function list({ limit = 50, status } = {}) {
     await ensure();
     const entries = await fs.readdir(root, { withFileTypes: true });
@@ -113,7 +129,7 @@ function createJobStore({ jobsDir } = {}) {
 
   async function remove(jobId) {
     const id = safeJobId(jobId);
-    await fs.rm(jobDir(id), { recursive: true, force: true });
+    await fs.rm(jobDir(id), { recursive: true, force: true, maxRetries: process.platform === "win32" ? 20 : 5, retryDelay: 100 });
     return { deleted: true, jobId: id };
   }
 
@@ -150,11 +166,13 @@ function createJobStore({ jobsDir } = {}) {
     remove,
     readResult,
     writeResult,
+    readCancelRequest,
+    writeCancelRequest,
     readIdempotency,
     writeIdempotency,
     removeIdempotency,
     withIdempotencyLock,
-    paths: Object.freeze({ jobDir, metaPath, resultPath, stdoutPath, stderrPath, keyPath }),
+    paths: Object.freeze({ jobDir, metaPath, resultPath, cancelPath, stdoutPath, stderrPath, keyPath }),
   });
 }
 
