@@ -37,7 +37,7 @@ function createProjectLockManager({
 } = {}) {
   if (!locksDir) throw new TypeError("locksDir is required");
   const timeoutMs = intValue(lockTimeoutMs, 15_000, 0, 10 * 60_000);
-  const leaseMs = intValue(lockLeaseMs, 5 * 60_000, 30_000, 60 * 60_000);
+  const leaseMs = intValue(lockLeaseMs, 5 * 60_000, 1000, 60 * 60_000);
   const activeOwners = new Set();
 
   function lockPathFor(projectRoot) {
