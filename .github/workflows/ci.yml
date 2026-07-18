@@ -33,6 +33,7 @@ jobs:
       - run: node test-exec-core.cjs
       - run: node test-client-runtime.cjs
       - run: node test-client-development-sessions.cjs
+      - run: node test-project-lock.cjs
       - run: node test-development-session-service.cjs
       - run: node test-development-gateway.cjs
       - run: node test-client-redaction.cjs
@@ -66,6 +67,7 @@ jobs:
       - run: node test-job-service.cjs
       - run: node test-job-worker-readiness.cjs
       - run: node test-daemon-exec-jobs.cjs
+      - run: node test-project-lock.cjs
       - run: node test-development-session-service.cjs
       - run: node test-development-gateway.cjs
       - run: node test-client-mcp-v3.cjs
