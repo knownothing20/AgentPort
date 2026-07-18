@@ -76,12 +76,13 @@ async function main() {
   await fs.mkdir(path.join(root, 'src'));
   await fs.writeFile(path.join(root, 'src', 'a.js'), 'const needle = 1;\nconsole.log(needle);\n');
   await fs.writeFile(path.join(root, 'src', 'b.txt'), 'hello\nworld\n');
+  await fs.writeFile(path.join(root, 'src', 'long.txt'), `${'x'.repeat(4096)}\nsecond\n`);
 
   await testConfigAndLegacyProcess(root);
 
   const search = createFileSearchService({ workspaceRoot: root });
   const glob = await search.glob('**/*.{js,txt}');
-  assert.deepEqual(glob.files.sort(), ['src/a.js', 'src/b.txt']);
+  assert.deepEqual(glob.files.sort(), ['src/a.js', 'src/b.txt', 'src/long.txt']);
   const grep = await search.grep({ pattern: 'needle', include: '**/*.js' });
   assert.equal(grep.matches.length, 2);
 
@@ -145,6 +146,16 @@ async function main() {
     assert.equal(ranged.json.content, 'console.log(needle);');
     assert.equal(ranged.json.ranged, true);
     assert.equal(ranged.json.streamed, true);
+    assert.equal(ranged.json.etagKind, 'metadata');
+    assert.equal(ranged.json.writeEtag, null);
+
+    const rangeTooLarge = await request(port, 'POST', '/api/fs/read', { path: 'src/long.txt', startLine: 1, endLine: 1, maxBytes: 16 }, auth);
+    assert.equal(rangeTooLarge.status, 413);
+    assert.equal(rangeTooLarge.json.code, 'ERANGE_BYTES');
+
+    const scanTooLarge = await request(port, 'POST', '/api/fs/read', { path: 'src/long.txt', startLine: 2, endLine: 2, maxBytes: 16, maxScanBytes: 64 }, auth);
+    assert.equal(scanTooLarge.status, 413);
+    assert.equal(scanTooLarge.json.code, 'ESCAN_LIMIT');
 
     const write = await request(port, 'POST', '/api/fs/write', { path: 'src/new.txt', content: 'new-content' }, auth);
     assert.equal(write.status, 200);
