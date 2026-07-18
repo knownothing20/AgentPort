@@ -1,7 +1,8 @@
 {
-  "name": "remote-daemon",
-  "version": "1.0.0",
-  "description": "",
+  "name": "@agentport/legacy-daemon",
+  "version": "3.1.0",
+  "private": true,
+  "description": "AgentPort legacy compatibility daemon used behind the modular gateway",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
