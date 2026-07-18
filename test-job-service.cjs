@@ -35,6 +35,18 @@ async function main() {
       defaultTimeoutMs: 5000,
     });
 
+    if (process.platform !== "win32") {
+      const instant = await jobs.start({ command: "printf instant-job-ok", cwd: root, clientId: "instant-test" });
+      const instantCompleted = await waitFor(async () => {
+        const job = await jobs.get(instant.job.id);
+        return job.status === "completed" ? job : null;
+      });
+      assert.equal(instantCompleted.exitCode, 0);
+      const instantLogs = await jobs.logs(instantCompleted.id, { maxBytes: 4096 });
+      assert.equal(instantLogs.stdout.content, "instant-job-ok");
+      assert.equal(instantLogs.stderr.content, "");
+    }
+
     const script = path.join(root, "job.cjs");
     await fs.writeFile(script, "console.log('job-out'); console.error('job-err')\n", "utf8");
     const command = `${shellArg(process.execPath)} ${shellArg(script)}`;
@@ -73,7 +85,7 @@ async function main() {
     assert.equal(cancelled.cancelled, true);
     assert.equal((await jobs.get(running.job.id)).status, "cancelled");
 
-    console.log("PASS job service");
+    console.log("PASS job service including zero-delay shell completion");
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
