@@ -50,20 +50,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-      - name: Run Windows Job Service regression
-        shell: pwsh
-        run: |
-          & node test-job-service.cjs *>&1 | Tee-Object -FilePath windows-job-service.log
-          $exitCode = $LASTEXITCODE
-          exit $exitCode
-      - name: Upload Windows Job diagnostics
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-job-service-node-${{ matrix.node }}
-          path: windows-job-service.log
-          if-no-files-found: error
-          retention-days: 3
+      - run: node test-job-service.cjs
 
   durable-linux:
     name: Legacy, durable jobs, Worktrees, and MCP V3 (Ubuntu, Node 22)
