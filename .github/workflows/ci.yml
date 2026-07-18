@@ -36,6 +36,7 @@ jobs:
       - run: node test-development-session-service.cjs
       - run: node test-development-gateway.cjs
       - run: node test-client-redaction.cjs
+      - run: node test-daemon-response-redaction.cjs
 
   durable-linux:
     name: Legacy, durable jobs, Worktrees, and MCP V3 (Ubuntu, Node 22)
@@ -55,6 +56,7 @@ jobs:
       - run: node test-development-gateway.cjs
       - run: node test-client-mcp-v3.cjs
       - run: node test-mcp-redaction.cjs
+      - run: node test-daemon-response-redaction.cjs
       - run: npm audit --audit-level=moderate
       - name: Clean-install and verify legacy daemon dependencies
         run: |
