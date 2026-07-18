@@ -52,8 +52,11 @@ async function main() {
     assert.equal(git(repo, ['branch', '--show-current']), 'main');
 
     await fs.writeFile(path.join(session.worktreePath, 'README.md'), 'changed\n');
-    const diff = await service.diff(session.id);
-    assert.match(normalizeEol(diff.diff), /changed/);
+    for (let iteration = 0; iteration < 50; iteration += 1) {
+      const diff = await service.diff(session.id);
+      assert.match(normalizeEol(diff.diff), /changed/, `fast diff iteration ${iteration + 1} returned incomplete stdout`);
+      assert.match(normalizeEol(diff.status), /README\.md/, `fast status iteration ${iteration + 1} returned incomplete stdout`);
+    }
 
     await assert.rejects(
       () => service.rollback(session.id, { confirm: 'wrong' }),
@@ -87,7 +90,7 @@ async function main() {
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
-  console.log('PASS development session Worktree, diff, commit, merge, confirmation, and cleanup');
+  console.log('PASS development session Worktree, 50 fast diff/status reads, commit, merge, confirmation, and cleanup');
 }
 
 main().catch((error) => {

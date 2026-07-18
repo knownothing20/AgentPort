@@ -64,7 +64,7 @@ async function run(command, args, { cwd, timeoutMs = 60_000, maxBytes = 4 * 1024
       if (settled) return; settled = true; if (timer) clearTimeout(timer);
       reject(errorWith(`${command} failed to start: ${cause.message}`, cause.code || 'ESPAWN', 500));
     });
-    child.once('exit', (code, signal) => {
+    child.once('close', (code, signal) => {
       if (settled) return; settled = true; if (timer) clearTimeout(timer);
       const result = { code, signal, stdout: stdout.toString('utf8'), stderr: stderr.toString('utf8') };
       if (!allowCodes.includes(code)) {
