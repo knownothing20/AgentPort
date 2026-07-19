@@ -139,6 +139,10 @@ function createDaemonConfigLoader({ baseDir = __dirname, envPath } = {}) {
       serverId: String(values.AGENTPORT_SERVER_ID || values.SERVER_ID || os.hostname()).trim(),
       workspaceId: String(values.AGENTPORT_WORKSPACE_ID || values.WORKSPACE_ID || workspaceRoot).trim(),
       auditLogPath: path.resolve(values.AUDIT_LOG_PATH || path.join(baseDir, "..", "server", "audit.log")),
+      audit: Object.freeze({
+        maxBytes: intValue(values.AUDIT_MAX_BYTES, 10 * 1024 * 1024, 1024),
+        maxFiles: intValue(values.AUDIT_MAX_FILES, 5, 1, 100),
+      }),
       tokenClientMap,
       adminTokens: parseAdminTokens(values),
       dashboardEnabled: /^true$/i.test(String(values.ENABLE_DASHBOARD || "false")),

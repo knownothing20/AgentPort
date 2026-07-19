@@ -47,8 +47,8 @@ function createJobStore({ jobsDir } = {}) {
   function keyPath(key) { return path.join(keysDir, `${keyHash(key)}.json`); }
 
   async function ensure() {
-    await fs.mkdir(root, { recursive: true });
-    await fs.mkdir(keysDir, { recursive: true });
+    await fs.mkdir(root, { recursive: true, mode: 0o700 });
+    await fs.mkdir(keysDir, { recursive: true, mode: 0o700 });
   }
 
   async function writeJsonAtomic(filePath, value, mode = 0o600) {
@@ -67,7 +67,7 @@ function createJobStore({ jobsDir } = {}) {
       stdoutPath: stdoutPath(id),
       stderrPath: stderrPath(id),
     };
-    await fs.mkdir(jobDir(id), { recursive: false });
+    await fs.mkdir(jobDir(id), { recursive: false, mode: 0o700 });
     await fs.writeFile(stdoutPath(id), "", { encoding: "utf8", mode: 0o600 });
     await fs.writeFile(stderrPath(id), "", { encoding: "utf8", mode: 0o600 });
     await writeJsonAtomic(metaPath(id), value);

@@ -29,7 +29,16 @@ const SYNC_SKILLS = process.argv.includes("--skills");
 
 const SKILL_DIR = __dirname;
 const PRIMARY_CONFIG_JSON_PATH = path.join(SKILL_DIR, "local", "agentport.json");
-const SKILL_SYNC_EXCLUDES = new Set([".git", "local", "node_modules"]);
+const PACKAGE_JSON_PATH = path.join(SKILL_DIR, "package.json");
+const SKILL_SYNC_EXCLUDES = new Set([".git", "node_modules"]);
+const SKILL_SYNC_LOCAL_FILES = new Set([
+  "local/README.md",
+  "local/config-guide.md",
+  "local/connections.json.example",
+  "local/connections.v3.json.example",
+  "local/projects.json.example",
+  "local/runtime-mode.json.example",
+]);
 
 function repeatedArg(names) {
   const out = [];
@@ -101,10 +110,20 @@ function resolveSkillTargets(vars) {
     .filter((item) => item && path.resolve(item) !== path.resolve(SKILL_DIR));
 }
 
+function shouldSyncSkillEntry(srcDir, entryName) {
+  const sourcePath = path.join(srcDir, entryName);
+  const relative = path.relative(SKILL_DIR, sourcePath).replace(/\\/g, "/");
+  if (!relative || relative.startsWith("../")) return false;
+  if (!relative.includes("/") && SKILL_SYNC_EXCLUDES.has(relative)) return false;
+  if (relative === "local") return true;
+  if (relative.startsWith("local/")) return SKILL_SYNC_LOCAL_FILES.has(relative);
+  return true;
+}
+
 function countSkillDiffs(srcDir, dstDir) {
   let changed = 0;
   for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
-    if (srcDir === SKILL_DIR && SKILL_SYNC_EXCLUDES.has(entry.name)) continue;
+    if (!shouldSyncSkillEntry(srcDir, entry.name)) continue;
     const src = path.join(srcDir, entry.name);
     const dst = path.join(dstDir, entry.name);
     if (!fs.existsSync(dst)) {
@@ -128,19 +147,27 @@ function countSkillDiffs(srcDir, dstDir) {
   return changed;
 }
 
+function copySkillTree(srcDir, dstDir) {
+  fs.mkdirSync(dstDir, { recursive: true });
+  for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
+    if (!shouldSyncSkillEntry(srcDir, entry.name)) continue;
+    const src = path.join(srcDir, entry.name);
+    const dst = path.join(dstDir, entry.name);
+    if (entry.isDirectory()) {
+      copySkillTree(src, dst);
+    } else if (entry.isFile()) {
+      fs.copyFileSync(src, dst);
+    }
+  }
+}
+
 function syncSkillTarget(targetDir) {
   if (DRY_RUN || CHECK) {
     const changed = countSkillDiffs(SKILL_DIR, targetDir);
     if (changed === 0) log("ok", `Skill target up-to-date: ${targetDir}`);
     return changed;
   }
-  fs.mkdirSync(targetDir, { recursive: true });
-  for (const entry of fs.readdirSync(SKILL_DIR, { withFileTypes: true })) {
-    if (SKILL_SYNC_EXCLUDES.has(entry.name)) continue;
-    const src = path.join(SKILL_DIR, entry.name);
-    const dst = path.join(targetDir, entry.name);
-    fs.cpSync(src, dst, { recursive: true, force: true });
-  }
+  copySkillTree(SKILL_DIR, targetDir);
   log("ok", `Skill target synced: ${targetDir}`);
   return 1;
 }
@@ -206,50 +233,47 @@ function main() {
   console.log(`\n\x1b[1m\x1b[36m agentport sync\x1b[0m ${DRY_RUN ? "(dry-run)" : CHECK ? "(check)" : ENV_ONLY ? "(env-only)" : ""}\n`);
 
   const configPath = resolveConfigPath();
-
-  // 1. Read local config
-  if (!fs.existsSync(configPath)) {
+  const packageData = readJson(PACKAGE_JSON_PATH);
+  const hasLocalConfig = fs.existsSync(configPath);
+  if (ENV_ONLY && !hasLocalConfig) {
     log("err", `Config not found at ${PRIMARY_CONFIG_JSON_PATH}`);
-    log("err", `Please copy agentport.example.json to local/agentport.json and configure it`);
+    log("err", "--env-only requires local runtime variables");
     process.exit(2);
   }
 
-  const configData = readJson(configPath);
-  const { version, name, description, variables: vars } = configData;
+  // Release metadata is tracked in package.json. The ignored local config only
+  // owns machine-specific paths, credentials, and daemon settings.
+  const configData = hasLocalConfig ? readJson(configPath) : { variables: {}, mcp: {} };
+  const vars = configData.variables || {};
+  const { version, name, description } = packageData;
 
   log("sync", `Version: ${version}`);
-  log("sync", `Client:  ${vars.clientId}`);
-  log("sync", `Remote:  ${vars.remoteUrl}`);
-  log("sync", `MCP:     ${vars.mcpConfigPath}`);
+  log("sync", `Client:  ${vars.clientId || "(local config not loaded)"}`);
+  log("sync", `Remote:  ${vars.remoteUrl || "(local config not loaded)"}`);
+  log("sync", `MCP:     ${vars.mcpConfigPath || "(local config not loaded)"}`);
   log("sync", `Shared:  ${vars.sharedConnectionsPath || "(default ~/.agentport/connections.shared.json)"}`);
   log("sync", `Server:  ${vars.serverDaemonDir}`);
 
   let changes = 0;
 
   // 鈹€鈹€鈹€ 2. Sync server/.env 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
-  const serverDir = path.join(SKILL_DIR, "local", "server");
-  const serverEnvPath = path.join(serverDir, ".env");
-  const generatedEnv = generateServerEnv(vars);
-
-  if (!fs.existsSync(serverDir)) {
-    fs.mkdirSync(serverDir, { recursive: true });
-  }
-
-  let envChanged = false;
-  if (fs.existsSync(serverEnvPath)) {
-    const currentEnv = fs.readFileSync(serverEnvPath, "utf-8");
-    if (currentEnv !== generatedEnv) {
-      envChanged = true;
+  if (hasLocalConfig) {
+    const serverDir = path.join(SKILL_DIR, "local", "server");
+    const serverEnvPath = path.join(serverDir, ".env");
+    const generatedEnv = generateServerEnv(vars);
+    if (!fs.existsSync(serverDir) && !CHECK && !DRY_RUN) {
+      fs.mkdirSync(serverDir, { recursive: true });
+    }
+    const envChanged = !fs.existsSync(serverEnvPath)
+      || fs.readFileSync(serverEnvPath, "utf-8") !== generatedEnv;
+    if (envChanged) {
+      writeFile(serverEnvPath, generatedEnv);
+      changes++;
+    } else {
+      log("ok", "local/server/.env up-to-date");
     }
   } else {
-    envChanged = true;
-  }
-
-  if (envChanged) {
-    writeFile(serverEnvPath, generatedEnv);
-    changes++;
-  } else {
-    log("ok", "local/server/.env up-to-date");
+    log("warn", "Local config not found; skipping private env and MCP registration");
   }
 
   // If --env-only, skip the rest
@@ -265,20 +289,7 @@ function main() {
   }
 
   // 鈹€鈹€鈹€ 3. Sync package.json 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
-  const pkgPath = path.join(SKILL_DIR, "package.json");
-  if (fs.existsSync(pkgPath)) {
-    const pkg = readJson(pkgPath);
-    let changed = false;
-    if (pkg.version !== version) { pkg.version = version; changed = true; }
-    if (pkg.name !== name) { pkg.name = name; changed = true; }
-    if (pkg.description !== description) { pkg.description = description; changed = true; }
-    if (changed) {
-      writeJson(pkgPath, pkg);
-      changes++;
-    } else {
-      log("ok", "package.json up-to-date");
-    }
-  }
+  log("ok", `package.json is the release metadata source (${name}@${version})`);
 
   // 鈹€鈹€鈹€ 4. Sync index.js version 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
   const indexPath = path.join(SKILL_DIR, "index.js");
@@ -355,7 +366,7 @@ function main() {
   const mcpServerName = vars.mcpServerName || name;
   const mcpPathIsPlaceholder = /^(?:PATH_TO_|ABSOLUTE_PATH_TO_)/.test(String(mcpConfigPath || ""));
 
-  if (mcpConfigPath && !mcpPathIsPlaceholder) {
+  if (hasLocalConfig && mcpConfigPath && !mcpPathIsPlaceholder && configData.mcp?.server) {
     const resolvedMcpPath = mcpConfigPath.replace(/^~/, os.homedir());
     const mcpDir = path.dirname(resolvedMcpPath);
 

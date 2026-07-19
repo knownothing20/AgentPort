@@ -111,7 +111,7 @@ function createDevelopmentFrontServer({ baseOrigin, configLoader, authorizeApi, 
   function serviceFor(config) {
     const home = config.values?.HOME || process.env.HOME || path.dirname(config.workspaceRoot);
     const sessionsDir = path.resolve(config.values?.AGENTPORT_SESSIONS_DIR || path.join(home, '.agentport', 'sessions'));
-    const worktreesDir = path.resolve(config.values?.AGENTPORT_WORKTREES_DIR || path.join(home, '.agentport', 'worktrees'));
+    const worktreesDir = path.resolve(config.values?.AGENTPORT_WORKTREES_DIR || path.join(config.workspaceRoot, '.agentport-worktrees'));
     const key = JSON.stringify({ root: config.workspaceRoot, sessionsDir, worktreesDir });
     if (!services.has(key)) {
       services.set(key, (serviceFactory || createDevelopmentSessionService)({
@@ -157,6 +157,20 @@ function createDevelopmentFrontServer({ baseOrigin, configLoader, authorizeApi, 
       if (req.method === 'GET' && pathname === '/healthz') {
         const base = await baseRequest(baseOrigin, { route: req.url, headers: authHeaders(req.headers), timeoutMs: 10_000 });
         const config = await configLoader.load();
+        let authenticated = false;
+        try {
+          normalizeAuthContext(authorizeContext ? authorizeContext(req, url, config) : authorizeApi(req, url, config));
+          authenticated = true;
+        } catch {}
+        if (!authenticated) {
+          return sendJson(res, base.status, {
+            ok: base.data?.ok !== false,
+            time: base.data?.time,
+            uptimeSec: base.data?.uptimeSec,
+            gateway: { mode: base.data?.gateway?.mode, developmentSessions: true, version: 5 },
+          });
+        }
+
         const service = serviceFor(config);
         return sendJson(res, base.status, {
           ...(base.data || {}),

@@ -88,6 +88,10 @@ async function main() {
   const port = await listen(front);
 
   try {
+    const publicHealth = await request(port, 'GET', '/healthz', undefined, { authorization: '', 'x-mcp-client-id': '' });
+    assert.equal(publicHealth.data.development, undefined);
+    assert.equal(publicHealth.data.serverId, undefined);
+
     const health = await request(port, 'GET', '/healthz');
     assert.equal(health.data.capabilities.gitWorktrees, true);
 
@@ -100,6 +104,10 @@ async function main() {
     });
     assert.equal(created.status, 200);
     const session = created.data.session;
+    assert.ok(
+      session.worktreePath.startsWith(`${path.join(root, '.agentport-worktrees')}${path.sep}`),
+      `unexpected default worktree path: ${session.worktreePath}`,
+    );
 
     const clientBHeaders = { authorization: 'Bearer secret-b', 'x-mcp-client-id': 'client-b' };
     const adminHeaders = { authorization: 'Bearer admin-secret' };

@@ -122,7 +122,7 @@ function createProjectLockManager({
   }
 
   async function withLock(projectRoot, fn) {
-    await fs.mkdir(locksDir, { recursive: true });
+    await fs.mkdir(locksDir, { recursive: true, mode: 0o700 });
     const normalizedRoot = path.resolve(projectRoot);
     const lockPath = lockPathFor(normalizedRoot);
     const deadline = Date.now() + timeoutMs;

@@ -32,6 +32,10 @@ function resolvePath(p) {
   return p;
 }
 
+function shellSingleQuote(value) {
+  return `'${String(value).replace(/'/g, "'\"'\"'")}'`;
+}
+
 /**
  * Normalize a path to POSIX form for remote boundary checks.
  * Strips Windows drive letters and backslashes so the same boundary
@@ -309,9 +313,13 @@ export class SSHClient {
    */
   async exec(command, options = {}) {
     await this.connect();
+    const requestedCwd = await this.resolveRemotePath(options.cwd);
     const safeCwd = this.workspaceRoot
-      ? this.resolveWorkspaceCwd(options.cwd)
-      : options.cwd;
+      ? this.resolveWorkspaceCwd(requestedCwd)
+      : requestedCwd;
+    const remoteCommand = safeCwd
+      ? `cd -- ${shellSingleQuote(safeCwd)} && ${command}`
+      : command;
     const timeoutMs = Number(options.timeoutMs ?? this.config?.execTimeoutMs ?? 0);
     if (!Number.isInteger(timeoutMs) || timeoutMs < 0) {
       const error = new Error('SSH exec timeout must be an integer >= 0');
@@ -320,10 +328,7 @@ export class SSHClient {
     }
 
     return new Promise((resolve, reject) => {
-      const execOptions = {};
-      if (safeCwd) execOptions.cwd = safeCwd;
-
-      this.client.exec(command, execOptions, (err, stream) => {
+      this.client.exec(remoteCommand, {}, (err, stream) => {
         if (err) {
           reject(new Error(`命令执行失败: ${err.message}`));
           return;

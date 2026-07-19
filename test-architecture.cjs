@@ -118,6 +118,78 @@ async function testServerDependencyLock() {
   }
 }
 
+async function testReleaseMetadataAndSync() {
+  const packageInfo = JSON.parse(await fs.readFile(path.join(ROOT, "package.json"), "utf8"));
+  const skill = await fs.readFile(path.join(ROOT, "SKILL.md"), "utf8");
+  const escapedVersion = packageInfo.version.replace(/\./g, "\\.");
+  assert.match(skill, new RegExp(`Current version:\\s+\\*\\*v${escapedVersion}\\*\\*`));
+
+  const check = spawnSync(process.execPath, [path.join(ROOT, "sync.cjs"), "--check"], {
+    cwd: ROOT,
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  assert.equal(check.status, 0, check.error?.stack || check.stderr || check.stdout);
+
+  const target = await fs.mkdtemp(path.join(os.tmpdir(), "agentport-skill-sync-"));
+  const privateConnections = JSON.stringify({ connections: [{ name: "private", authToken: "do-not-overwrite" }] });
+  try {
+    await fs.mkdir(path.join(target, "local"), { recursive: true });
+    await fs.writeFile(path.join(target, "local", "connections.json"), privateConnections, "utf8");
+    const sync = spawnSync(process.execPath, [
+      path.join(ROOT, "sync.cjs"),
+      "--skills",
+      "--target",
+      target,
+    ], {
+      cwd: ROOT,
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    assert.equal(sync.status, 0, sync.error?.stack || sync.stderr || sync.stdout);
+    assert.equal(await fs.readFile(path.join(target, "local", "connections.json"), "utf8"), privateConnections);
+    await fs.access(path.join(target, "local", "connections.v3.json.example"));
+    await fs.access(path.join(target, "local", "projects.json.example"));
+    await assert.rejects(() => fs.access(path.join(target, "local", "agentport.json")), (error) => error?.code === "ENOENT");
+  } finally {
+    await fs.rm(target, { recursive: true, force: true });
+  }
+}
+
+async function testOperationalHardening() {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "agentport-hardening-"));
+  try {
+    const { createAuditLogWriter } = require("./server/audit-log.cjs");
+    const auditPath = path.join(tempRoot, "audit.log");
+    const writer = createAuditLogWriter({ filePath: auditPath, maxBytes: 1024, maxFiles: 2 });
+    await writer.append({ seq: 1, payload: "a".repeat(700) });
+    await writer.append({ seq: 2, payload: "b".repeat(700) });
+    assert.match(await fs.readFile(auditPath + ".1", "utf8"), /"seq":1/);
+    assert.match(await fs.readFile(auditPath, "utf8"), /"seq":2/);
+    await assert.rejects(() => fs.stat(auditPath + ".rotate.lock"), (error) => error?.code === "ENOENT");
+
+    const dashboard = await fs.readFile(path.join(ROOT, "server", "dashboard.html"), "utf8");
+    assert.match(dashboard, /history\.replaceState/);
+    assert.match(dashboard, /Authorization['"]?:['"]Bearer /);
+    assert.doesNotMatch(dashboard, /encodeURIComponent\(TOKEN\)/);
+
+    const serverSource = await fs.readFile(path.join(ROOT, "server", "server.js"), "utf8");
+    assert.match(serverSource, /if \(!authenticated\)/);
+
+    const { createJobStore } = require("./packages/daemon-core/job-store.cjs");
+    const jobsDir = path.join(tempRoot, "jobs");
+    const store = createJobStore({ jobsDir });
+    const job = await store.create({ command: "echo ok" });
+    if (process.platform !== "win32") {
+      assert.equal((await fs.stat(jobsDir)).mode & 0o777, 0o700);
+      assert.equal((await fs.stat(path.join(jobsDir, "_keys"))).mode & 0o777, 0o700);
+      assert.equal((await fs.stat(store.paths.jobDir(job.id))).mode & 0o777, 0o700);
+    }
+  } finally {
+    await fs.rm(tempRoot, { recursive: true, force: true });
+  }
+}
+
 async function testDaemonFileServices() {
   const { createFileReadService, createFileWriteService } = require("./packages/daemon-core/index.cjs");
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "agentport-core-"));
@@ -190,6 +262,8 @@ async function main() {
     ["endpoint selection", testEndpointSelection],
     ["project profile", testProjectProfile],
     ["server dependency lock", testServerDependencyLock],
+    ["release metadata and sync", testReleaseMetadataAndSync],
+    ["operational hardening", testOperationalHardening],
     ["daemon file services", testDaemonFileServices],
     ["symlink escape guard", testSymlinkEscapeGuard],
   ];

@@ -13,6 +13,7 @@ const {
   createJobService,
 } = require("../packages/daemon-core/index.cjs");
 const { createDaemonConfigLoader } = require("./config-loader.cjs");
+const { createAuditLogWriter } = require("../server/audit-log.cjs");
 const { startLegacyProcess } = require("./legacy-process.cjs");
 const {
   assertResourceOwner,
@@ -221,14 +222,27 @@ function createServiceRegistry() {
   };
 }
 
+const auditWriters = new Map();
+
+function auditWriterFor(config) {
+  const key = JSON.stringify({
+    path: config.auditLogPath,
+    maxBytes: config.audit?.maxBytes,
+    maxFiles: config.audit?.maxFiles,
+  });
+  if (!auditWriters.has(key)) {
+    auditWriters.set(key, createAuditLogWriter({
+      filePath: config.auditLogPath,
+      maxBytes: config.audit?.maxBytes,
+      maxFiles: config.audit?.maxFiles,
+    }));
+  }
+  return auditWriters.get(key);
+}
+
 async function appendAudit(config, event) {
   try {
-    await fs.mkdir(path.dirname(config.auditLogPath), { recursive: true });
-    await fs.appendFile(
-      config.auditLogPath,
-      `${JSON.stringify({ ts: nowIso(), gateway: "modular-v3", ...event })}\n`,
-      "utf8",
-    );
+    await auditWriterFor(config).append({ ts: nowIso(), gateway: "modular-v3", ...event });
   } catch {}
 }
 
@@ -661,6 +675,20 @@ function createAgentPortGateway({
         } catch {
           payload = { ok: legacy.statusCode < 500 };
         }
+        let authenticated = false;
+        try {
+          authorizeApiContext(req, url, config);
+          authenticated = true;
+        } catch {}
+        if (!authenticated) {
+          return sendJson(res, legacy.statusCode, {
+            ok: payload.ok !== false,
+            time: payload.time,
+            uptimeSec: payload.uptimeSec,
+            gateway: { mode: "modular-exec-job-proxy", version: 3 },
+          });
+        }
+
         const services = servicesFor(config);
         return sendJson(res, legacy.statusCode, {
           ...payload,

@@ -12,7 +12,9 @@ import { SSHClient } from "./ssh-client.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const CONNECTIONS_PATH = path.join(__dirname, "local", "connections.json");
+const CONNECTIONS_PATH = process.env.AGENTPORT_LEGACY_CONNECTIONS_PATH
+  || process.env.MCP_REMOTE_CONNECTIONS_PATH
+  || path.join(__dirname, "local", "connections.json");
 const STATE_PATH = path.join(__dirname, "local", "cli-state.json");
 const TIMEOUT_MS = Number(process.env.MCP_REMOTE_TIMEOUT_MS || process.env.NIUMA_SSH_TIMEOUT_MS || 120000);
 const SAFE_JOB_TIMEOUT_MS = Number(process.env.AGENTPORT_SAFE_JOB_TIMEOUT_MS || 1800000);
@@ -46,6 +48,38 @@ function fail(message, code = 1, args = null) {
   }
   process.stderr.write(`${message}\n`);
   process.exitCode = code;
+}
+
+function operationExitCode(value) {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const code = operationExitCode(item);
+      if (code !== 0) return code;
+    }
+    return 0;
+  }
+  if (!value || typeof value !== "object") return 0;
+  if (Array.isArray(value.results)) {
+    const code = operationExitCode(value.results);
+    if (code !== 0) return code;
+  }
+  if (value.result && typeof value.result === "object") {
+    const code = operationExitCode(value.result);
+    if (code !== 0) return code;
+  }
+  const commandCode = Number(value.code);
+  if (Number.isInteger(commandCode) && commandCode !== 0) {
+    return commandCode > 0 && commandCode <= 255 ? commandCode : 1;
+  }
+  const status = Number(value.status);
+  if (Number.isInteger(status) && status >= 400) return 1;
+  if (value.ok === false || value.success === false) return 1;
+  return 0;
+}
+
+function applyOperationExitCode(value) {
+  const code = operationExitCode(value);
+  if (code !== 0) process.exitCode = code;
 }
 
 function mask(value) {
@@ -1504,7 +1538,9 @@ async function commandStat(args) {
       return;
     }
     const data = await postWithFallback(http, ["/api/batch"], { operations: [{ type: "stat", path: targetPath }] });
-    printJson(data.results?.[0] || data);
+    const result = data.results?.[0] || data;
+    printJson(result);
+    applyOperationExitCode(result);
   });
 }
 
@@ -1568,8 +1604,9 @@ async function commandBash(args) {
     const data = type === "ssh"
       ? await ssh.exec(command, { cwd: args.cwd })
       : await postWithFallback(http, ["/api/exec", "/bash", "/api/cmd/execute"], { command, cwd: args.cwd });
+    applyOperationExitCode(data);
     if (args.json) {
-      printJson(withTarget({ ok: true, mode: type, command, cwd: args.cwd || null, ...data }, ctx));
+      printJson(withTarget({ mode: type, command, cwd: args.cwd || null, ...data, ok: operationExitCode(data) === 0 }, ctx));
       return;
     }
     if (data.stdout) print(data.stdout.replace(/\s+$/, ""));
@@ -2120,15 +2157,22 @@ async function commandScript(args) {
   await withConnection({ ...args, requireExplicitConnection: true }, async (ctx) => {
     const { type, http, ssh } = ctx;
     if (type === "ssh") {
-      const remoteFile = `/tmp/agentport-cli-${Date.now()}.${interpreter === "python3" ? "py" : "sh"}`;
-      await ssh.writeFile(remoteFile, content);
-      const result = await ssh.exec(`${interpreter} ${JSON.stringify(remoteFile)}`, { cwd: args.cwd });
-      await ssh.rm(remoteFile);
+      const remoteFile = remoteScriptPath(ssh, args, interpreter);
+      let result;
+      await ssh.mkdir(remoteScriptBaseDir(ssh, args));
+      try {
+        await ssh.writeFile(remoteFile, content);
+        result = await ssh.exec(`${interpreter} ${JSON.stringify(remoteFile)}`, { cwd: args.cwd });
+      } finally {
+        try { await ssh.rm(remoteFile); } catch {}
+      }
       printJson(withTarget(result, ctx));
+      applyOperationExitCode(result);
       return;
     }
     const data = await postWithFallback(http, ["/api/exec/script"], { content, interpreter, cwd: args.cwd });
     printJson(withTarget(data, ctx));
+    applyOperationExitCode(data);
   });
 }
 
@@ -2168,15 +2212,21 @@ async function commandSafeScript(args) {
     if (type === "ssh") {
       const remoteFile = remoteScriptPath(ssh, args, interpreter);
       let cleanup = { skipped: keepRemote };
-      await ssh.writeFile(remoteFile, content);
-      const uploadVerification = await verifyRemoteContent(ctx, remoteFile, expectedSha256);
-      const result = await ssh.exec(`${interpreter} ${JSON.stringify(remoteFile)}`, { cwd: args.cwd });
-      if (!keepRemote) {
-        try {
-          await ssh.rm(remoteFile);
-          cleanup = { ok: true };
-        } catch (error) {
-          cleanup = { ok: false, error: error.message };
+      let uploadVerification;
+      let result;
+      await ssh.mkdir(remoteScriptBaseDir(ssh, args));
+      try {
+        await ssh.writeFile(remoteFile, content);
+        uploadVerification = await verifyRemoteContent(ctx, remoteFile, expectedSha256);
+        result = await ssh.exec(`${interpreter} ${JSON.stringify(remoteFile)}`, { cwd: args.cwd });
+      } finally {
+        if (!keepRemote) {
+          try {
+            await ssh.rm(remoteFile);
+            cleanup = { ok: true };
+          } catch (error) {
+            cleanup = { ok: false, error: error.message };
+          }
         }
       }
       printJson(withTarget({
@@ -2188,6 +2238,7 @@ async function commandSafeScript(args) {
         cleanup,
         result,
       }, ctx));
+      applyOperationExitCode(result);
       return;
     }
 
@@ -2198,6 +2249,7 @@ async function commandSafeScript(args) {
       verifiedUpload: false,
       result: data,
     }, ctx));
+    applyOperationExitCode(data);
   });
 }
 
@@ -2419,10 +2471,14 @@ async function commandBatch(args) {
         else if (op.type === "bash") results.push({ ...op, status: 200, ...(await ssh.exec(op.command, { cwd: op.cwd })) });
         else results.push({ ...op, status: 400, error: "Unsupported SSH batch operation" });
       }
-      printJson(withTarget({ success: true, results }, ctx));
+      const data = { success: operationExitCode(results) === 0, results };
+      printJson(withTarget(data, ctx));
+      applyOperationExitCode(data);
       return;
     }
-    printJson(withTarget(await postWithFallback(http, ["/api/batch"], { operations }), ctx));
+    const data = await postWithFallback(http, ["/api/batch"], { operations });
+    printJson(withTarget(data, ctx));
+    applyOperationExitCode(data);
   });
 }
 

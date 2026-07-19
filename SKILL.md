@@ -15,7 +15,7 @@ AgentPort lets AI agents work on a remote Linux workspace through three paths:
 For full install details, read `AGENT_GUIDE.md`. This skill file is the short
 runtime contract agents should follow inside a session.
 
-Current version: **v2.5.0**
+Current version: **v3.1.0**
 
 ## Required Startup Check
 

@@ -91,7 +91,8 @@ process.on("uncaughtException", (error) => {
   handleProcessError("Uncaught exception", error);
 });
 
-// Read version from local config
+// Read release metadata from package.json. Private local config is only a
+// compatibility fallback for older copied skills that do not include it.
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 const __filename = fileURLToPath(import.meta.url);
@@ -100,11 +101,15 @@ const APP_SLUG = "agentport";
 const CONFIG_CANDIDATES = [join(__dirname, "local", `${APP_SLUG}.json`)];
 let PKG_VERSION = "0.0.0";
 let PKG_NAME = APP_SLUG;
+try {
+  const packageJson = JSON.parse(fs.readFileSync(join(__dirname, "package.json"), "utf-8").replace(/^\uFEFF/, ""));
+  PKG_VERSION = packageJson.version || PKG_VERSION;
+  PKG_NAME = packageJson.name || PKG_NAME;
+} catch (_) {}
 for (const configPath of CONFIG_CANDIDATES) {
   try {
     if (!fs.existsSync(configPath)) continue;
     const configJson = JSON.parse(fs.readFileSync(configPath, "utf-8").replace(/^\uFEFF/, ""));
-    PKG_VERSION = configJson.version || PKG_VERSION;
     PKG_NAME = configJson.name || PKG_NAME;
     break;
   } catch (_) {}

@@ -60,7 +60,7 @@ async function main() {
   const adminHeaders = { authorization: "Bearer admin-token", "content-type": "application/json" };
 
   try {
-    let response = await fetch(`${base}/healthz`);
+    let response = await fetch(`${base}/healthz`, { headers });
     let body = await response.json();
     assert.equal(body.capabilities.modularExec, true);
     assert.equal(body.capabilities.idempotentJobs, true);

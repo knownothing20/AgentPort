@@ -8,6 +8,7 @@ const fsSync = require('fs');
 const { exec, spawn } = require('child_process');
 const { promisify } = require('util');
 const os = require('os');
+const { createAuditLogWriter } = require('./audit-log.cjs');
 require('dotenv').config();
 
 const app = express();
@@ -47,6 +48,13 @@ function loadRuntimeConfig() {
 let runtimeConfig = loadRuntimeConfig();
 const MAX_JOB_TIMEOUT_MS = parseRuntimeInt(process.env.MAX_JOB_TIMEOUT_MS, 7 * 24 * 60 * 60 * 1000, 1000);
 const AUDIT_LOG_PATH = process.env.AUDIT_LOG_PATH || path.join(__dirname, 'audit.log');
+const AUDIT_MAX_BYTES = parseRuntimeInt(process.env.AUDIT_MAX_BYTES, 10 * 1024 * 1024, 1024);
+const AUDIT_MAX_FILES = parseRuntimeInt(process.env.AUDIT_MAX_FILES, 5, 1);
+const auditLogWriter = createAuditLogWriter({
+  filePath: AUDIT_LOG_PATH,
+  maxBytes: AUDIT_MAX_BYTES,
+  maxFiles: AUDIT_MAX_FILES,
+});
 const JOBS_DIR = process.env.JOBS_DIR || path.join(__dirname, 'jobs');
 const JOB_LOG_TAIL_BYTES = parseRuntimeInt(process.env.JOB_LOG_TAIL_BYTES, 64 * 1024, 1024);
 const MANAGER_LOG_PATH = path.join(__dirname, 'agentport.log');
@@ -361,8 +369,8 @@ function publicJob(job) {
 }
 
 async function writeJobMeta(job) {
-  await fs.mkdir(jobDir(job.id), { recursive: true });
-  await fs.writeFile(jobMetaPath(job.id), JSON.stringify(job, null, 2) + '\n', 'utf-8');
+  await fs.mkdir(jobDir(job.id), { recursive: true, mode: 0o700 });
+  await fs.writeFile(jobMetaPath(job.id), JSON.stringify(job, null, 2) + '\n', { encoding: 'utf-8', mode: 0o600 });
 }
 
 async function readJobMeta(jobId) {
@@ -390,7 +398,7 @@ async function reconcileJobState(job) {
 }
 
 async function listJobs(limit = 50) {
-  await fs.mkdir(JOBS_DIR, { recursive: true });
+  await fs.mkdir(JOBS_DIR, { recursive: true, mode: 0o700 });
   const entries = await fs.readdir(JOBS_DIR, { withFileTypes: true });
   const jobs = [];
   for (const entry of entries) {
@@ -419,8 +427,8 @@ async function getJobStats() {
 
 async function auditWritableStatus() {
   try {
-    await fs.mkdir(path.dirname(AUDIT_LOG_PATH), { recursive: true });
-    await fs.appendFile(AUDIT_LOG_PATH, '', 'utf-8');
+    await fs.mkdir(path.dirname(AUDIT_LOG_PATH), { recursive: true, mode: 0o700 });
+    await fs.appendFile(AUDIT_LOG_PATH, '', { encoding: 'utf-8', mode: 0o600 });
     return true;
   } catch {
     return false;
@@ -496,9 +504,9 @@ async function startPersistentJob({ command, cwd, clientId, timeoutMs, connectio
     stderrPath: jobStderrPath(id),
   };
 
-  await fs.mkdir(jobDir(id), { recursive: true });
-  await fs.writeFile(job.stdoutPath, '', 'utf-8');
-  await fs.writeFile(job.stderrPath, '', 'utf-8');
+  await fs.mkdir(jobDir(id), { recursive: true, mode: 0o700 });
+  await fs.writeFile(job.stdoutPath, '', { encoding: 'utf-8', mode: 0o600 });
+  await fs.writeFile(job.stderrPath, '', { encoding: 'utf-8', mode: 0o600 });
   await writeJobMeta(job);
 
   let slotReleased = false;
@@ -508,8 +516,8 @@ async function startPersistentJob({ command, cwd, clientId, timeoutMs, connectio
     releaseExecSlot();
   };
 
-  const stdoutStream = fsSync.createWriteStream(job.stdoutPath, { flags: 'a' });
-  const stderrStream = fsSync.createWriteStream(job.stderrPath, { flags: 'a' });
+  const stdoutStream = fsSync.createWriteStream(job.stdoutPath, { flags: 'a', mode: 0o600 });
+  const stderrStream = fsSync.createWriteStream(job.stderrPath, { flags: 'a', mode: 0o600 });
   const child = spawn(command, {
     cwd: jobCwd,
     shell: true,
@@ -708,9 +716,8 @@ function releaseExecSlot() {
 }
 
 async function audit(event) {
-  const line = JSON.stringify({ ts: nowIso(), ...event }) + '\n';
   try {
-    await fs.appendFile(AUDIT_LOG_PATH, line, 'utf-8');
+    await auditLogWriter.append({ ts: nowIso(), ...event });
   } catch (_) {}
 }
 
@@ -888,7 +895,17 @@ app.use((req, res, next) => {
   next();
 });
 
-app.get('/healthz', async (_req, res) => {
+app.get('/healthz', async (req, res) => {
+  const token = extractToken(req);
+  const authenticated = tokenClientMap.has(token) || adminTokens.has(token);
+  if (!authenticated) {
+    return res.json({
+      ok: true,
+      time: nowIso(),
+      uptimeSec: Math.floor(process.uptime()),
+    });
+  }
+
   const workspaceExists = await pathExists(WORKSPACE_ROOT);
   const jobs = await getJobStats();
   res.json({

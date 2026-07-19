@@ -391,6 +391,12 @@
   
   <script>
     const TOKEN=new URLSearchParams(location.search).get('token')||'';
+    if(TOKEN&&history&&history.replaceState){
+      const sanitized=new URL(window.location.href);
+      sanitized.searchParams.delete('token');
+      history.replaceState(null,'',sanitized.pathname+sanitized.search+sanitized.hash);
+    }
+    const AUTH_HEADERS=TOKEN?{'Authorization':'Bearer '+TOKEN}:{};
     let currentDays=1;
     let refreshTimer=null;
     let currentView='overview';
@@ -413,20 +419,17 @@
       }
     }
     function esc(v){return String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
-    function apiUrl(url){
-      return url + (TOKEN ? (url.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN) : '');
-    }
     async function fetchJSON(url){
-      return fetch(apiUrl(url)).then(async r=>{
+      return fetch(url,{headers:AUTH_HEADERS}).then(async r=>{
         const data=await r.json().catch(()=>({}));
         if(!r.ok) throw new Error(data.error||('HTTP '+r.status));
         return data;
       });
     }
     async function requestJSON(method,url,body){
-      const res=await fetch(apiUrl(url),{
+      const res=await fetch(url,{
         method,
-        headers:{'Content-Type':'application/json'},
+        headers:{'Content-Type':'application/json',...AUTH_HEADERS},
         body:body?JSON.stringify(body):undefined,
       });
       const data=await res.json().catch(()=>({}));

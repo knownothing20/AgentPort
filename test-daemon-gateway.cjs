@@ -132,7 +132,13 @@ async function main() {
   const auth = { authorization: 'Bearer secret', 'x-mcp-client-id': 'client-a' };
 
   try {
-    const health = await request(port, 'GET', '/healthz');
+    const publicHealth = await request(port, 'GET', '/healthz');
+    assert.equal(publicHealth.status, 200);
+    assert.equal(publicHealth.json.ok, true);
+    assert.equal(publicHealth.json.serverId, undefined);
+    assert.equal(publicHealth.json.jobRuntime, undefined);
+
+    const health = await request(port, 'GET', '/healthz', undefined, auth);
     assert.equal(health.status, 200);
     assert.equal(health.json.serverId, 'srv-test');
     assert.equal(health.json.capabilities.atomicWrite, true);

@@ -5,6 +5,7 @@ const { EventEmitter } = require("events");
 const { PassThrough } = require("stream");
 const { spawn, spawnSync } = require("child_process");
 const fs = require("fs");
+const http = require("http");
 const os = require("os");
 const path = require("path");
 
@@ -31,9 +32,11 @@ class FakeSshClient extends EventEmitter {
     this.stdout = stdout;
     this.destroyed = false;
     this.ended = false;
+    this.calls = [];
   }
 
-  exec(_command, _options, callback) {
+  exec(command, options, callback) {
+    this.calls.push({ command, options });
     const stream = new PassThrough();
     stream.stderr = new PassThrough();
     stream.close = () => stream.emit("close", 0);
@@ -202,6 +205,89 @@ async function testSshExecCompletesBeforeTimeout() {
   ssh.disconnect();
 }
 
+async function testSshExecUsesRequestedCwd() {
+  const { SSHClient } = await import("./ssh-client.js");
+  const fake = new FakeSshClient({ closeAfterMs: 10, stdout: "/workspace/project\n" });
+  const ssh = new SSHClient({ host: "test", workspaceRoot: "/workspace", execTimeoutMs: 200 });
+  ssh.connect = async () => {
+    ssh.client = fake;
+    ssh.connected = true;
+  };
+  const result = await ssh.exec("pwd", { cwd: "project" });
+  assert.strictEqual(result.stdout, "/workspace/project");
+  assert.deepStrictEqual(fake.calls, [{ command: "cd -- '/workspace/project' && pwd", options: {} }]);
+  ssh.disconnect();
+}
+
+function runCli(args, env = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(NODE, [path.join(ROOT, "cli.js"), ...args], {
+      env: { ...process.env, ...env },
+      windowsHide: true,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("close", (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
+async function testCliPropagatesRemoteFailures() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentport-cli-exit-"));
+  const connectionsPath = path.join(tempDir, "connections.json");
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      res.setHeader("content-type", "application/json");
+      if (req.url === "/api/batch") {
+        res.end(JSON.stringify({ results: [{ status: 403, error: "blocked" }] }));
+        return;
+      }
+      if (req.url === "/api/exec") {
+        res.end(JSON.stringify({ code: 7, stdout: "", stderr: "failed" }));
+        return;
+      }
+      res.statusCode = 404;
+      res.end(JSON.stringify({ error: "not found" }));
+    });
+  });
+
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const port = server.address().port;
+  fs.writeFileSync(connectionsPath, JSON.stringify({
+    connections: [{
+      name: "fake",
+      type: "daemon",
+      url: `http://127.0.0.1:${port}`,
+      authToken: "test-token",
+      clientId: "test-client",
+    }],
+    default: "fake",
+  }));
+
+  try {
+    const env = {
+      AGENTPORT_LEGACY_CONNECTIONS_PATH: connectionsPath,
+      AGENTPORT_SESSION_ID: "cli-exit-test",
+    };
+    const stat = await runCli(["stat", "/outside", "--connection", "fake"], env);
+    assert.strictEqual(stat.code, 1, stat.stderr || stat.stdout);
+
+    const bash = await runCli(["bash", "exit 7", "--connection", "fake", "--json"], env);
+    assert.strictEqual(bash.code, 7, bash.stderr || bash.stdout);
+    assert.strictEqual(JSON.parse(bash.stdout).ok, false);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
 function testSafeJobDryRun() {
   const result = spawnSync(NODE, [
     path.join(ROOT, "cli.js"),
@@ -228,6 +314,8 @@ async function main() {
     ["hidden launcher parent cleanup", testHiddenLauncherParentCleanup],
     ["SSH exec timeout", testSshExecTimeout],
     ["SSH exec completes", testSshExecCompletesBeforeTimeout],
+    ["SSH exec honors cwd", testSshExecUsesRequestedCwd],
+    ["CLI propagates remote failures", testCliPropagatesRemoteFailures],
     ["safe-job dry-run", testSafeJobDryRun],
   ];
   for (const [name, test] of tests) {

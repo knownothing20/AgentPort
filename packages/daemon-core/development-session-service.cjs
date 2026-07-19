@@ -103,9 +103,9 @@ function createDevelopmentSessionService({
   const locksDir = path.join(sessionRoot, '.locks');
 
   async function init() {
-    await fs.mkdir(sessionRoot, { recursive: true });
-    await fs.mkdir(worktreeRoot, { recursive: true });
-    await fs.mkdir(locksDir, { recursive: true });
+    await fs.mkdir(sessionRoot, { recursive: true, mode: 0o700 });
+    await fs.mkdir(worktreeRoot, { recursive: true, mode: 0o700 });
+    await fs.mkdir(locksDir, { recursive: true, mode: 0o700 });
   }
   function sessionPath(id) { return path.join(sessionRoot, `${safeId(id, 'sessionId')}.json`); }
   async function writeMeta(meta) {
