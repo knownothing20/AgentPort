@@ -285,7 +285,7 @@
       <div class="card-body">
         <div class="job-create">
           <input id="jobCommandInput" class="job-input" type="text" placeholder="命令，例如: tail -f /var/log/syslog" />
-          <input id="jobCwdInput" class="job-input" type="text" placeholder="工作目录，默认 /home/YOUR_USER/.openclaw" />
+          <input id="jobCwdInput" class="job-input" type="text" placeholder="工作目录，默认 server workspace root" />
           <input id="jobTimeoutSecInput" class="job-input" type="number" min="0" step="1" value="0" placeholder="超时秒(0=不超时)" />
           <button class="cmd-btn job-primary" onclick="createJob()">新建任务</button>
           <button class="cmd-btn" onclick="createHeartbeatJob()">心跳任务(无超时)</button>
@@ -351,8 +351,8 @@
             <div class="cmd-list">
               <div class="cmd-item"><div class="cmd-label">健康检查</div><div class="cmd-row"><div class="cmd-code">curl -sS http://127.0.0.1:3183/healthz</div><button class="cmd-btn" data-cmd="curl -sS http://127.0.0.1:3183/healthz" onclick="copyCmd(this.dataset.cmd)">复制</button></div></div>
               <div class="cmd-item"><div class="cmd-label">端口监听</div><div class="cmd-row"><div class="cmd-code">ss -lntp | grep ':3183'</div><button class="cmd-btn" data-cmd="ss -lntp | grep ':3183'" onclick="copyCmd(this.dataset.cmd)">复制</button></div></div>
-              <div class="cmd-item"><div class="cmd-label">连接错误筛查</div><div class="cmd-row"><div class="cmd-code">tail -n 200 /home/YOUR_USER/.agentport/daemon/audit.log | grep -Ei 'transport closed|econnreset|timeout|unauthorized'</div><button class="cmd-btn" data-cmd="tail -n 200 /home/YOUR_USER/.agentport/daemon/audit.log | grep -Ei 'transport closed|econnreset|timeout|unauthorized'" onclick="copyCmd(this.dataset.cmd)">复制</button></div></div>
-              <div class="cmd-item"><div class="cmd-label">重启守护进程</div><div class="cmd-row"><div class="cmd-code">/home/YOUR_USER/.agentport/daemon/agentport-manager.sh restart</div><button class="cmd-btn" data-cmd="/home/YOUR_USER/.agentport/daemon/agentport-manager.sh restart" onclick="copyCmd(this.dataset.cmd)">复制</button></div></div>
+              <div class="cmd-item"><div class="cmd-label">连接错误筛查</div><div class="cmd-row"><div class="cmd-code">tail -n 200 $HOME/.agentport/daemon/audit.log | grep -Ei 'transport closed|econnreset|timeout|unauthorized'</div><button class="cmd-btn" data-cmd="tail -n 200 $HOME/.agentport/daemon/audit.log | grep -Ei 'transport closed|econnreset|timeout|unauthorized'" onclick="copyCmd(this.dataset.cmd)">复制</button></div></div>
+              <div class="cmd-item"><div class="cmd-label">重启守护进程</div><div class="cmd-row"><div class="cmd-code">$HOME/.agentport/daemon/agentport-manager.sh restart</div><button class="cmd-btn" data-cmd="$HOME/.agentport/daemon/agentport-manager.sh restart" onclick="copyCmd(this.dataset.cmd)">复制</button></div></div>
             </div>
             <div class="copy-status" id="copyStatus"></div>
           </div>
@@ -541,7 +541,7 @@
         cmdEl.value='while true; do echo monitor-heartbeat $(date +%F_%T); sleep 5; done';
       }
       if(cwdEl && !String(cwdEl.value||'').trim()){
-        cwdEl.value='/home/YOUR_USER/.openclaw';
+        cwdEl.value='';
       }
       if(tEl){ tEl.value='0'; }
       createJob();
