@@ -51,6 +51,24 @@ AI 远程开发网关：支持 MCP、CLI、SSH 恢复和持久 daemon Job。
 
 ---
 
+## 远程搜索依赖
+
+`remote_grep` 不依赖 ripgrep：Daemon 模式使用受限范围的 Node 搜索，SSH
+恢复模式使用受限范围的 `grep`。如果 Agent 会直接执行 Shell 搜索，建议安装可选的
+`ripgrep` 软件包以提供 `rg`：
+
+```bash
+sudo apt update
+sudo apt install -y ripgrep
+command -v rg
+```
+
+`node cli.js doctor` 会报告每个 SSH 连接是否可用 `rg`。缺失时不影响
+AgentPort 的 `remote_grep`；Agent 应先探测并静默回退到项目范围内的 `grep`，
+不要先执行一个确定不存在的命令。
+
+---
+
 ## 快速开始
 
 ### 1. 复制 skill 到本地

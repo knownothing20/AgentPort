@@ -1234,7 +1234,10 @@ async function checkSsh(conn, args = {}) {
   const client = new SSHClient(cliSshConfig(conn, args));
   const started = Date.now();
   try {
-    const result = await client.exec("printf '%s' \"$USER@$HOSTNAME:$PWD\"");
+    // Keep this probe shell-portable and non-failing when ripgrep is absent.
+    const result = await client.exec("if command -v rg >/dev/null 2>&1; then printf 'agentport-rg=available\\n'; else printf 'agentport-rg=missing\\n'; fi; printf '%s' \"$USER@$HOSTNAME:$PWD\"");
+    const [probe, ...identityLines] = String(result.stdout || "").split(/\r?\n/);
+    const ripgrepAvailable = probe === "agentport-rg=available";
     return {
       ok: true,
       type: "ssh",
@@ -1243,7 +1246,17 @@ async function checkSsh(conn, args = {}) {
       port: conn.port || 22,
       username: conn.username,
       latencyMs: Date.now() - started,
-      data: result.stdout,
+      data: identityLines.join("\n"),
+      recommendedDependencies: {
+        ripgrep: {
+          command: "rg",
+          installed: ripgrepAvailable,
+          required: false,
+          message: ripgrepAvailable
+            ? "Available. Agents may use rg for direct shell searches."
+            : "Missing. AgentPort remote_grep still falls back to bounded grep/Node search; install ripgrep for faster direct shell searches.",
+        },
+      },
     };
   } finally {
     client.disconnect();
