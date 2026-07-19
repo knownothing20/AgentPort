@@ -86,6 +86,24 @@ the project documentation in this repository.
 
 ---
 
+## Remote Search Dependencies
+
+`remote_grep` does not require ripgrep: daemon mode uses bounded Node-based
+search and SSH recovery uses bounded `grep`. For agents that run direct shell
+searches, install the optional `ripgrep` package to provide `rg`:
+
+```bash
+sudo apt update
+sudo apt install -y ripgrep
+command -v rg
+```
+
+`node cli.js doctor` reports whether `rg` is available for each SSH connection.
+When it is missing, agents should feature-detect it and fall back silently to a
+project-scoped `grep` search rather than running a known-missing command.
+
+---
+
 ## Agent Integration Priority
 
 `agentport` is a remote development gateway with multiple runtime channels.

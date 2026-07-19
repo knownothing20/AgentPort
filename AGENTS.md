@@ -8,3 +8,12 @@ Before committing or pushing, run `npm run privacy:check`.
   copy values from a live machine into source, tests, or examples.
 - Do not bypass the repository hook with `--no-verify`.
 - If the privacy check fails, remove or replace the value before committing.
+
+## Remote Search
+
+- Prefer AgentPort `remote_grep` for remote content search. It uses bounded
+  Node search through the daemon and bounded `grep` through SSH fallback.
+- Before directly using `rg` on a remote host, run `command -v rg >/dev/null
+  2>&1`. If it is unavailable, silently use bounded `grep` or `find` instead.
+- Scope any recursive search to the requested project or workspace. Exclude
+  `.git`, dependency directories, and build output; never search the whole disk.
