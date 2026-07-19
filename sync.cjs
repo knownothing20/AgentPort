@@ -21,6 +21,7 @@
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const { spawnSync } = require("child_process");
 
 const DRY_RUN = process.argv.includes("--dry-run");
 const CHECK = process.argv.includes("--check");
@@ -61,6 +62,20 @@ function repeatedArg(names) {
 function resolveConfigPath() {
   if (fs.existsSync(PRIMARY_CONFIG_JSON_PATH)) return PRIMARY_CONFIG_JSON_PATH;
   return PRIMARY_CONFIG_JSON_PATH;
+}
+
+function ensurePrivacyCheck() {
+  const checker = path.join(SKILL_DIR, "scripts", "check-privacy.cjs");
+  if (!fs.existsSync(checker)) return;
+
+  const result = spawnSync(process.execPath, [checker], {
+    cwd: SKILL_DIR,
+    stdio: "inherit",
+  });
+  if (result.status !== 0) {
+    log("err", "Privacy check failed; refusing to sync files");
+    process.exit(result.status || 1);
+  }
 }
 
 // 鈹€鈹€鈹€ Helpers 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
@@ -231,6 +246,8 @@ function generateServerEnv(vars) {
 
 function main() {
   console.log(`\n\x1b[1m\x1b[36m agentport sync\x1b[0m ${DRY_RUN ? "(dry-run)" : CHECK ? "(check)" : ENV_ONLY ? "(env-only)" : ""}\n`);
+
+  ensurePrivacyCheck();
 
   const configPath = resolveConfigPath();
   const packageData = readJson(PACKAGE_JSON_PATH);
