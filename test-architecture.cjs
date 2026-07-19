@@ -211,7 +211,13 @@ async function testDaemonFileServices() {
     );
 
     if (process.platform !== "win32") await fs.chmod(path.join(tempRoot, "src", "demo.txt"), 0o755);
-    const second = await writer.writeText("src/demo.txt", "changed", { expectedEtag: first.etag });
+    const previousUmask = process.platform === "win32" ? null : process.umask(0o077);
+    let second;
+    try {
+      second = await writer.writeText("src/demo.txt", "changed", { expectedEtag: first.etag });
+    } finally {
+      if (previousUmask !== null) process.umask(previousUmask);
+    }
     assert.notEqual(second.etag, first.etag);
     if (process.platform !== "win32") {
       const mode = (await fs.stat(path.join(tempRoot, "src", "demo.txt"))).mode & 0o777;

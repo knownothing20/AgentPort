@@ -17,6 +17,9 @@ async function atomicWriteFile(targetPath, content, { encoding = "utf8", mode = 
 
   try {
     handle = await fs.open(tempPath, "wx", mode);
+    // open() applies the process umask. Restore the requested mode explicitly
+    // so replacing an existing executable preserves its permissions.
+    await handle.chmod(mode);
     await handle.writeFile(buffer);
     await handle.sync();
     await handle.close();
