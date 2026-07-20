@@ -194,6 +194,27 @@ Use `safe-bash` for complex read-only diagnostics such as grep/find pipelines,
 `cd && git ...`, nested quotes, template strings, or commands containing `$`,
 `${...}`, `|`, or backticks.
 
+### Remote Search Fallback
+
+Prefer `remote_grep` for remote content search. It uses bounded Node search in
+daemon mode and bounded `grep` through SSH recovery, so `rg` is optional.
+
+Before directly running `rg` in a remote shell, first check it without emitting
+an error:
+
+```bash
+if command -v rg >/dev/null 2>&1; then
+  rg -n --hidden --glob '!.git/**' 'keyword' /path/to/workspace
+else
+  grep -RIn --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=dist \
+    --exclude-dir=build 'keyword' /path/to/workspace
+fi
+```
+
+Keep searches inside the requested project or workspace. Do not report a
+known-missing `rg` command before using the fallback, and never recursively
+search the whole disk.
+
 Use `safe-job` instead of `safe-script` for builds, tests, installs, Docker
 operations, and any script that may run longer than 10 seconds. It uploads and
 verifies the local UTF-8 script, submits a persistent remote job, returns a job

@@ -219,6 +219,23 @@ async function testSshExecUsesRequestedCwd() {
   ssh.disconnect();
 }
 
+async function testSshDoctorRipgrepProbeParsing() {
+  const { parseSshDoctorOutput } = await import("./doctor-utils.js");
+
+  assert.deepStrictEqual(
+    parseSshDoctorOutput("agentport-rg=available\nuser@host:/workspace"),
+    { ripgrepAvailable: true, data: "user@host:/workspace" },
+  );
+  assert.deepStrictEqual(
+    parseSshDoctorOutput("notice: remote banner\nagentport-rg=missing\nuser@host:/workspace"),
+    { ripgrepAvailable: false, data: "notice: remote banner\nuser@host:/workspace" },
+  );
+  assert.deepStrictEqual(
+    parseSshDoctorOutput("notice: probe missing\nuser@host:/workspace"),
+    { ripgrepAvailable: false, data: "notice: probe missing\nuser@host:/workspace" },
+  );
+}
+
 function runCli(args, env = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(NODE, [path.join(ROOT, "cli.js"), ...args], {
@@ -315,6 +332,7 @@ async function main() {
     ["SSH exec timeout", testSshExecTimeout],
     ["SSH exec completes", testSshExecCompletesBeforeTimeout],
     ["SSH exec honors cwd", testSshExecUsesRequestedCwd],
+    ["SSH doctor ripgrep probe parsing", testSshDoctorRipgrepProbeParsing],
     ["CLI propagates remote failures", testCliPropagatesRemoteFailures],
     ["safe-job dry-run", testSafeJobDryRun],
   ];

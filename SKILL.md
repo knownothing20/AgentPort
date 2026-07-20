@@ -151,6 +151,14 @@ exclusions: `.git`, `local`, and `node_modules`.
 - Use `safe-bash` for complex read-only grep/find/git diagnostics, pipelines,
   nested quotes, template strings, or commands containing `$`, `${...}`, `|`,
   backticks, or multiple `cd && ...` segments.
+- Prefer `remote_grep` for remote content search. It uses bounded Node search
+  through the daemon and bounded `grep` through SSH recovery, so it does not
+  require `rg`.
+- Before directly running `rg` on a remote host, use `command -v rg >/dev/null
+  2>&1`. When it is unavailable, silently use project-scoped `grep` or `find`;
+  do not stop work or report a known-missing tool as an error.
+- Exclude `.git`, dependency directories, and build output from recursive
+  searches. Never run an unbounded recursive search across the whole disk.
 - Never run builds, tests, package installs, Docker commands, or other long work
   through synchronous `bash`, `safe-bash`, or `safe-script`. Use `safe-job` or
   `job start`, then poll `job status` / `job logs`.
