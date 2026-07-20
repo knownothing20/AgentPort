@@ -8,6 +8,7 @@ import https from "https";
 import path from "path";
 import { fileURLToPath } from "url";
 import { scheduleForcedExit, startParentWatchdog } from "./cli-lifecycle.js";
+import { parseSshDoctorOutput } from "./doctor-utils.js";
 import { SSHClient } from "./ssh-client.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1236,8 +1237,7 @@ async function checkSsh(conn, args = {}) {
   try {
     // Keep this probe shell-portable and non-failing when ripgrep is absent.
     const result = await client.exec("if command -v rg >/dev/null 2>&1; then printf 'agentport-rg=available\\n'; else printf 'agentport-rg=missing\\n'; fi; printf '%s' \"$USER@$HOSTNAME:$PWD\"");
-    const [probe, ...identityLines] = String(result.stdout || "").split(/\r?\n/);
-    const ripgrepAvailable = probe === "agentport-rg=available";
+    const { ripgrepAvailable, data } = parseSshDoctorOutput(result.stdout);
     return {
       ok: true,
       type: "ssh",
@@ -1246,7 +1246,7 @@ async function checkSsh(conn, args = {}) {
       port: conn.port || 22,
       username: conn.username,
       latencyMs: Date.now() - started,
-      data: identityLines.join("\n"),
+      data,
       recommendedDependencies: {
         ripgrep: {
           command: "rg",
