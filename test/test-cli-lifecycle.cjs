@@ -267,6 +267,24 @@ async function testCliPropagatesRemoteFailures() {
         res.end(JSON.stringify({ code: 7, stdout: "", stderr: "failed" }));
         return;
       }
+      if (req.url === "/api/jobs" && req.method === "POST") {
+        const command = JSON.parse(Buffer.concat(chunks).toString("utf8")).command;
+        const failed = command === "fail-immediately";
+        res.end(JSON.stringify({
+          success: true,
+          jobId: failed ? "job-failed" : "job-running",
+          status: failed ? "error" : "running",
+          job: {
+            status: failed ? "error" : "running",
+            exitCode: failed ? 127 : null,
+          },
+        }));
+        return;
+      }
+      if (req.url === "/api/jobs/job-failed" && req.method === "GET") {
+        res.end(JSON.stringify({ success: true, job: { status: "error", exitCode: 127 } }));
+        return;
+      }
       res.statusCode = 404;
       res.end(JSON.stringify({ error: "not found" }));
     });
@@ -299,6 +317,18 @@ async function testCliPropagatesRemoteFailures() {
     const bash = await runCli(["bash", "exit 7", "--connection", "fake", "--json"], env);
     assert.strictEqual(bash.code, 7, bash.stderr || bash.stdout);
     assert.strictEqual(JSON.parse(bash.stdout).ok, false);
+
+    const running = await runCli(["job", "start", "still-running", "--connection", "fake", "--json"], env);
+    assert.strictEqual(running.code, 0, running.stderr || running.stdout);
+    assert.strictEqual(JSON.parse(running.stdout).job.status, "running");
+
+    const failedStart = await runCli(["job", "start", "fail-immediately", "--connection", "fake", "--json"], env);
+    assert.strictEqual(failedStart.code, 127, failedStart.stderr || failedStart.stdout);
+    assert.strictEqual(JSON.parse(failedStart.stdout).job.status, "error");
+
+    const failedStatus = await runCli(["job", "status", "job-failed", "--connection", "fake", "--json"], env);
+    assert.strictEqual(failedStatus.code, 127, failedStatus.stderr || failedStatus.stdout);
+    assert.strictEqual(JSON.parse(failedStatus.stdout).job.exitCode, 127);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -323,6 +353,30 @@ function testSafeJobDryRun() {
   assert.strictEqual(data.verifiedUpload, false);
 }
 
+async function testConvertedRemoteCwdIsRejected() {
+  const converted = "C:/Users/test/PortableGit/home/example";
+  for (const [option, value] of [
+    ["--cwd", converted],
+    ["--cwd=" + converted],
+    ["--remote-tmp-dir", converted],
+  ]) {
+    const args = option.includes("=") ? [option] : [option, value];
+    const result = await runCli(["safe-job", __filename, ...args, "--dry-run", "--json"]);
+    assert.strictEqual(result.code, 1, result.stderr || result.stdout);
+    const data = JSON.parse(result.stdout);
+    assert.match(data.error, /Git Bash may have converted/);
+    assert.ok(!data.error.includes(converted));
+  }
+
+  const normal = await runCli(["safe-job", __filename, "--cwd", "/home/example", "--dry-run", "--json"]);
+  assert.strictEqual(normal.code, 0, normal.stderr || normal.stdout);
+  assert.strictEqual(JSON.parse(normal.stdout).cwd, "/home/example");
+
+  const named = await runCli(["safe-job", __filename, "--cwd", "p:/project", "--dry-run", "--json"]);
+  assert.strictEqual(named.code, 0, named.stderr || named.stdout);
+  assert.strictEqual(JSON.parse(named.stdout).cwd, "p:/project");
+}
+
 async function main() {
   const tests = [
     ["parent watchdog unit", testParentWatchdogUnit],
@@ -335,6 +389,7 @@ async function main() {
     ["SSH doctor ripgrep probe parsing", testSshDoctorRipgrepProbeParsing],
     ["CLI propagates remote failures", testCliPropagatesRemoteFailures],
     ["safe-job dry-run", testSafeJobDryRun],
+    ["converted remote cwd rejection", testConvertedRemoteCwdIsRejected],
   ];
   for (const [name, test] of tests) {
     await test();

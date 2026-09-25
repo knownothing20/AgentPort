@@ -222,6 +222,21 @@ id immediately, and removes its temporary wrapper when the job finishes. Its
 daemon timeout defaults to 30 minutes; set `--job-timeout-ms 0` only for
 intentionally unbounded work.
 
+When calling the Windows CLI from Git Bash, MSYS may change Linux absolute
+paths such as `--cwd /remote/path` before Node receives them. Use PowerShell
+or selectively disable conversion for that option:
+
+```bash
+MSYS2_ARG_CONV_EXCL='--cwd=' node cli.js safe-job local-build.sh \
+  --cwd=/remote/path --connection <daemon> --route daemon
+```
+
+If `--remote-tmp-dir` is also used, add `--remote-tmp-dir=` to the exclusion
+list. The CLI rejects recognizable Windows absolute paths received as remote
+directories.
+`success: true` from `job start` or `safe-job` means the submission succeeded;
+poll `job status` for the terminal status and exit code.
+
 For long-running work:
 
 ```bash

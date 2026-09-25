@@ -58,6 +58,13 @@ Use this order:
 3. SSH-first CLI only as a transport fallback when MCP or daemon transport is
    unavailable. Synchronous SSH commands default to a 120-second timeout.
 
+In Git Bash on Windows, MSYS may rewrite a Linux `--cwd /remote/path` before
+Node starts. Use PowerShell, or run
+`MSYS2_ARG_CONV_EXCL='--cwd=' node cli.js safe-job local-build.sh --cwd=/remote/path --connection <daemon> --route daemon`.
+For a remote temporary directory, also exclude `--remote-tmp-dir=`. A Job
+response with `success: true` confirms submission only; poll `job status`
+and check its final `status` and `exitCode` before reporting success.
+
 If native MCP reports `Transport closed`, keep working through the CLI instead
 of stopping.
 

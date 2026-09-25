@@ -68,12 +68,21 @@ function operationExitCode(value) {
     const code = operationExitCode(value.result);
     if (code !== 0) return code;
   }
+  if (value.job && typeof value.job === "object") {
+    const code = operationExitCode(value.job);
+    if (code !== 0) return code;
+  }
   const commandCode = Number(value.code);
   if (Number.isInteger(commandCode) && commandCode !== 0) {
     return commandCode > 0 && commandCode <= 255 ? commandCode : 1;
   }
+  const jobCode = Number(value.exitCode);
+  if (Number.isInteger(jobCode) && jobCode !== 0) {
+    return jobCode > 0 && jobCode <= 255 ? jobCode : 1;
+  }
   const status = Number(value.status);
   if (Number.isInteger(status) && status >= 400) return 1;
+  if (["error", "failed", "timeout", "cancelled", "canceled", "orphaned"].includes(value.status)) return 1;
   if (value.ok === false || value.success === false) return 1;
   return 0;
 }
@@ -151,6 +160,23 @@ function parseArgs(argv) {
     }
   }
   return out;
+}
+
+function validateRemoteDirectoryArgs(args) {
+  for (const key of ["cwd", "remote-tmp-dir", "remoteTmpDir", "tmp-dir", "tmpDir"]) {
+    const value = args[key];
+    if (typeof value !== "string") continue;
+    const directory = value.trim();
+    const windowsPath = /^[A-Za-z]:\\/.test(directory)
+      || /^[A-Za-z]:\/(?:Users|Windows|ProgramData|Program Files(?: \(x86\))?)(?:\/|$)/i.test(directory)
+      || /^[A-Za-z]:\/.*\/(?:PortableGit|msys64|mingw64)\//i.test(directory);
+    if (!windowsPath) continue;
+    const option = key === "cwd" ? "--cwd" : "--remote-tmp-dir";
+    throw new Error(
+      `${option} must be a remote Linux path. Git Bash may have converted it to a Windows path. `
+      + `Use PowerShell or MSYS2_ARG_CONV_EXCL='${option}=' with ${option}=/remote/path.`,
+    );
+  }
 }
 
 function parseTimeoutMs(value, fallback, name) {
@@ -1791,7 +1817,9 @@ async function commandJobStart(args) {
   const command = args.command || args._.slice(2).join(" ");
   if (!command) throw new Error("Usage: node cli.js job start <command> [--cwd path]");
   await withConnection({ ...args, requireExplicitConnection: true }, async (ctx) => {
-    printJson(await startJob(ctx, command, args));
+    const job = await startJob(ctx, command, args);
+    printJson(job);
+    applyOperationExitCode(job);
   });
 }
 
@@ -1801,11 +1829,14 @@ async function commandJobStatus(args) {
   await withConnection({ ...args, requireExplicitConnection: true }, async (ctx) => {
     const { type, http, ssh } = ctx;
     if (type === "ssh") {
-      printJson(await readSshJobStatus(ssh, jobId));
+      const job = await readSshJobStatus(ssh, jobId);
+      printJson(job);
+      applyOperationExitCode(job);
       return;
     }
     const data = await getWithFallback(http, [`/api/jobs/${encodeURIComponent(jobId)}`, `/api/task/${encodeURIComponent(jobId)}`]);
     printJson(withTarget(data, ctx));
+    applyOperationExitCode(data);
   });
 }
 
@@ -2317,6 +2348,7 @@ async function commandSafeJob(args) {
           writeResult,
         },
       });
+      applyOperationExitCode(job);
     } catch (error) {
       if (uploaded) {
         try { await cleanupRemoteContent(ctx, remoteWrapper, args.cwd); } catch {}
@@ -2558,6 +2590,7 @@ Safety:
 }
 
 async function main(args) {
+  validateRemoteDirectoryArgs(args);
   const command = args._[0] || "help";
   switch (command) {
     case "help":
