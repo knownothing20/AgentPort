@@ -92,6 +92,19 @@ function applyOperationExitCode(value) {
   if (code !== 0) process.exitCode = code;
 }
 
+function printScriptResult(result, payload, args) {
+  if (args.plain) {
+    if (result.stdout) process.stdout.write(String(result.stdout));
+    if (result.stderr) process.stderr.write(String(result.stderr));
+    else if (operationExitCode(result) !== 0) {
+      process.stderr.write(`${result.error || `Remote script failed (exit code ${operationExitCode(result)})`}\n`);
+    }
+  } else {
+    printJson(payload);
+  }
+  applyOperationExitCode(result);
+}
+
 function mask(value) {
   if (!value) return value;
   const text = String(value);
@@ -2223,6 +2236,13 @@ async function commandScript(args) {
 async function commandSafeScript(args) {
   const file = args._[1] || args.file;
   if (!file) throw new Error("Usage: node cli.js safe-script <local-script-file> [--interpreter bash] [--cwd path]");
+  if (args.plain !== undefined && args.plain !== true) {
+    throw new Error("--plain is a flag; omit it to keep JSON output.");
+  }
+  if (args.plain && args.json) throw new Error("--plain and --json cannot be combined.");
+  if (args.plain && (args.dryRun || args["dry-run"])) {
+    throw new Error("--plain is unavailable with --dry-run because no remote output exists.");
+  }
 
   const interpreter = safeScriptInterpreter(args.interpreter || "bash");
   const normalizeLf = !(args.preserveEol || args["preserve-eol"]);
@@ -2262,7 +2282,10 @@ async function commandSafeScript(args) {
       try {
         await ssh.writeFile(remoteFile, content);
         uploadVerification = await verifyRemoteContent(ctx, remoteFile, expectedSha256);
-        result = await ssh.exec(`${interpreter} ${JSON.stringify(remoteFile)}`, { cwd: args.cwd });
+        result = await ssh.exec(`${interpreter} ${JSON.stringify(remoteFile)}`, {
+          cwd: args.cwd,
+          preserveOutput: Boolean(args.plain),
+        });
       } finally {
         if (!keepRemote) {
           try {
@@ -2273,7 +2296,7 @@ async function commandSafeScript(args) {
           }
         }
       }
-      printJson(withTarget({
+      printScriptResult(result, withTarget({
         ...payload,
         mode: "ssh",
         remoteFile,
@@ -2281,19 +2304,17 @@ async function commandSafeScript(args) {
         uploadVerification,
         cleanup,
         result,
-      }, ctx));
-      applyOperationExitCode(result);
+      }, ctx), args);
       return;
     }
 
     const data = await postWithFallback(http, ["/api/exec/script"], { content, interpreter, cwd: args.cwd });
-    printJson(withTarget({
+    printScriptResult(data, withTarget({
       ...payload,
       mode: "daemon",
       verifiedUpload: false,
       result: data,
-    }, ctx));
-    applyOperationExitCode(data);
+    }, ctx), args);
   });
 }
 
@@ -2551,7 +2572,7 @@ Commands:
   node cli.js glob "**/*.js" [--cwd /path]
   node cli.js grep "text" [--cwd /path] [--include "*.js,*.ts"]
   node cli.js bash "pwd && ls -la" [--cwd /path]
-  node cli.js safe-bash local-readonly-check.sh [--cwd /path]
+  node cli.js safe-bash local-readonly-check.sh [--cwd /path] [--plain]
   node cli.js safe-job local-build.sh --cwd /path [--job-timeout-ms 1800000]
   node cli.js job start "npm test" [--cwd /path]
   node cli.js job status <job-id>
@@ -2568,7 +2589,7 @@ Commands:
   node cli.js token dashboard-url [--client-id <client-id>]
   node cli.js client provision --client-id <client-id> --connection <name>
   node cli.js script local-script.sh [--interpreter bash]
-  node cli.js safe-script local-script.sh [--interpreter bash] [--cwd /path]
+  node cli.js safe-script local-script.sh [--interpreter bash] [--cwd /path] [--plain]
   node cli.js batch batch.json
 
 Options:
@@ -2577,6 +2598,7 @@ Options:
   --exec-timeout-ms <ms>    synchronous SSH timeout; 0 disables it
   --job-timeout-ms <ms>     daemon job timeout; 0 disables it
   --json                    structured output for read/bash/logs/errors
+  --plain                   print safe-script/safe-bash stdout and stderr; preserve remote exit code
 
 Safety:
   When multiple connections are configured, write/exec/job/trace/token mutation commands

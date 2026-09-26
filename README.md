@@ -174,8 +174,15 @@ node cli.js read projects:/AGENTS.md --connection <daemon> --route daemon
 node cli.js glob "**/*.js" --cwd openclaw:/software/app --connection <daemon> --route daemon
 node cli.js bash "pwd && ls -la" --cwd projects:/app --connection <daemon> --route daemon
 node cli.js bash "pwd && ls -la" --cwd /path/to/workspace --connection <ssh> --route ssh --json
+node cli.js safe-bash local-readonly-check.sh --cwd /path/to/workspace --connection <ssh> --route ssh --plain
 node cli.js write projects:/tmp.txt --content "hello" --connection <daemon> --route daemon
 ```
+
+`safe-bash` and `safe-script` return JSON by default. Their optional `--plain`
+mode writes script stdout/stderr to the matching local streams and returns a
+nonzero process status when the remote script fails. Do not retry merely
+because a successful script produced no output. In Git Bash on Windows, use
+`MSYS2_ARG_CONV_EXCL='--cwd='` and `--cwd=/remote/path` to prevent path rewriting.
 
 Provision a daemon token for a new AI software or new computer:
 

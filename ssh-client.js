@@ -321,6 +321,7 @@ export class SSHClient {
       ? `cd -- ${shellSingleQuote(safeCwd)} && ${command}`
       : command;
     const timeoutMs = Number(options.timeoutMs ?? this.config?.execTimeoutMs ?? 0);
+    const output = options.preserveOutput ? (value) => value : (value) => value.trim();
     if (!Number.isInteger(timeoutMs) || timeoutMs < 0) {
       const error = new Error('SSH exec timeout must be an integer >= 0');
       error.code = 'EINVAL';
@@ -340,8 +341,8 @@ export class SSHClient {
           const error = new Error(`SSH command timed out after ${timeoutMs}ms`);
           error.code = 'ETIMEDOUT';
           error.timeoutMs = timeoutMs;
-          error.stdout = stdout.trim();
-          error.stderr = stderr.trim();
+          error.stdout = output(stdout);
+          error.stderr = output(stderr);
           reject(error);
           try { stream.close?.(); } catch {}
           try { stream.destroy?.(); } catch {}
@@ -353,8 +354,8 @@ export class SSHClient {
         stream.on('close', (code) => {
           if (timer) clearTimeout(timer);
           resolve({
-            stdout: stdout.trim(),
-            stderr: stderr.trim(),
+            stdout: output(stdout),
+            stderr: output(stderr),
             code: code || 0,
           });
         });

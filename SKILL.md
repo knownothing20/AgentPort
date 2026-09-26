@@ -123,6 +123,7 @@ node cli.js safe-write <remote-path> --file <local-utf8-file> --connection <name
 node cli.js safe-apply <local-patch-file> --cwd <remote-repo> --connection <name> --route ssh --json
 node cli.js safe-script <local-script-file> --interpreter bash --cwd <remote-cwd> --connection <name> --route ssh --json
 node cli.js safe-bash <local-bash-file> --cwd <remote-cwd> --connection <name> --route ssh --json
+node cli.js safe-bash <local-bash-file> --cwd <remote-cwd> --connection <name> --route ssh --plain
 node cli.js safe-job <local-script-file> --cwd <remote-cwd> --connection <daemon> --route daemon --job-timeout-ms 1800000 --json
 node cli.js bash "pwd && ls -la" --connection <name> --route ssh --json
 node cli.js job start "npm test" --cwd <remote-cwd> --connection <name> --route daemon --json
@@ -130,6 +131,13 @@ node cli.js job status <job-id> --connection <name> --route daemon --json
 node cli.js job logs <job-id> --tail 200 --connection <name> --route daemon --json
 node cli.js job cancel <job-id> --connection <name> --route daemon --json
 ```
+
+`safe-bash` and `safe-script` return structured JSON by default. Use `--plain`
+for short scripts when a caller needs their stdout on stdout and stderr on
+stderr; the CLI still exits with the remote script's failure code. Empty output
+is valid and must not trigger a retry. Do not combine `--plain` with `--json`
+or `--dry-run`. Git Bash still needs `MSYS2_ARG_CONV_EXCL='--cwd='` with the
+`--cwd=/remote/path` form because conversion happens before Node starts.
 
 ## Sync Maintained Repo To Skill Copies
 

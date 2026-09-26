@@ -212,6 +212,16 @@ node cli.js health
 
 至少应有一个连接返回 `"ok": true`。
 
+`safe-bash` 和 `safe-script` 默认输出 JSON；短脚本需要直接获取文本时，可加
+`--plain`，分别输出远端 stdout/stderr，并保留远端失败退出码。成功但没有输出
+是正常情况，不应因此重跑脚本。Windows Git Bash 中请使用
+`MSYS2_ARG_CONV_EXCL='--cwd='` 和 `--cwd=/远端目录`，避免启动 Node 前路径被改写。
+
+```bash
+node cli.js safe-bash local-readonly-check.sh --cwd /path/to/workspace \
+  --connection <ssh-connection> --route ssh --plain
+```
+
 ---
 
 ## 支持的 AI 工具

@@ -26,10 +26,11 @@ function processExists(pid) {
 }
 
 class FakeSshClient extends EventEmitter {
-  constructor({ closeAfterMs = 0, stdout = "" } = {}) {
+  constructor({ closeAfterMs = 0, stdout = "", stderr = "" } = {}) {
     super();
     this.closeAfterMs = closeAfterMs;
     this.stdout = stdout;
+    this.stderr = stderr;
     this.destroyed = false;
     this.ended = false;
     this.calls = [];
@@ -45,6 +46,7 @@ class FakeSshClient extends EventEmitter {
       if (this.closeAfterMs > 0) {
         setTimeout(() => {
           if (this.stdout) stream.emit("data", Buffer.from(this.stdout));
+          if (this.stderr) stream.stderr.emit("data", Buffer.from(this.stderr));
           stream.emit("close", 0);
         }, this.closeAfterMs);
       }
@@ -219,6 +221,19 @@ async function testSshExecUsesRequestedCwd() {
   ssh.disconnect();
 }
 
+async function testSshExecPreservesPlainOutput() {
+  const { SSHClient } = await import("../ssh-client.js");
+  const fake = new FakeSshClient({ closeAfterMs: 10, stdout: "  output\n\n", stderr: " warning\n" });
+  const ssh = new SSHClient({ host: "test", execTimeoutMs: 200 });
+  ssh.connect = async () => {
+    ssh.client = fake;
+    ssh.connected = true;
+  };
+  const result = await ssh.exec("printf output", { preserveOutput: true });
+  assert.deepStrictEqual(result, { stdout: "  output\n\n", stderr: " warning\n", code: 0 });
+  ssh.disconnect();
+}
+
 async function testSshDoctorRipgrepProbeParsing() {
   const { parseSshDoctorOutput } = await import("../doctor-utils.js");
 
@@ -254,6 +269,8 @@ function runCli(args, env = {}) {
 async function testCliPropagatesRemoteFailures() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentport-cli-exit-"));
   const connectionsPath = path.join(tempDir, "connections.json");
+  const scriptPath = path.join(tempDir, "diagnostic.sh");
+  let scriptRequests = 0;
   const server = http.createServer((req, res) => {
     const chunks = [];
     req.on("data", (chunk) => chunks.push(chunk));
@@ -265,6 +282,19 @@ async function testCliPropagatesRemoteFailures() {
       }
       if (req.url === "/api/exec") {
         res.end(JSON.stringify({ code: 7, stdout: "", stderr: "failed" }));
+        return;
+      }
+      if (req.url === "/api/exec/script") {
+        scriptRequests += 1;
+        const content = JSON.parse(Buffer.concat(chunks).toString("utf8")).content;
+        const result = content.includes("script-fail")
+          ? { success: false, stdout: "partial\n", stderr: "problem\n", code: 9 }
+          : content.includes("script-silent-fail")
+            ? { success: false, stdout: "", stderr: "", code: 5 }
+            : content.includes("script-empty")
+              ? { success: true, stdout: "", stderr: "", code: 0 }
+              : { success: true, stdout: "first\nsecond\n", stderr: "notice\n", code: 0 };
+        res.end(JSON.stringify(result));
         return;
       }
       if (req.url === "/api/jobs" && req.method === "POST") {
@@ -305,6 +335,7 @@ async function testCliPropagatesRemoteFailures() {
     }],
     default: "fake",
   }));
+  fs.writeFileSync(scriptPath, "script-ok\n");
 
   try {
     const env = {
@@ -329,6 +360,42 @@ async function testCliPropagatesRemoteFailures() {
     const failedStatus = await runCli(["job", "status", "job-failed", "--connection", "fake", "--json"], env);
     assert.strictEqual(failedStatus.code, 127, failedStatus.stderr || failedStatus.stdout);
     assert.strictEqual(JSON.parse(failedStatus.stdout).job.exitCode, 127);
+
+    const scriptArgs = [scriptPath, "--connection", "fake", "--cwd", "/workspace"];
+    const structured = await runCli(["safe-bash", ...scriptArgs], env);
+    assert.strictEqual(structured.code, 0, structured.stderr || structured.stdout);
+    assert.strictEqual(JSON.parse(structured.stdout).result.stdout, "first\nsecond\n");
+
+    const plain = await runCli(["safe-bash", ...scriptArgs, "--plain"], env);
+    assert.deepStrictEqual(plain, { code: 0, stdout: "first\nsecond\n", stderr: "notice\n" });
+
+    const plainScript = await runCli(["safe-script", ...scriptArgs, "--interpreter", "bash", "--plain"], env);
+    assert.deepStrictEqual(plainScript, { code: 0, stdout: "first\nsecond\n", stderr: "notice\n" });
+
+    fs.writeFileSync(scriptPath, "script-empty\n");
+    const beforeEmpty = scriptRequests;
+    const empty = await runCli(["safe-bash", ...scriptArgs, "--plain"], env);
+    assert.deepStrictEqual(empty, { code: 0, stdout: "", stderr: "" });
+    assert.strictEqual(scriptRequests, beforeEmpty + 1);
+
+    fs.writeFileSync(scriptPath, "script-fail\n");
+    const failedScript = await runCli(["safe-bash", ...scriptArgs, "--plain"], env);
+    assert.deepStrictEqual(failedScript, { code: 9, stdout: "partial\n", stderr: "problem\n" });
+
+    fs.writeFileSync(scriptPath, "script-silent-fail\n");
+    const silentFailure = await runCli(["safe-bash", ...scriptArgs, "--plain"], env);
+    assert.strictEqual(silentFailure.code, 5);
+    assert.strictEqual(silentFailure.stdout, "");
+    assert.match(silentFailure.stderr, /Remote script failed \(exit code 5\)/);
+
+    const beforeInvalid = scriptRequests;
+    const conflicting = await runCli(["safe-bash", ...scriptArgs, "--plain", "--json"], env);
+    assert.strictEqual(conflicting.code, 1);
+    assert.match(JSON.parse(conflicting.stdout).error, /cannot be combined/);
+    const dryRun = await runCli(["safe-bash", ...scriptArgs, "--plain", "--dry-run"], env);
+    assert.strictEqual(dryRun.code, 1);
+    assert.match(dryRun.stderr, /unavailable with --dry-run/);
+    assert.strictEqual(scriptRequests, beforeInvalid);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -386,6 +453,7 @@ async function main() {
     ["SSH exec timeout", testSshExecTimeout],
     ["SSH exec completes", testSshExecCompletesBeforeTimeout],
     ["SSH exec honors cwd", testSshExecUsesRequestedCwd],
+    ["SSH exec preserves plain output", testSshExecPreservesPlainOutput],
     ["SSH doctor ripgrep probe parsing", testSshDoctorRipgrepProbeParsing],
     ["CLI propagates remote failures", testCliPropagatesRemoteFailures],
     ["safe-job dry-run", testSafeJobDryRun],

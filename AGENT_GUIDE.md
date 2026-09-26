@@ -194,6 +194,12 @@ Use `safe-bash` for complex read-only diagnostics such as grep/find pipelines,
 `cd && git ...`, nested quotes, template strings, or commands containing `$`,
 `${...}`, `|`, or backticks.
 
+`safe-bash` and `safe-script` return JSON by default. Add `--plain` when a
+short script's stdout and stderr should go directly to the corresponding local
+streams. The CLI preserves the remote failure exit code. An empty stdout is
+valid, not a reason to rerun the script. `--plain` cannot be combined with
+`--json` or `--dry-run`.
+
 ### Remote Search Fallback
 
 Prefer `remote_grep` for remote content search. It uses bounded Node search in
@@ -229,6 +235,13 @@ or selectively disable conversion for that option:
 ```bash
 MSYS2_ARG_CONV_EXCL='--cwd=' node cli.js safe-job local-build.sh \
   --cwd=/remote/path --connection <daemon> --route daemon
+```
+
+For a short diagnostic script, the same prefix works with:
+
+```bash
+MSYS2_ARG_CONV_EXCL='--cwd=' node cli.js safe-bash local-readonly-check.sh \
+  --cwd=/remote/path --connection <ssh> --route ssh --plain
 ```
 
 If `--remote-tmp-dir` is also used, add `--remote-tmp-dir=` to the exclusion
