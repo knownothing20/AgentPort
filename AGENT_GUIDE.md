@@ -155,6 +155,18 @@ remote_grep(pattern="video-analysis", cwd="/path", include=["**/*.ts", "**/*.py"
 Use the CLI job gateway for long-running commands even when native MCP tools are
 available, because jobs can continue after the desktop MCP transport closes.
 
+## Rule File Access
+
+Use the SKILL.md Rule Files and Workspace Boundaries contract during startup.
+A project's required parent rules can sit outside the daemon's workspace roots;
+being referenced by project instructions does not grant access. Read them through
+the active approved file-read route, not a shell command.
+
+After an explicit workspace denial, do not retry or change routes to bypass it.
+Report the required path and denial once, and pause affected project writes and
+execution until the owner supplies the rules or an authorized read-only fix is
+verified. This skill update does not add a server-side file exception.
+
 ## CLI Fallback Usage
 
 When native MCP tools are not visible but Bash/terminal is available, run:

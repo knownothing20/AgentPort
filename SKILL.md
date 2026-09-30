@@ -31,12 +31,9 @@ node cli.js list --json
 node cli.js ssh-health --connection <ssh-connection> --route ssh --json
 ```
 
-Before remote project work, read the remote project rules with an explicit
-connection:
-
-```bash
-node cli.js read /home/YOUR_USER/.openclaw/AGENTS.md --connection 183 --route ssh --json
-```
+Before project work, resolve the actual rules path from the project's instructions.
+Read it with the file-read tool through the active approved route unless already
+reliably read for this target and scope. See Rule Files and Workspace Boundaries.
 
 If multiple connections exist, high-risk commands require
 `--connection <name>`. Do not rely on shared current connection for writes,
@@ -44,6 +41,30 @@ exec, script, batch, jobs, trace, token, or config operations.
 
 Use `AGENTPORT_SESSION_ID` or `CODEX_SESSION_ID` when a tool wants
 session-scoped CLI current state.
+
+## Rule Files and Workspace Boundaries
+
+- Resolve applicable rules from project instructions, the user, or authorized
+  in-workspace discovery. Do not guess a home-level rules path or traverse/search
+  outside authorized workspaces to discover instructions.
+- A referenced parent rule file may be outside the configured workspace roots.
+  On explicit HTTP 403 / `EWORKSPACE` / "outside configured workspace roots",
+  do not retry the same read or switch to SSH, shell `cat`, scripts, symlinks,
+  or another connection to bypass the denial. This is a permission boundary,
+  not a transport failure; transport fallback does not override it.
+- If required rules remain unavailable, report the exact file, target, and
+  denial once. Pause affected project writes and execution; unrelated authorized
+  read-only diagnosis may continue. Ask the owner to supply the rules directly
+  or authorize a narrowly scoped server-side read-only fix. Do not silently
+  assume the missing rules are empty or claim startup is complete.
+- Skill instructions cannot grant server access or resolve a server-side 403.
+  Do not broaden workspace roots, relocate/copy rules, or change permissions
+  during ordinary startup. A rule-file read exception, if explicitly configured
+  and supported by the server, permits that file's contents only, not access
+  to its parent directory, writes, search, execution, or execution cwd.
+- Apply supplied/read rules only to their intended scope; their contents do not
+  authorize additional access. Workspace path checks are not an OS sandbox for
+  arbitrary shell commands.
 
 ## Runtime Priority
 
