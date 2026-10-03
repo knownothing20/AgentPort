@@ -173,6 +173,7 @@ function runtimeKey(config) {
     workspaceRoot: config.workspaceRoot,
     defaultWorkspace: config.defaultWorkspace,
     workspaceRoots: config.workspaceRoots,
+    readOnlyRuleFiles: config.readOnlyRuleFiles,
     jobsDir: config.jobsDir,
     command: config.command,
     exec: config.exec,
@@ -195,7 +196,11 @@ function createServiceRegistry() {
         queueTimeoutMs: config.exec.queueTimeoutMs,
       });
       cache.set(key, Object.freeze({
-        reader: createFileReadService({ workspaceRoot: config.workspaceRoot, workspaceScope: config.workspaceScope }),
+        reader: createFileReadService({
+          workspaceRoot: config.workspaceRoot,
+          workspaceScope: config.workspaceScope,
+          readOnlyRuleFiles: config.readOnlyRuleFiles,
+        }),
         search: createFileSearchService({ workspaceRoot: config.workspaceRoot, workspaceScope: config.workspaceScope }),
         writer: createFileWriteService({ workspaceRoot: config.workspaceRoot, workspaceScope: config.workspaceScope }),
         policy,
@@ -698,6 +703,15 @@ function createAgentPortGateway({
           ...payload,
           serverId: config.serverId,
           workspaceId: config.workspaceId,
+          workspaceRoot: config.workspaceRoot,
+          defaultWorkspace: config.defaultWorkspace,
+          workspaceRoots: config.workspaceRoots,
+          workspaceNames: config.workspaceNames,
+          workspaceBoundary: {
+            enforced: true,
+            scope: "file-operations-and-execution-cwd",
+            osIsolation: false,
+          },
           gateway: {
             mode: "modular-exec-job-proxy",
             version: 3,
@@ -711,6 +725,7 @@ function createAgentPortGateway({
           capabilities: {
             ...(payload.capabilities || {}),
             fileReadRanges: true,
+            readOnlyRuleFiles: true,
             fileReadBytes: true,
             fileManifest: true,
             safeGlob: true,
@@ -835,6 +850,7 @@ function createAgentPortGateway({
             path: body.path,
             ok: true,
             cached: true,
+            accessScope: result.accessScope,
             ms: Date.now() - startedAt,
           });
           return sendJson(res, 304, {
@@ -889,6 +905,7 @@ function createAgentPortGateway({
         path: body.path,
         pattern: body.pattern,
         ok: true,
+        accessScope: result.accessScope,
         ms: Date.now() - startedAt,
       });
       sendJson(res, 200, result);

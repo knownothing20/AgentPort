@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const assert = require("assert");
+const crypto = require("crypto");
 const { EventEmitter } = require("events");
 const { PassThrough } = require("stream");
 const { spawn, spawnSync } = require("child_process");
@@ -8,6 +9,7 @@ const fs = require("fs");
 const http = require("http");
 const os = require("os");
 const path = require("path");
+const { Server: SshServer } = require("ssh2");
 
 const ROOT = path.resolve(__dirname, "..");
 const NODE = process.execPath;
@@ -276,6 +278,19 @@ async function testCliPropagatesRemoteFailures() {
     req.on("data", (chunk) => chunks.push(chunk));
     req.on("end", () => {
       res.setHeader("content-type", "application/json");
+      if (req.url === "/api/fs/read") {
+        const { path: targetPath } = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        res.end(JSON.stringify(targetPath === "/registered/rules.md"
+          ? {
+            etag: "read-etag",
+            content: "rule text",
+            accessScope: "registered-rule-file",
+            readOnly: true,
+            writeEtag: "write-etag",
+          }
+          : { etag: "plain-etag", content: "ordinary text" }));
+        return;
+      }
       if (req.url === "/api/batch") {
         res.end(JSON.stringify({ results: [{ status: 403, error: "blocked" }] }));
         return;
@@ -344,6 +359,24 @@ async function testCliPropagatesRemoteFailures() {
     };
     const stat = await runCli(["stat", "/outside", "--connection", "fake"], env);
     assert.strictEqual(stat.code, 1, stat.stderr || stat.stdout);
+
+    const ruleRead = await runCli(["read", "/registered/rules.md", "--connection", "fake", "--json"], env);
+    assert.strictEqual(ruleRead.code, 0, ruleRead.stderr || ruleRead.stdout);
+    const ruleReadData = JSON.parse(ruleRead.stdout);
+    assert.strictEqual(ruleReadData.content, "rule text");
+    assert.strictEqual(ruleReadData.accessScope, "registered-rule-file");
+    assert.strictEqual(ruleReadData.readOnly, true);
+    assert.strictEqual(ruleReadData.writeEtag, "write-etag");
+    assert.strictEqual(ruleReadData.connection, "fake");
+    assert.strictEqual(ruleReadData.route, "daemon");
+
+    const plainRead = await runCli(["read", "/ordinary.txt", "--connection", "fake", "--json"], env);
+    assert.strictEqual(plainRead.code, 0, plainRead.stderr || plainRead.stdout);
+    const plainReadData = JSON.parse(plainRead.stdout);
+    assert.strictEqual(plainReadData.content, "ordinary text");
+    assert.ok(!Object.hasOwn(plainReadData, "accessScope"));
+    assert.ok(!Object.hasOwn(plainReadData, "readOnly"));
+    assert.ok(!Object.hasOwn(plainReadData, "writeEtag"));
 
     const bash = await runCli(["bash", "exit 7", "--connection", "fake", "--json"], env);
     assert.strictEqual(bash.code, 7, bash.stderr || bash.stdout);
@@ -420,6 +453,190 @@ function testSafeJobDryRun() {
   assert.strictEqual(data.verifiedUpload, false);
 }
 
+function expectedRecommendedOrder() {
+  return ["native-mcp", "daemon-job", "cli-daemon", "ssh"];
+}
+
+async function testSshHealthWorkspaceBoundary() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentport-ssh-health-"));
+  const connectionsPath = path.join(tempDir, "connections.json");
+  const { privateKey } = crypto.generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    publicExponent: 0x10001,
+  });
+  const hostKey = privateKey.export({ type: "pkcs1", format: "pem" });
+  const server = new SshServer({ hostKeys: [hostKey] }, (client) => {
+    client.on("authentication", (ctx) => {
+      if (ctx.username === "test" && ctx.method === "password" && ctx.password === "test-only") ctx.accept();
+      else ctx.reject();
+    });
+    client.on("ready", () => {
+      client.on("session", (accept) => {
+        const session = accept();
+        session.on("sftp", (acceptSftp) => { acceptSftp(); });
+        session.on("exec", (acceptExec) => {
+          const stream = acceptExec();
+          stream.end("agentport-rg=available\ntest@fake:/workspace");
+        });
+      });
+    });
+  });
+
+  try {
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    fs.writeFileSync(connectionsPath, JSON.stringify({
+      connections: [
+        { name: "bounded", type: "ssh", host: "127.0.0.1", port: server.address().port, username: "test", password: "test-only", workspaceRoot: "/workspace" },
+        { name: "legacy", type: "ssh", host: "127.0.0.1", port: server.address().port, username: "test", password: "test-only" },
+        { name: "trailing-root", type: "ssh", host: "127.0.0.1", port: server.address().port, username: "test", password: "test-only", workspaceRoot: "/workspace/" },
+        { name: "filesystem-root", type: "ssh", host: "127.0.0.1", port: server.address().port, username: "test", password: "test-only", workspaceRoot: "/" },
+      ],
+      default: "bounded",
+    }));
+    const result = await runCli(["doctor", "--json"], {
+      AGENTPORT_LEGACY_CONNECTIONS_PATH: connectionsPath,
+      AGENTPORT_SESSION_ID: "ssh-health-boundary-test",
+    });
+    assert.strictEqual(result.code, 0, result.stderr || result.stdout);
+    const doctor = JSON.parse(result.stdout);
+    assert.deepStrictEqual(doctor.recommendedOrder, expectedRecommendedOrder());
+    const [bounded, legacy, trailingRoot, filesystemRoot] = doctor.results;
+    assert.strictEqual(bounded.ok, true);
+    assert.deepStrictEqual(bounded.workspaceBoundary, {
+      kind: "ssh-path-argument-boundary",
+      root: "/workspace",
+      enforced: true,
+      source: "connection.workspaceRoot",
+      legacyUnrestrictedPathArguments: false,
+      osIsolation: false,
+    });
+    assert.strictEqual(legacy.ok, true);
+    assert.deepStrictEqual(legacy.workspaceBoundary, {
+      kind: "ssh-path-argument-boundary",
+      root: null,
+      enforced: false,
+      source: "unconfigured",
+      legacyUnrestrictedPathArguments: true,
+      osIsolation: false,
+    });
+    assert.strictEqual(trailingRoot.workspaceBoundary.root, "/workspace");
+    assert.strictEqual(trailingRoot.workspaceBoundary.enforced, true);
+    assert.strictEqual(filesystemRoot.workspaceBoundary.root, null);
+    assert.strictEqual(filesystemRoot.workspaceBoundary.enforced, false);
+    assert.strictEqual(filesystemRoot.workspaceBoundary.source, "connection.workspaceRoot");
+    assert.strictEqual(bounded.recommendedDependencies.ripgrep.installed, true);
+    assert.ok(!result.stdout.includes("test-only"));
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+async function testDaemonHealthWorkspaceRootsAndRouteOrder() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentport-daemon-health-"));
+  const connectionsPath = path.join(tempDir, "connections.json");
+  const roots = { projects: "/work/projects", docs: "/work/docs" };
+  const healthVariants = [
+    {
+      ok: true,
+      workspaceRoot: "/work/projects",
+      defaultWorkspace: "projects",
+      workspaceRoots: roots,
+      workspaceNames: ["projects", "docs"],
+      workspaceBoundary: { enforced: true, scope: "file-operations-and-execution-cwd", osIsolation: false },
+    },
+    { ok: true, workspaceRoot: "/reported/default-only" },
+    { ok: true },
+  ];
+  const servers = healthVariants.map((health) => http.createServer((req, res) => {
+    res.setHeader("content-type", "application/json");
+    if (req.url === "/healthz") {
+      res.end(JSON.stringify(health));
+      return;
+    }
+    if (req.url === "/api/jobs?limit=1") {
+      res.end(JSON.stringify({ count: 0, jobs: [] }));
+      return;
+    }
+    res.statusCode = 404;
+    res.end(JSON.stringify({ error: "not found" }));
+  }));
+  try {
+    for (const server of servers) {
+      await new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", resolve);
+      });
+    }
+    fs.writeFileSync(connectionsPath, JSON.stringify({
+      connections: servers.map((server, index) => ({
+        name: `daemon-${index}`,
+        type: "daemon",
+        url: `http://127.0.0.1:${server.address().port}`,
+        authToken: "not-output",
+        clientId: "health-test",
+      })),
+      default: "daemon-0",
+    }));
+    const result = await runCli(["doctor", "--json"], {
+      AGENTPORT_LEGACY_CONNECTIONS_PATH: connectionsPath,
+      AGENTPORT_SESSION_ID: "daemon-health-boundary-test",
+    });
+    assert.strictEqual(result.code, 0, result.stderr || result.stdout);
+    const doctor = JSON.parse(result.stdout);
+    assert.deepStrictEqual(doctor.recommendedOrder, expectedRecommendedOrder());
+    assert.deepStrictEqual(doctor.results[0].workspaceBoundary, {
+      kind: "daemon-path-boundary",
+      source: "healthz.workspaceRoots",
+      roots,
+      defaultWorkspace: "projects",
+      workspaceNames: ["projects", "docs"],
+      reported: true,
+      enforced: true,
+      scope: "file-operations-and-execution-cwd",
+      enforcement: "healthz-reported-not-independently-verified",
+      osIsolation: false,
+    });
+    assert.deepStrictEqual(doctor.results[1].workspaceBoundary, {
+      kind: "daemon-path-boundary",
+      source: "healthz.workspaceRoot",
+      roots: ["/reported/default-only"],
+      defaultWorkspace: null,
+      workspaceNames: null,
+      reported: true,
+      enforced: null,
+      scope: null,
+      enforcement: "unknown",
+      osIsolation: null,
+    });
+    assert.deepStrictEqual(doctor.results[2].workspaceBoundary, {
+      kind: "daemon-path-boundary",
+      source: "unreported",
+      roots: null,
+      defaultWorkspace: null,
+      workspaceNames: null,
+      reported: false,
+      enforced: null,
+      scope: null,
+      enforcement: "unknown",
+      osIsolation: null,
+    });
+    const status = await runCli(["status", "--connection", "daemon-0", "--json"], {
+      AGENTPORT_LEGACY_CONNECTIONS_PATH: connectionsPath,
+      AGENTPORT_SESSION_ID: "daemon-health-boundary-test",
+    });
+    assert.strictEqual(status.code, 0, status.stderr || status.stdout);
+    assert.deepStrictEqual(JSON.parse(status.stdout).recommendedOrder, expectedRecommendedOrder());
+    assert.ok(!result.stdout.includes("not-output"));
+  } finally {
+    await Promise.all(servers.map((server) => new Promise((resolve) => server.close(resolve))));
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
 async function testConvertedRemoteCwdIsRejected() {
   const converted = "C:/Users/test/PortableGit/home/example";
   for (const [option, value] of [
@@ -444,6 +661,37 @@ async function testConvertedRemoteCwdIsRejected() {
   assert.strictEqual(JSON.parse(named.stdout).cwd, "p:/project");
 }
 
+async function testConvertedRemoteFileTargetsAreRejectedBeforeIO() {
+  const converted = "C:/Users/test/PortableGit/home/workspace/file.txt";
+  const missingPayload = path.join(os.tmpdir(), `agentport-missing-payload-${process.pid}.txt`);
+  const cases = [
+    ["read", [converted, "--json"]],
+    ["read", ["--path", converted, "--json"]],
+    ["write", [converted, "--content", "x", "--json"]],
+    ["write", ["--path", converted, "--content", "x", "--json"]],
+    ["safe-write", [converted, "--file", missingPayload, "--json"]],
+    ["safe-write", ["--path", converted, "--file", missingPayload, "--json"]],
+  ];
+  for (const [command, args] of cases) {
+    const result = await runCli([command, ...args]);
+    assert.strictEqual(result.code, 1, result.stderr || result.stdout);
+    const error = JSON.parse(result.stdout).error;
+    assert.match(error, /Git Bash may have converted/);
+    assert.match(error, /MSYS2_ARG_CONV_EXCL='\*'/);
+    assert.ok(!error.includes(converted));
+    assert.ok(!error.includes("ENOENT"), "target preflight must precede local payload reads");
+  }
+
+  for (const target of ["relative/file.txt", "projects:/file.txt"]) {
+    const result = await runCli(["safe-write", target, "--file", __filename, "--dry-run", "--json"]);
+    assert.strictEqual(result.code, 0, result.stderr || result.stdout);
+    assert.strictEqual(JSON.parse(result.stdout).path, target);
+  }
+  const namedRead = await runCli(["read", "--path=projects:/file.txt", "--connection", "unknown", "--json"]);
+  assert.strictEqual(namedRead.code, 1);
+  assert.match(JSON.parse(namedRead.stdout).error, /Connection 'unknown' not found/);
+}
+
 async function main() {
   const tests = [
     ["parent watchdog unit", testParentWatchdogUnit],
@@ -455,9 +703,12 @@ async function main() {
     ["SSH exec honors cwd", testSshExecUsesRequestedCwd],
     ["SSH exec preserves plain output", testSshExecPreservesPlainOutput],
     ["SSH doctor ripgrep probe parsing", testSshDoctorRipgrepProbeParsing],
+    ["SSH health workspace boundary", testSshHealthWorkspaceBoundary],
+    ["daemon health workspace roots and route order", testDaemonHealthWorkspaceRootsAndRouteOrder],
     ["CLI propagates remote failures", testCliPropagatesRemoteFailures],
     ["safe-job dry-run", testSafeJobDryRun],
     ["converted remote cwd rejection", testConvertedRemoteCwdIsRejected],
+    ["converted remote file targets preflight", testConvertedRemoteFileTargetsAreRejectedBeforeIO],
   ];
   for (const [name, test] of tests) {
     await test();

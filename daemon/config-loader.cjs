@@ -5,6 +5,7 @@ const {
   normalizeWorkspaceName,
   normalizeWorkspaceScope,
 } = require("../packages/daemon-core/path-guard.cjs");
+const { normalizeRuleFilePaths } = require("../packages/daemon-core/rule-file-reader.cjs");
 
 function decodeEnvValue(raw) {
   const value = String(raw ?? "").trim();
@@ -112,6 +113,21 @@ function parseWorkspaceRootsJson(raw) {
     return { roots: parsed.roots, defaultWorkspace: parsed.default || parsed.defaultWorkspace || "" };
   }
   return { roots: parsed, defaultWorkspace: "" };
+}
+
+function parseReadOnlyRuleFiles(raw) {
+  if (!String(raw || "").trim()) return normalizeRuleFilePaths();
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (cause) {
+    const error = new Error("READ_ONLY_RULE_FILES_JSON must be valid JSON");
+    error.code = "ERULE_FILES_CONFIG";
+    error.statusCode = 500;
+    error.cause = cause;
+    throw error;
+  }
+  return normalizeRuleFilePaths(parsed);
 }
 
 function loadWorkspaceScope(values, runtimeWorkspaceRoot = "") {
@@ -230,6 +246,7 @@ function createDaemonConfigLoader({ baseDir = __dirname, envPath } = {}) {
       workspaceRoots: workspaceScope.roots,
       workspaceNames: workspaceScope.names,
       defaultWorkspace: workspaceScope.defaultWorkspace,
+      readOnlyRuleFiles: parseReadOnlyRuleFiles(values.READ_ONLY_RULE_FILES_JSON),
       jobsDir,
       serverId: String(values.AGENTPORT_SERVER_ID || values.SERVER_ID || os.hostname()).trim(),
       workspaceId: String(values.AGENTPORT_WORKSPACE_ID || values.WORKSPACE_ID || workspaceRoot).trim(),
@@ -285,4 +302,5 @@ module.exports = {
   parseEnvText,
   parseTokenMap,
   parseWorkspaceRootsJson,
+  parseReadOnlyRuleFiles,
 };

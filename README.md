@@ -181,8 +181,22 @@ node cli.js write projects:/tmp.txt --content "hello" --connection <daemon> --ro
 `safe-bash` and `safe-script` return JSON by default. Their optional `--plain`
 mode writes script stdout/stderr to the matching local streams and returns a
 nonzero process status when the remote script fails. Do not retry merely
-because a successful script produced no output. In Git Bash on Windows, use
-`MSYS2_ARG_CONV_EXCL='--cwd='` and `--cwd=/remote/path` to prevent path rewriting.
+because a successful script produced no output. In Git Bash on Windows, MSYS
+may rewrite positional remote targets for `read`, `write`, and `safe-write`, as
+well as `--cwd` and `--remote-tmp-dir`, before Node starts; quoting alone is not
+reliable. Prefer PowerShell. If Git Bash is required, use
+`MSYS2_ARG_CONV_EXCL='*'` and Windows-compatible local file/script paths
+(`cygpath -w` when needed). Do not repair already converted paths. The CLI
+rejects recognizable converted Windows paths for remote file targets and
+directory arguments.
+
+The optional `READ_ONLY_RULE_FILES_JSON` server setting is disabled by default.
+When explicitly enabled by an administrator on the modular daemon, it allows
+authenticated normal file-read and batch-read access to registered exact text
+files up to 256 KiB. It grants no stat, byte-read, search, write, cwd, or
+arbitrary command access. Health-reported roots and boundary fields are not an
+independent security test; path checks are not an OS sandbox. This client
+documentation does not imply that a server has enabled the setting.
 
 Provision a daemon token for a new AI software or new computer:
 

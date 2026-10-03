@@ -154,6 +154,11 @@ remote_grep(pattern="video-analysis", cwd="/path", include=["**/*.ts", "**/*.py"
 
 Use the CLI job gateway for long-running commands even when native MCP tools are
 available, because jobs can continue after the desktop MCP transport closes.
+Prefer native MCP for short file operations when available. Use daemon jobs for
+long-running work, CLI file operations over the daemon route when MCP is
+unavailable but the daemon remains reachable, and SSH only for transport
+recovery. The CLI is not synonymous with SSH, and MCP tools are not guaranteed
+to use the daemon.
 
 ## Rule File Access
 
@@ -165,7 +170,16 @@ the active approved file-read route, not a shell command.
 After an explicit workspace denial, do not retry or change routes to bypass it.
 Report the required path and denial once, and pause affected project writes and
 execution until the owner supplies the rules or an authorized read-only fix is
-verified. This skill update does not add a server-side file exception.
+verified. Loading or editing this Skill does not enable a server-side file
+exception; the client supports the optional server setting described below.
+
+The optional `READ_ONLY_RULE_FILES_JSON` server setting is disabled by default.
+If explicitly enabled on the modular daemon, it permits authenticated normal
+file-read and batch-read access to registered exact text files up to 256 KiB.
+It grants no stat, byte-read, search, write, cwd, or arbitrary command access.
+Any roots or boundary state in health output are reported configuration, not an
+independent security test; path checks are not an OS sandbox. This guide does
+not imply that a server has enabled the setting.
 
 ## CLI Fallback Usage
 
@@ -240,25 +254,30 @@ id immediately, and removes its temporary wrapper when the job finishes. Its
 daemon timeout defaults to 30 minutes; set `--job-timeout-ms 0` only for
 intentionally unbounded work.
 
-When calling the Windows CLI from Git Bash, MSYS may change Linux absolute
-paths such as `--cwd /remote/path` before Node receives them. Use PowerShell
-or selectively disable conversion for that option:
+When calling the Windows CLI from Git Bash, MSYS may change remote positional
+paths used by `read`, `write`, and `safe-write`, as well as `--cwd` and
+`--remote-tmp-dir`, before Node receives them. Quoting alone is not reliable.
+Prefer PowerShell. If Git Bash is required, disable conversion for all arguments
+and pass Windows-compatible local file/script paths (use `cygpath -w` when
+needed):
 
 ```bash
-MSYS2_ARG_CONV_EXCL='--cwd=' node cli.js safe-job local-build.sh \
+MSYS2_ARG_CONV_EXCL='*' node cli.js safe-job 'C:/work/build.sh' \
   --cwd=/remote/path --connection <daemon> --route daemon
 ```
 
-For a short diagnostic script, the same prefix works with:
+The same prefix applies to positional remote paths and `--file` paths. For
+example:
 
 ```bash
-MSYS2_ARG_CONV_EXCL='--cwd=' node cli.js safe-bash local-readonly-check.sh \
-  --cwd=/remote/path --connection <ssh> --route ssh --plain
+MSYS2_ARG_CONV_EXCL='*' node cli.js read /remote/path/file.txt --connection <daemon> --route daemon
+MSYS2_ARG_CONV_EXCL='*' node cli.js safe-write /remote/path/file.txt --file 'C:/work/payload.txt' --connection <daemon> --route daemon
 ```
 
-If `--remote-tmp-dir` is also used, add `--remote-tmp-dir=` to the exclusion
-list. The CLI rejects recognizable Windows absolute paths received as remote
-directories.
+Do not attempt to repair an argument after it has already been converted. The
+CLI rejects recognizable Windows absolute paths received as remote directory
+or file target arguments, but cannot reliably infer or repair every converted
+path.
 `success: true` from `job start` or `safe-job` means the submission succeeded;
 poll `job status` for the terminal status and exit code.
 

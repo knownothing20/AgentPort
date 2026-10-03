@@ -6,11 +6,9 @@ license: MIT
 
 # agentport
 
-AgentPort lets AI agents work on a remote Linux workspace through three paths:
-
-1. SSH-first CLI for stable baseline operations.
-2. Daemon CLI jobs for long-running tests, builds, logs, and recovery.
-3. Native MCP `remote_*` tools when the host exposes them and they are stable.
+AgentPort supports native MCP, daemon-backed CLI operations and jobs, and SSH
+transport recovery. These are distinct routes: not every MCP tool uses the
+daemon, and using the CLI does not imply SSH.
 
 For full install details, read `AGENT_GUIDE.md`. This skill file is the short
 runtime contract agents should follow inside a session.
@@ -65,26 +63,47 @@ session-scoped CLI current state.
 - Apply supplied/read rules only to their intended scope; their contents do not
   authorize additional access. Workspace path checks are not an OS sandbox for
   arbitrary shell commands.
+  Daemon health roots and boundary fields are server-reported diagnostics, not
+  an independent security test by this client.
 
 ## Runtime Priority
 
 Use this order:
 
-1. Native MCP `remote_*` for health, read, write, stat, glob, grep, and short
-   one-off commands after `remote_connect()` and `remote_health()` succeed.
-2. Daemon jobs for builds, tests, installs, Docker operations, or anything that
-   may run longer than 10 seconds. Prefer MCP `remote_exec_async` or
-   `remote_script_async`; use `safe-job` for the CLI fallback with a local file:
-   `node cli.js safe-job local-build.sh --cwd /workspace --connection <daemon> --route daemon`.
-3. SSH-first CLI only as a transport fallback when MCP or daemon transport is
-   unavailable. Synchronous SSH commands default to a 120-second timeout.
+1. Native MCP `remote_*` for short file operations when available and healthy.
+2. Daemon jobs for builds, tests, installs, Docker operations, or other long
+   work. Prefer MCP async tools when available; otherwise use `safe-job` with
+   the explicit daemon route and a local script file.
+3. When native MCP is unavailable, use CLI file operations on the daemon route
+   if that route is available. Use SSH only to recover from an unavailable
+   required transport; an explicit SSH route is not a permission bypass.
+   Synchronous SSH commands default to a 120-second timeout.
 
-In Git Bash on Windows, MSYS may rewrite a Linux `--cwd /remote/path` before
-Node starts. Use PowerShell, or run
-`MSYS2_ARG_CONV_EXCL='--cwd=' node cli.js safe-job local-build.sh --cwd=/remote/path --connection <daemon> --route daemon`.
-For a remote temporary directory, also exclude `--remote-tmp-dir=`. A Job
-response with `success: true` confirms submission only; poll `job status`
-and check its final `status` and `exitCode` before reporting success.
+The structured `recommendedOrder` in CLI diagnostics expresses these use cases;
+it does not select or change a route automatically.
+
+In Git Bash on Windows, MSYS can rewrite remote positional paths used by
+`read`, `write`, and `safe-write`, as well as `--cwd` and
+`--remote-tmp-dir`, before Node starts. Quoting alone is not reliable. Prefer
+PowerShell. If Git Bash is required, disable conversion for all arguments and
+pass Windows-compatible local file/script paths (use `cygpath -w` when needed):
+
+```bash
+MSYS2_ARG_CONV_EXCL='*' node cli.js read /remote/path/file.txt --connection <daemon> --route daemon
+MSYS2_ARG_CONV_EXCL='*' node cli.js safe-write /remote/path/file.txt --file 'C:/work/payload.txt' --connection <daemon> --route daemon
+MSYS2_ARG_CONV_EXCL='*' node cli.js safe-job 'C:/work/build.sh' --cwd=/remote/path --connection <daemon> --route daemon
+```
+
+Do not try to repair an argument after it has already been converted. A Job
+response with `success: true` confirms submission only; poll `job status` and
+check its final `status` and `exitCode` before reporting success.
+
+An optional server-side `READ_ONLY_RULE_FILES_JSON` setting is disabled by
+default. If an administrator explicitly enables it on the modular daemon, it
+allows authenticated normal file-read and batch-read access to the registered
+exact text files only (up to 256 KiB each); it does not grant stat, byte-read,
+search, write, cwd, or arbitrary command access. It is not an OS sandbox, and
+this client documentation does not imply that any server has enabled it.
 
 If native MCP reports `Transport closed`, keep working through the CLI instead
 of stopping.
@@ -157,8 +176,7 @@ node cli.js job cancel <job-id> --connection <name> --route daemon --json
 for short scripts when a caller needs their stdout on stdout and stderr on
 stderr; the CLI still exits with the remote script's failure code. Empty output
 is valid and must not trigger a retry. Do not combine `--plain` with `--json`
-or `--dry-run`. Git Bash still needs `MSYS2_ARG_CONV_EXCL='--cwd='` with the
-`--cwd=/remote/path` form because conversion happens before Node starts.
+or `--dry-run`.
 
 ## Sync Maintained Repo To Skill Copies
 

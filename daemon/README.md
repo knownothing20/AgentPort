@@ -53,6 +53,34 @@ inside the default root. Path traversal, outside paths, overlapping roots, and
 symlink escapes are rejected before a file, command, Job, or Session operation
 is started.
 
+## Read-only rule files
+
+Required parent rules outside the workspace can be registered separately on the
+modular daemon, without adding their directory to the workspace roots:
+
+```dotenv
+READ_ONLY_RULE_FILES_JSON=["/srv/agent-rules/AGENTS.md"]
+```
+
+The default is an empty list. Configuration accepts at most 32 exact absolute
+file paths, not directories or wildcard patterns. All authenticated clients of
+this daemon can read these files; register only rules intended for those clients.
+Keep actual paths and configuration private, and authorize production changes
+separately. The standalone legacy server does not implement this option.
+
+Only text reads (`/api/fs/read`, `/read`, and batch `read`) receive the exception.
+Responses identify `accessScope: "read-only-rule-file"`, `readOnly: true`, and
+`writeEtag: null`. Stat, byte reads, manifest, search, writes, deletes and execution
+cwd remain workspace-bound. Rules must be regular UTF-8 files without symlink
+components; file identity is checked and content read through the same handle.
+The whole rule file is capped at 256 KiB, even for line-range reads. Requests must
+use the configured path exactly, not a traversal or alternate symlink alias.
+Rule-file ETags include a scope prefix, so switching between workspace and
+rule-only access refreshes cached permission metadata even without content changes.
+
+Neither workspace checks nor this exception sandbox arbitrary shell commands.
+Use OS permissions or an actual execution sandbox when that isolation is needed.
+
 ## Routes owned by the modular gateway
 
 ### Files and search

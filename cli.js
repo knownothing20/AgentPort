@@ -175,21 +175,34 @@ function parseArgs(argv) {
   return out;
 }
 
+function isConvertedWindowsPath(value) {
+  const directory = String(value || "").trim();
+  return /^[A-Za-z]:\\/.test(directory)
+    || /^[A-Za-z]:\/(?:Users|Windows|ProgramData|Program Files(?: \(x86\))?)(?:\/|$)/i.test(directory)
+    || /^[A-Za-z]:\/.*\/(?:PortableGit|msys64|mingw64)\//i.test(directory);
+}
+
 function validateRemoteDirectoryArgs(args) {
   for (const key of ["cwd", "remote-tmp-dir", "remoteTmpDir", "tmp-dir", "tmpDir"]) {
     const value = args[key];
-    if (typeof value !== "string") continue;
-    const directory = value.trim();
-    const windowsPath = /^[A-Za-z]:\\/.test(directory)
-      || /^[A-Za-z]:\/(?:Users|Windows|ProgramData|Program Files(?: \(x86\))?)(?:\/|$)/i.test(directory)
-      || /^[A-Za-z]:\/.*\/(?:PortableGit|msys64|mingw64)\//i.test(directory);
-    if (!windowsPath) continue;
+    if (typeof value !== "string" || !isConvertedWindowsPath(value)) continue;
     const option = key === "cwd" ? "--cwd" : "--remote-tmp-dir";
     throw new Error(
       `${option} must be a remote Linux path. Git Bash may have converted it to a Windows path. `
-      + `Use PowerShell or MSYS2_ARG_CONV_EXCL='${option}=' with ${option}=/remote/path.`,
+      + `Use PowerShell, or in Git Bash set MSYS2_ARG_CONV_EXCL='*' and pass Windows-compatible local file paths `
+      + `(use cygpath -w when needed) together with ${option}=/remote/path. Do not try to repair an already converted path.`,
     );
   }
+}
+
+function validateRemoteFileTarget(command, targetPath, args) {
+  if (!isConvertedWindowsPath(targetPath)) return;
+  const suppliedAs = args._[1] ? "positional remote target" : "--path";
+  throw new Error(
+    `${command} ${suppliedAs} must be a remote Linux path. Git Bash may have converted it to a Windows path. `
+    + `Use PowerShell, or in Git Bash set MSYS2_ARG_CONV_EXCL='*' before passing the original remote path. `
+    + `Do not try to repair an already converted path.`,
+  );
 }
 
 function parseTimeoutMs(value, fallback, name) {
@@ -1260,14 +1273,39 @@ async function checkDaemon(conn) {
   const client = daemonClient(conn);
   const started = Date.now();
   const response = await client.get("/healthz");
+  const data = response.data;
+  const roots = Array.isArray(data?.workspaceRoots)
+    ? data.workspaceRoots
+    : data?.workspaceRoots && typeof data.workspaceRoots === "object"
+      ? data.workspaceRoots
+      : Array.isArray(data?.workspace?.roots)
+        ? data.workspace.roots
+        : (typeof data?.workspaceRoot === "string" && data.workspaceRoot ? [data.workspaceRoot] : null);
+  const reportedBoundary = data?.workspaceBoundary;
   return {
     ok: true,
     type: "daemon",
     name: conn.name,
     url: conn.url,
     latencyMs: Date.now() - started,
-    data: response.data,
+    data,
+    workspaceBoundary: {
+      kind: "daemon-path-boundary",
+      source: roots !== null ? (data?.workspaceRoots ? "healthz.workspaceRoots" : "healthz.workspaceRoot") : "unreported",
+      roots,
+      defaultWorkspace: data?.defaultWorkspace ?? null,
+      workspaceNames: Array.isArray(data?.workspaceNames) ? data.workspaceNames : null,
+      reported: roots !== null || Boolean(reportedBoundary),
+      enforced: typeof reportedBoundary?.enforced === "boolean" ? reportedBoundary.enforced : null,
+      scope: reportedBoundary?.scope ?? null,
+      enforcement: typeof reportedBoundary?.enforced === "boolean" ? "healthz-reported-not-independently-verified" : "unknown",
+      osIsolation: typeof reportedBoundary?.osIsolation === "boolean" ? reportedBoundary.osIsolation : null,
+    },
   };
+}
+
+function recommendedOrder() {
+  return ["native-mcp", "daemon-job", "cli-daemon", "ssh"];
 }
 
 async function checkSsh(conn, args = {}) {
@@ -1286,6 +1324,14 @@ async function checkSsh(conn, args = {}) {
       username: conn.username,
       latencyMs: Date.now() - started,
       data,
+      workspaceBoundary: {
+        kind: "ssh-path-argument-boundary",
+        root: client.workspaceRoot || null,
+        enforced: Boolean(client.workspaceRoot),
+        source: conn.workspaceRoot ? "connection.workspaceRoot" : "unconfigured",
+        legacyUnrestrictedPathArguments: !client.workspaceRoot,
+        osIsolation: false,
+      },
       recommendedDependencies: {
         ripgrep: {
           command: "rg",
@@ -1341,6 +1387,7 @@ async function commandHealth(args) {
   const conn = selectConnection(args);
   const result = (conn.type || "daemon") === "ssh" ? await checkSsh(conn) : await checkDaemon(conn);
   result.route = (conn.type || "daemon") === "ssh" ? "ssh" : "daemon";
+  result.recommendedOrder = recommendedOrder();
   printJson(result);
 }
 
@@ -1348,7 +1395,7 @@ async function commandSshHealth(args) {
   const conn = selectConnection({ ...args, route: "ssh" });
   const result = await checkSsh(conn);
   result.route = "ssh";
-  result.recommendedOrder = ["ssh-first", "daemon-job", "native-mcp"];
+  result.recommendedOrder = recommendedOrder();
   printJson(result);
 }
 
@@ -1361,10 +1408,10 @@ async function commandStatus(args) {
       target: (conn.type || "daemon") === "ssh" ? `${conn.username}@${conn.host}:${conn.port || 22}` : conn.url,
     },
     nativeMcp: {
-      role: "convenience entrypoint",
-      fallback: "If native remote_* tools return Transport closed, keep working with this CLI.",
+      role: "preferred entrypoint for short file operations when available",
+      fallback: "Use the CLI on the configured daemon route when native MCP is unavailable; use SSH only for transport recovery.",
     },
-    recommendedOrder: ["ssh-first", "daemon-job", "native-mcp"],
+    recommendedOrder: recommendedOrder(),
   };
 
   if ((conn.type || "daemon") === "ssh") {
@@ -1378,7 +1425,7 @@ async function commandStatus(args) {
       jobCancel: true,
       config: false,
     };
-    result.note = "SSH route now supports lightweight persistent jobs for transport recovery.";
+    result.note = "SSH is a transport recovery route; configured SSH path boundaries do not sandbox arbitrary commands.";
     printJson(result);
     return;
   }
@@ -1435,11 +1482,11 @@ async function commandDoctor() {
   }
   printJson({
     ok: results.some((item) => item.ok),
-    nativeMcpPriority: "Native remote_* MCP tools are convenient, but this CLI is the stable fallback when stdio transport closes.",
+    nativeMcpPriority: "Prefer native remote_* MCP for short file operations when available; the CLI can use daemon or SSH routes explicitly.",
     cli: { available: true, node: process.version, cwd: __dirname },
     config: { path: CONNECTIONS_PATH, default: defaultName || null, current: getState().current || null },
-    recommendedOrder: ["ssh-first", "daemon-job", "native-mcp", "http-curl", "manual"],
-    transportPolicy: "When native MCP returns Transport closed, switch to SSH route first. Use daemon jobs for persistent tasks.",
+    recommendedOrder: recommendedOrder(),
+    transportPolicy: "Use native MCP for short file operations when available, daemon jobs for long work, CLI daemon file operations when MCP is unavailable, and SSH only when the required transport is unavailable.",
     results,
   });
 }
@@ -1468,6 +1515,7 @@ function fallbackSshConnection(primaryConn, options = {}) {
 async function commandRead(args) {
   const targetPath = args._[1] || args.path;
   if (!targetPath) throw new Error("Usage: node cli.js read <remote-path> [--connection name]");
+  validateRemoteFileTarget("read", targetPath, args);
   await withConnection(args, async (ctx) => {
     const { type, http, ssh } = ctx;
     if (type === "ssh") {
@@ -1481,7 +1529,11 @@ async function commandRead(args) {
     }
     const data = await postWithFallback(http, ["/api/fs/read", "/read"], { path: targetPath });
     if (args.json) {
-      printJson(withTarget({ ok: true, mode: "daemon", path: targetPath, etag: data.etag, content: data.content ?? "" }, ctx));
+      const result = { ok: true, mode: "daemon", path: targetPath, etag: data.etag, content: data.content ?? "" };
+      for (const key of ["accessScope", "readOnly", "writeEtag"]) {
+        if (Object.prototype.hasOwnProperty.call(data, key)) result[key] = data[key];
+      }
+      printJson(withTarget(result, ctx));
       return;
     }
     print(data.content ?? "");
@@ -1502,6 +1554,7 @@ async function readStdin() {
 async function commandWrite(args) {
   const targetPath = args._[1] || args.path;
   if (!targetPath) throw new Error("Usage: node cli.js write <remote-path> (--content text | --file local-file | stdin)");
+  validateRemoteFileTarget("write", targetPath, args);
   let content = "";
   if (typeof args.content === "string") {
     content = args.content;
@@ -1530,6 +1583,7 @@ async function commandWrite(args) {
 async function commandSafeWrite(args) {
   const targetPath = args._[1] || args.path;
   if (!targetPath) throw new Error("Usage: node cli.js safe-write <remote-path> --file <local-file> [--verify readback|none]");
+  validateRemoteFileTarget("safe-write", targetPath, args);
   if (typeof args.content === "string") {
     throw new Error("safe-write does not accept --content. Put the payload in a UTF-8 file and pass --file <local-file>.");
   }

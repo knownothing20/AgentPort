@@ -3,6 +3,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { createWorkspacePathGuard, workspaceResultPath } = require("./path-guard.cjs");
 const { sha256 } = require("./atomic-write.cjs");
+const { createRuleFileReader } = require("./rule-file-reader.cjs");
 
 function positiveInt(value, fallback, min = 1, max = Number.MAX_SAFE_INTEGER) {
   const parsed = Number.parseInt(value, 10);
@@ -140,9 +141,10 @@ async function readLineRangeWithHash(filePath, startLine, requestedEndLine, opti
   };
 }
 
-function createFileReadService({ workspaceRoot, workspaceScope, defaultMaxBytes = 2 * 1024 * 1024 } = {}) {
+function createFileReadService({ workspaceRoot, workspaceScope, readOnlyRuleFiles = [], defaultMaxBytes = 2 * 1024 * 1024 } = {}) {
   if (!workspaceRoot) throw new TypeError("workspaceRoot is required");
   const pathGuard = createWorkspacePathGuard(workspaceScope || { workspaceRoot });
+  const ruleReader = createRuleFileReader(readOnlyRuleFiles);
 
   async function stat(inputPath) {
     const resolved = await pathGuard.resolve(inputPath, { mustExist: true });
@@ -158,7 +160,15 @@ function createFileReadService({ workspaceRoot, workspaceScope, defaultMaxBytes 
   }
 
   async function readText(inputPath, options = {}) {
-    const resolved = await pathGuard.resolve(inputPath, { mustExist: true });
+    let resolved;
+    try {
+      resolved = await pathGuard.resolve(inputPath, { mustExist: true });
+    } catch (error) {
+      if (error?.code !== "EWORKSPACE") throw error;
+      const rule = await ruleReader.readText(inputPath, options);
+      if (rule) return rule;
+      throw error;
+    }
     const value = await fs.stat(resolved.realPath);
     if (!value.isFile()) {
       const error = new Error("Target is not a file");

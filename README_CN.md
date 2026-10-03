@@ -214,8 +214,18 @@ node cli.js health
 
 `safe-bash` 和 `safe-script` 默认输出 JSON；短脚本需要直接获取文本时，可加
 `--plain`，分别输出远端 stdout/stderr，并保留远端失败退出码。成功但没有输出
-是正常情况，不应因此重跑脚本。Windows Git Bash 中请使用
-`MSYS2_ARG_CONV_EXCL='--cwd='` 和 `--cwd=/远端目录`，避免启动 Node 前路径被改写。
+是正常情况，不应因此重跑脚本。Windows Git Bash 的 MSYS 可能在 Node 启动前
+改写 `read`、`write`、`safe-write` 的远端位置参数，以及 `--cwd` 和
+`--remote-tmp-dir`；仅加引号并不可靠。优先使用 PowerShell。必须使用 Git Bash
+时，设置 `MSYS2_ARG_CONV_EXCL='*'`，并传入 Windows 兼容的本地文件/脚本路径
+（必要时用 `cygpath -w`）。不要尝试修复已经转换过的参数。CLI 会拒绝可识别的
+Windows 远端文件目标和目录参数。
+
+可选服务器配置 `READ_ONLY_RULE_FILES_JSON` 默认关闭。管理员在 modular daemon
+上明确启用后，认证用户只能通过普通文件读取及 batch-read 读取已登记的精确文本
+文件（每个最多 256 KiB）；不授予 stat、字节读取、搜索、写入、cwd 或任意命令
+权限。健康检查中的 roots/boundary 是服务器报告值，不是独立安全验证；路径边界
+也不是 OS sandbox。本文不代表任何服务器已经启用该设置。
 
 ```bash
 node cli.js safe-bash local-readonly-check.sh --cwd /path/to/workspace \
