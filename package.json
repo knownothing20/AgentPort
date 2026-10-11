@@ -38,6 +38,7 @@
     "sync:skills": "node sync.cjs --skills",
     "test:privacy": "node test/test-privacy-check.cjs && node test/test-skill-sync-privacy.cjs",
     "privacy:check": "node scripts/check-privacy.cjs",
+    "privacy:release": "node scripts/check-privacy.cjs --release",
     "hooks:install": "git config core.hooksPath .githooks"
   },
   "bin": {

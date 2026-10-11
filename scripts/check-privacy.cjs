@@ -103,7 +103,7 @@ function scanContent(content) {
 }
 
 function gitBuffer(root, args, options = {}) {
-  return childProcess.execFileSync("git", args, {
+  return childProcess.execFileSync("git", ["--no-replace-objects", ...args], {
     cwd: root,
     encoding: "buffer",
     input: options.input,
@@ -150,6 +150,49 @@ function gitPaths(root, args) {
   return nulRecords(gitBuffer(root, args)).map((entry) => entry.toString("utf8"));
 }
 
+function readObjects(root, ids) {
+  const unique = [...new Set(ids)];
+  const objects = new Map();
+  if (unique.length === 0) return objects;
+  if (unique.some((oid) => !validOid(oid))) throw new Error("invalid object id");
+  const bytes = gitBuffer(root, ["cat-file", "--batch"], { input: Buffer.from(unique.join("\n") + "\n", "ascii") });
+  let offset = 0;
+  for (const oid of unique) {
+    const end = bytes.indexOf(10, offset);
+    if (end < 0) throw new Error("incomplete object header");
+    const match = /^([a-f0-9]{40,64}) (blob|commit|tree|tag) (\d+)$/.exec(bytes.subarray(offset, end).toString("ascii"));
+    const size = match ? Number(match[3]) : NaN;
+    const next = end + 1 + size;
+    if (!match || match[1] !== oid || !Number.isSafeInteger(size) || next >= bytes.length || bytes[next] !== 10) {
+      throw new Error("invalid object response");
+    }
+    objects.set(oid, { type: match[2], bytes: bytes.subarray(end + 1, next) });
+    offset = next + 1;
+  }
+  if (offset !== bytes.length) throw new Error("unexpected object response data");
+  return objects;
+}
+
+function scanBlobEntries(root, entries, findings) {
+  const candidates = [];
+  for (const entry of entries) {
+    addContentFindings(findings, entry.file, entry.file);
+    if (isForbiddenPath(entry.file)) {
+      addFinding(findings, entry.file, "private-runtime-file");
+    } else if (entry.mode !== "160000") {
+      candidates.push(entry);
+    }
+  }
+  const objects = readObjects(root, candidates.map((entry) => entry.oid));
+  const rulesByOid = new Map();
+  for (const entry of candidates) {
+    const object = objects.get(entry.oid);
+    if (object.type !== "blob") throw new Error("expected a file blob");
+    if (!rulesByOid.has(entry.oid)) rulesByOid.set(entry.oid, scanContent(object.bytes));
+    for (const rule of rulesByOid.get(entry.oid)) addFinding(findings, entry.file, rule);
+  }
+}
+
 function scanWorkingTree(root, findings) {
   const tracked = gitPaths(root, ["ls-files", "-z"]);
   const untracked = gitPaths(root, ["ls-files", "--others", "--exclude-standard", "-z"]);
@@ -158,6 +201,7 @@ function scanWorkingTree(root, findings) {
   const realRoot = fs.realpathSync(root);
 
   for (const file of files) {
+    addContentFindings(findings, file, file);
     if (isForbiddenPath(file)) {
       addFinding(findings, file, "private-runtime-file");
       continue;
@@ -203,18 +247,15 @@ function parseIndexEntry(entry) {
 
 function scanIndex(root, findings) {
   const entries = nulRecords(gitBuffer(root, ["ls-files", "--stage", "-z"])).map(parseIndexEntry);
+  const supported = [];
   for (const entry of entries) {
-    if (isForbiddenPath(entry.file)) {
-      addFinding(findings, entry.file, "private-runtime-file");
-      continue;
-    }
-    if (entry.mode === "160000") continue;
-    if (!["100644", "100755", "120000"].includes(entry.mode)) {
+    if (!["100644", "100755", "120000", "160000"].includes(entry.mode)) {
       addFinding(findings, entry.file, "unsupported-index-entry-type");
       continue;
     }
-    addContentFindings(findings, entry.file, gitBuffer(root, ["cat-file", "blob", entry.oid]));
+    supported.push(entry);
   }
+  scanBlobEntries(root, supported, findings);
 }
 
 function parseIdentity(identity) {
@@ -270,7 +311,7 @@ function parsePrePushInput(input) {
     const [localRef, localOid, remoteRef, remoteOid] = fields;
     if ((!validOid(localOid)) || (!validOid(remoteOid))) throw new Error("invalid pre-push object id");
     if (localOid.length !== remoteOid.length) throw new Error("inconsistent object format");
-    if (localRef !== "(delete)" && !localRef.startsWith("refs/")) throw new Error("invalid local ref");
+    if (localRef === "(delete)" && !isZeroOid(localOid)) throw new Error("invalid deletion record");
     if (!remoteRef.startsWith("refs/")) throw new Error("invalid remote ref");
     updates.push({ localRef, localOid, remoteRef, remoteOid });
   }
@@ -281,19 +322,6 @@ function resolveCommit(root, oid) {
   const resolved = gitBuffer(root, ["rev-parse", "--verify", `${oid}^{commit}`]).toString("ascii").trim();
   if (!validOid(resolved)) throw new Error("invalid resolved commit");
   return resolved;
-}
-
-function remoteTrackingRoots(root, remoteName) {
-  if (!remoteName || /[\s\0]/.test(remoteName)) return [];
-  const prefix = `refs/remotes/${remoteName}/`;
-  const output = gitBuffer(root, ["for-each-ref", "--format=%(refname) %(objectname)", "refs/remotes"])
-    .toString("utf8");
-  const roots = [];
-  for (const line of output.split(/\r?\n/)) {
-    const match = /^(\S+) ([a-f0-9]{40,64})$/i.exec(line);
-    if (match && match[1].startsWith(prefix)) roots.push(match[2]);
-  }
-  return roots;
 }
 
 function readCommit(root, commit) {
@@ -313,31 +341,30 @@ function readCommit(root, commit) {
   return { bytes, parents };
 }
 
-function treeEntries(root, commit) {
-  const records = nulRecords(gitBuffer(root, ["ls-tree", "-r", "-z", "--full-tree", commit]));
-  const entries = new Map();
-  for (const record of records) {
-    const tab = record.indexOf(9);
-    if (tab < 0) throw new Error("invalid tree record");
-    const fields = record.subarray(0, tab).toString("ascii").split(" ");
-    if (fields.length !== 3 || !validOid(fields[2])) throw new Error("invalid tree entry");
-    entries.set(record.subarray(tab + 1).toString("utf8"), {
-      mode: fields[0],
-      type: fields[1],
-      oid: fields[2],
-    });
+function changedEntries(root, commit, firstParent) {
+  const args = ["diff-tree", "--no-commit-id", "--raw", "--no-abbrev", "-r", "-z", "--no-renames"];
+  if (firstParent) args.push(firstParent, commit);
+  else args.push("--root", commit);
+  const records = nulRecords(gitBuffer(root, args));
+  if (records.length % 2 !== 0) throw new Error("invalid diff records");
+  const entries = [];
+  for (let index = 0; index < records.length; index += 2) {
+    const match = /^:([0-7]{6}) ([0-7]{6}) ([a-f0-9]{40,64}) ([a-f0-9]{40,64}) ([AMDT])$/.exec(records[index].toString("ascii"));
+    if (!match) throw new Error("invalid diff entry");
+    if (!isZeroOid(match[4])) entries.push({ file: records[index + 1].toString("utf8"), mode: match[2], oid: match[4] });
   }
   return entries;
 }
 
-function changedPaths(root, commit, firstParent) {
-  const args = ["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "--no-renames"];
-  if (firstParent) args.push(firstParent, commit);
-  else args.push("--root", commit);
-  return gitPaths(root, args);
+function scanCoauthors(text, source, findings) {
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^Co-authored-by:[ \t]*(.+)$/i.exec(line);
+    if (!match) continue;
+    for (const rule of identityRules(`${match[1].trim()} 0 +0000`)) addFinding(findings, source, rule);
+  }
 }
 
-function scanOutgoingCommit(root, commit, findings) {
+function scanOutgoingCommit(root, commit, findings, entries) {
   const data = readCommit(root, commit);
   const source = `commit ${commit.slice(0, 12)}`;
   addContentFindings(findings, source, data.bytes);
@@ -347,17 +374,27 @@ function scanOutgoingCommit(root, commit, findings) {
     if (!line.startsWith("author ") && !line.startsWith("committer ")) continue;
     for (const rule of identityRules(line.slice(line.indexOf(" ") + 1))) addFinding(findings, source, rule);
   }
+  scanCoauthors(data.bytes.subarray(data.bytes.indexOf(Buffer.from("\n\n")) + 2).toString("utf8"), source, findings);
+  entries.push(...changedEntries(root, commit, data.parents[0]));
+}
 
-  const entries = treeEntries(root, commit);
-  for (const file of changedPaths(root, commit, data.parents[0])) {
-    const entry = entries.get(file);
-    if (!entry) continue;
-    if (isForbiddenPath(file)) {
-      addFinding(findings, file, "private-runtime-file");
-      continue;
-    }
-    if (entry.type !== "blob") continue;
-    addContentFindings(findings, file, gitBuffer(root, ["cat-file", "blob", entry.oid]));
+function scanTagChain(root, oid, findings, seen) {
+  let current = oid;
+  while (!seen.has(current)) {
+    seen.add(current);
+    const object = readObjects(root, [current]).get(current);
+    if (object.type !== "tag") return;
+    const separator = object.bytes.indexOf(Buffer.from("\n\n"));
+    if (separator < 0) throw new Error("invalid tag object");
+    const header = object.bytes.subarray(0, separator).toString("utf8").split("\n");
+    const target = header.find((line) => line.startsWith("object "))?.slice(7);
+    const tagger = header.find((line) => line.startsWith("tagger "))?.slice(7);
+    if (!validOid(target) || !tagger) throw new Error("invalid tag metadata");
+    const source = `tag ${current.slice(0, 12)}`;
+    addContentFindings(findings, source, object.bytes);
+    for (const rule of identityRules(tagger)) addFinding(findings, source, rule);
+    scanCoauthors(object.bytes.subarray(separator + 2).toString("utf8"), source, findings);
+    current = target;
   }
 }
 
@@ -367,14 +404,18 @@ function scanPrePush(root, remoteName, input, findings) {
   if (!remoteName || /[\s\0]/.test(remoteName)) throw new Error("missing remote name");
 
   const localRoots = [];
-  const publishedRoots = remoteTrackingRoots(root, remoteName);
+  const seenTags = new Set();
+  const publishedRoots = [];
   for (const update of updates) {
-    if (!isZeroOid(update.localOid)) localRoots.push(resolveCommit(root, update.localOid));
+    if (!isZeroOid(update.localOid)) {
+      if (update.remoteRef.startsWith("refs/tags/")) scanTagChain(root, update.localOid, findings, seenTags);
+      localRoots.push(resolveCommit(root, update.localOid));
+    }
     if (!isZeroOid(update.remoteOid)) {
       try {
         publishedRoots.push(resolveCommit(root, update.remoteOid));
       } catch {
-        // A remote object may not be present locally; known tracking refs remain usable.
+        // If the advertised remote object is unavailable, scan all local history.
       }
     }
   }
@@ -391,16 +432,42 @@ function scanPrePush(root, remoteName, input, findings) {
     input: Buffer.from(revisions, "ascii"),
   }).toString("ascii").split(/\r?\n/).filter(Boolean);
 
+  const entries = [];
   for (const commit of candidates) {
     if (!validOid(commit)) throw new Error("invalid outgoing commit id");
-    scanOutgoingCommit(root, commit, findings);
+    scanOutgoingCommit(root, commit, findings, entries);
   }
+  scanBlobEntries(root, entries, findings);
   return { empty: false };
+}
+
+function scanRelease(root, findings, env) {
+  scanWorkingTree(root, findings);
+  scanIndex(root, findings);
+  scanCurrentIdentities(root, findings, env);
+  const head = resolveCommit(root, "HEAD");
+  const tags = gitBuffer(root, ["for-each-ref", "--format=%(objectname)", "refs/tags"]).toString("ascii").trim();
+  const roots = [head];
+  const seenTags = new Set();
+  if (tags) for (const oid of tags.split(/\r?\n/)) {
+    scanTagChain(root, oid, findings, seenTags);
+    roots.push(resolveCommit(root, oid));
+  }
+  const commits = gitBuffer(root, ["rev-list", "--reverse", "--topo-order", "--stdin"], {
+    input: Buffer.from([...new Set(roots)].join("\n") + "\n", "ascii"),
+  }).toString("ascii").trim().split(/\r?\n/);
+  const entries = [];
+  for (const commit of commits) scanOutgoingCommit(root, commit, findings, entries);
+  scanBlobEntries(root, entries, findings);
 }
 
 function formatFindings(findings) {
   const lines = ["Privacy check failed. Replace or remove the flagged value before continuing:"];
-  for (const finding of findings) lines.push(`- ${finding.file}: ${finding.rule}`);
+  for (const finding of findings) {
+    const file = scanContent(finding.file).length ? "[redacted filename]"
+      : finding.file.replace(/[\x00-\x1f\x7f]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
+    lines.push(`- ${file}: ${finding.rule}`);
+  }
   return `${lines.join("\n")}\n`;
 }
 
@@ -421,6 +488,8 @@ function runPrivacyCheck(options = {}) {
         stdout.write("PASS privacy check (no pre-push refs)\n");
         return 0;
       }
+    } else if (mode === "release") {
+      scanRelease(root, findings, options.env);
     } else {
       throw new Error("unknown privacy check mode");
     }
@@ -449,6 +518,7 @@ function readPrePushInput() {
 
 function main(args = process.argv.slice(2)) {
   if (args.length === 0) return runPrivacyCheck({ mode: "working" });
+  if (args.length === 1 && args[0] === "--release") return runPrivacyCheck({ mode: "release" });
   if (args[0] === "--staged" && args.slice(1).every((arg) => arg === "--check-identity")) {
     return runPrivacyCheck({ mode: "staged", checkIdentity: args.includes("--check-identity") });
   }
@@ -462,7 +532,7 @@ function main(args = process.argv.slice(2)) {
     }
     return runPrivacyCheck({ mode: "pre-push", remoteName: args[1] || "", input });
   }
-  process.stderr.write("Usage: check-privacy.cjs [--staged [--check-identity] | --pre-push <remote>]\n");
+  process.stderr.write("Usage: check-privacy.cjs [--release | --staged [--check-identity] | --pre-push <remote>]\n");
   return 2;
 }
 

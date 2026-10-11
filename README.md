@@ -648,6 +648,7 @@ Enable the repository-local privacy hooks once:
 ```bash
 git config core.hooksPath .githooks
 npm run privacy:check
+npm run privacy:release
 npm run test:privacy
 ```
 
@@ -656,3 +657,12 @@ snapshot and identity; pre-push checks outgoing commits, including intermediate
 versions. Never bypass these hooks. Skill synchronization copies only tracked
 source and preserves each installation's private configuration. These local
 guards do not remove already published history or replace server-side policy.
+
+Use `privacy:release` before publishing: it checks working files, staged bytes,
+author identities, and the complete history reachable from HEAD and local tags.
+Tag descriptions and Co-authored-by emails receive the same checks.
+Findings show file/object labels and rule names only; detected secrets are not
+printed. Git file blobs are read in batches; duplicate objects in each batch
+are scanned once.
+New branches are checked from their root; stale local tracking refs cannot skip
+unpublished commits. Fixing only the latest file does not clear a history finding.

@@ -1,6 +1,8 @@
 # AgentPort Repository Rules
 
 Before committing or pushing, run `npm run privacy:check`.
+Before a release, run `npm run privacy:release`. It checks working files,
+the staged snapshot, the complete HEAD history, and all local release tags.
 
 - Keep credentials, machine-specific connection data, and runtime configuration
   in ignored `local/` files or environment files only.
@@ -13,6 +15,8 @@ Before committing or pushing, run `npm run privacy:check`.
 - Enable the lightweight hooks with `git config core.hooksPath .githooks`.
   Pre-commit checks staged bytes and identity; pre-push checks outgoing history,
   including intermediate commits whose sensitive content was later removed.
+  Annotated tags and Co-authored-by identities are also checked. Only remote
+  commit IDs advertised for this push are treated as already published.
 - Skill sync copies only Git-tracked source files. Review and stage intended new
   source files first; never force-add private configs, logs, or scratch scripts.
 

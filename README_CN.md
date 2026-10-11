@@ -443,6 +443,7 @@ MIT License - 详见 [LICENSE](./LICENSE)
 ```bash
 git config core.hooksPath .githooks
 npm run privacy:check
+npm run privacy:release
 npm run test:privacy
 ```
 
@@ -450,3 +451,9 @@ npm run test:privacy
 推送前检查待推送提交，包括后来已被删除或修复的中间版本，不要绕过 hook。
 Skill 同步只复制 Git 跟踪的源码，保留各软件独立的私有配置。
 本地拦截不能清除已经公开的历史，也不能替代 GitHub 服务端规则。
+
+发布前执行 `privacy:release`：检查工作文件、暂存区、作者身份、HEAD 可达的
+完整提交历史，以及所有本地 Tag 的历史；Tag 说明和 `Co-authored-by` 邮箱
+同样检查。只显示文件或对象标识及规则名，不回显敏感值。
+Git 文件对象批量读取，每批中的相同对象只扫描一次。新分支从根提交检查，本地过期的远程
+分支缓存不能跳过未发布提交；只修正最新文件，不能消除历史里的敏感内容。
