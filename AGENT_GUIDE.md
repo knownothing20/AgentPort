@@ -160,6 +160,22 @@ unavailable but the daemon remains reachable, and SSH only for transport
 recovery. The CLI is not synonymous with SSH, and MCP tools are not guaranteed
 to use the daemon.
 
+## MCP Recovery And Logs
+
+MCP recovery preserves delivery state: `EOUTCOME_UNKNOWN` is an error result,
+not evidence of non-execution. Reconcile the original Job handle or target
+state before any replay, including through CLI/SSH. An unavailable local broker
+is invalidated and a replacement may be loaded; permission errors never trigger
+execution through another route. Execution failures and failed batch items use
+MCP `isError`, while a queued Job remains a successful submission only.
+
+Local logs redact credential fields and Bearer/assignment values before data
+truncation. Calls include a lightweight terminal event and an origin-call ID
+shared with the broker. `MCP_REMOTE_LOG_TOOL_SUCCESS=1` opts into detailed
+successful-call diagnostics; `MCP_REMOTE_LOG_DIR` can isolate diagnostic output.
+These changes protect new logs, not previously written files. Historical log
+cleanup and live MCP restarts require their own authorized maintenance scope.
+
 ## Rule File Access
 
 Use the SKILL.md Rule Files and Workspace Boundaries contract during startup.

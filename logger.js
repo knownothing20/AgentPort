@@ -12,7 +12,9 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const LOG_DIR = path.join(__dirname, "local", "logs");
+const LOG_DIR = process.env.MCP_REMOTE_LOG_DIR
+  ? path.resolve(process.env.MCP_REMOTE_LOG_DIR)
+  : path.join(__dirname, "local", "logs");
 const MAX_DAYS = 7;
 const DEFAULT_DATA_MAX_BYTES = 4000;
 const DEFAULT_LOG_SEGMENT_MAX_BYTES = 50 * 1024 * 1024;
@@ -106,24 +108,130 @@ function cleanupOldLogs() {
   }
 }
 
+const REDACTED = "[REDACTED]";
+const MAX_EMBEDDED_JSON_DEPTH = 8;
+const MAX_EMBEDDED_JSON_FRAGMENTS = 256;
+const MAX_EMBEDDED_JSON_SCAN_CHARS = 1024 * 1024;
+
+function isSensitiveKey(key) {
+  const normalized = String(key).toLowerCase().replace(/[^a-z0-9]/g, "");
+  return /(?:token|password|passphrase|privatekey|apikey|secret|authorization)$/.test(normalized);
+}
+
+function findJsonFragmentEnd(value, start, state) {
+  const closers = [value[start] === "{" ? "}" : "]"];
+  let inString = false;
+  let escaped = false;
+
+  for (let index = start + 1; index < value.length; index += 1) {
+    if (state.scanRemaining <= 0) return { limitReached: true };
+    state.scanRemaining -= 1;
+    const character = value[index];
+
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') inString = true;
+    else if (character === "{" || character === "[") {
+      if (closers.length >= 128) return { invalid: true };
+      closers.push(character === "{" ? "}" : "]");
+    }
+    else if (character === "}" || character === "]") {
+      if (closers.pop() !== character) return { invalid: true };
+      if (closers.length === 0) return { end: index + 1 };
+    }
+  }
+  return { incomplete: true };
+}
+
+function redactString(value, seen = new WeakSet(), state = createRedactionState(), embeddedDepth = 0) {
+  let result = value
+    .replace(/\bBearer\s+[^\s,;"'<>]+/gi, `Bearer ${REDACTED}`)
+    .replace(/\b((?:x-agentport-broker-token|authorization|auth[\s_-]*token|access[\s_-]*token|refresh[\s_-]*token|api[\s_-]*key|private[\s_-]*key|passphrase|password|secret|token))\s*([=:])\s*(?:"([^"]*)"|'([^']*)'|([^\s,;&]+))/gi,
+      (_match, key, separator) => `${key}${separator}${REDACTED}`);
+
+  const trimmed = result.trim();
+  if (trimmed.length <= MAX_EMBEDDED_JSON_SCAN_CHARS
+    && ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]")))) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (embeddedDepth >= MAX_EMBEDDED_JSON_DEPTH) return REDACTED;
+      const sanitized = sanitizeValue(parsed, "", seen, state, embeddedDepth + 1);
+      return result.replace(trimmed, () => JSON.stringify(sanitized));
+    } catch {}
+  }
+
+  let output = "";
+  let copiedUntil = 0;
+  let fragments = 0;
+  for (let index = 0; index < result.length; index += 1) {
+    if (result[index] !== "{" && result[index] !== "[") continue;
+    const boundary = findJsonFragmentEnd(result, index, state);
+    if (boundary.limitReached || boundary.incomplete) {
+      return output + result.slice(copiedUntil, index) + REDACTED;
+    }
+    if (!boundary.end) continue;
+
+    let parsed;
+    try {
+      parsed = JSON.parse(result.slice(index, boundary.end));
+    } catch {
+      continue;
+    }
+    if (embeddedDepth >= MAX_EMBEDDED_JSON_DEPTH || fragments >= MAX_EMBEDDED_JSON_FRAGMENTS) {
+      return output + result.slice(copiedUntil, index) + REDACTED;
+    }
+    output += result.slice(copiedUntil, index);
+    output += JSON.stringify(sanitizeValue(parsed, "", seen, state, embeddedDepth + 1));
+    copiedUntil = boundary.end;
+    index = boundary.end - 1;
+    fragments += 1;
+  }
+  result = output + result.slice(copiedUntil);
+  return result.replace(/(['"])((?:x-agentport-broker-token|authorization|auth[\s_-]*token|access[\s_-]*token|refresh[\s_-]*token|api[\s_-]*key|private[\s_-]*key|passphrase|password|secret|token))\1\s*:\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}]+)/gi,
+    (_match, quote, key) => `${quote}${key}${quote}: ${quote}${REDACTED}${quote}`);
+}
+
+function createRedactionState() {
+  return { scanRemaining: MAX_EMBEDDED_JSON_SCAN_CHARS };
+}
+
+function sanitizeValue(value, key, seen, state, embeddedDepth) {
+  if (key && isSensitiveKey(key)) return REDACTED;
+  if (typeof value === "string") return redactString(value, seen, state, embeddedDepth);
+  if (typeof value !== "object" || value === null) return value;
+  if (seen.has(value)) return "[Circular]";
+  seen.add(value);
+
+  if (value instanceof Error) {
+    const result = {
+      name: redactString(value.name, seen, state, embeddedDepth),
+      message: redactString(value.message, seen, state, embeddedDepth),
+      code: sanitizeValue(value.code, "code", seen, state, embeddedDepth),
+      stack: value.stack ? redactString(value.stack, seen, state, embeddedDepth) : undefined,
+    };
+    for (const property of Object.keys(value)) {
+      if (!(property in result)) result[property] = sanitizeValue(value[property], property, seen, state, embeddedDepth);
+    }
+    return result;
+  }
+  if (Array.isArray(value)) return value.map((item) => sanitizeValue(item, "", seen, state, embeddedDepth));
+
+  const result = {};
+  for (const [property, item] of Object.entries(value)) {
+    result[property] = sanitizeValue(item, property, seen, state, embeddedDepth);
+  }
+  return result;
+}
+
 function safeStringify(value) {
-  if (typeof value === "string") return value;
-  const seen = new WeakSet();
-  return JSON.stringify(value, (key, item) => {
-    if (item instanceof Error) {
-      return {
-        name: item.name,
-        message: item.message,
-        code: item.code,
-        stack: item.stack,
-      };
-    }
-    if (typeof item === "object" && item !== null) {
-      if (seen.has(item)) return "[Circular]";
-      seen.add(item);
-    }
-    return item;
-  });
+  const state = createRedactionState();
+  if (typeof value === "string") return redactString(value, new WeakSet(), state);
+  const serialized = JSON.stringify(sanitizeValue(value, "", new WeakSet(), state, 0));
+  return serialized === undefined ? String(value) : serialized;
 }
 
 // Write log entry
@@ -133,7 +241,8 @@ function write(level, tool, message, data = null) {
     cleanupOldLogs();
 
     const timestamp = new Date().toISOString();
-    let logLine = `[${timestamp}] [${level}] [${tool}] ${message}`;
+    const state = createRedactionState();
+    let logLine = `[${timestamp}] [${level}] [${redactString(String(tool), new WeakSet(), state)}] ${redactString(String(message), new WeakSet(), state)}`;
 
     if (data) {
       // Truncate long data for readability

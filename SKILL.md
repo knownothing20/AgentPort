@@ -108,6 +108,18 @@ this client documentation does not imply that any server has enabled it.
 If native MCP reports `Transport closed`, keep working through the CLI instead
 of stopping.
 
+Reconcile the original operation before retrying a lost reply. An MCP error
+with `EOUTCOME_UNKNOWN` means a write, command, or Job submission may already
+have run: do not resubmit or switch routes to execute it again. Inspect its
+saved handle and target state first. Safe read recovery must preserve the
+explicit target; authentication and workspace denials are not transport outages.
+The local proxy refreshes an unavailable broker rather than retrying its stale
+address on every call. This does not authorize remote deployment or restarts.
+
+Use `remote_grep` with `caseSensitive: false` for case-insensitive searches.
+Regex mode uses JavaScript syntax; PCRE inline flags such as `(?i)` are not
+supported. Prefer literal search unless a regular expression is required.
+
 ## New Client Token Provisioning
 
 Each AI software and each machine should have its own local `local/` directory

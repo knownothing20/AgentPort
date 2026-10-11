@@ -198,6 +198,16 @@ arbitrary command access. Health-reported roots and boundary fields are not an
 independent security test; path checks are not an OS sandbox. This client
 documentation does not imply that a server has enabled the setting.
 
+Local MCP broker failures no longer cause unconditional replay. A replacement
+broker may be loaded after a confirmed unsent request; ambiguous commands,
+writes, and Job submissions return `EOUTCOME_UNKNOWN`. Reconcile the original
+handle/state before retrying. Permission denials never trigger route fallback.
+Execution errors use MCP `isError`, and compact terminal logs distinguish
+completed, failed, and unknown outcomes. Credential fields are redacted before
+log truncation; old log files are not rewritten by this update.
+
+Run the isolated recovery and logging regressions with `npm run test:mcp:recovery`.
+
 Provision a daemon token for a new AI software or new computer:
 
 ```bash

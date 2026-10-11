@@ -13,6 +13,7 @@ import { randomBytes } from "crypto";
 import { SSHClient, SSHConnectionManager } from "./ssh-client.js";
 import { scanLocalSSH, formatSSHScanSummary } from "./ssh-scanner.js";
 import logger from "./logger.js";
+import { definitelyNotSent, replaySafeTool, replaySafePost, outcomeUnknown, recoverBrokerCall, toolResultError, normalizeToolResult, jobResultSummary, batchItemFailed } from "./packages/client-core/mcp-recovery.js";
 
 // Node 19+ enables keep-alive on the global HTTP agents. Some lightweight
 // daemon/proxy combinations close those sockets without a reusable FIN, so a
@@ -190,6 +191,7 @@ let _currentTraceContext = null;
 let _singletonLockPath = null;
 let _singletonBroker = null;
 let _proxyBroker = null;
+let _proxyRecoveryNeedsBinding = false;
 const SINGLETON_RUNTIME_DIR = path.join(__dirname, "local", "runtime");
 const SINGLETON_LOCK_PREFIX = "instance";
 const RECENT_EVENTS_LIMIT = 60;
@@ -794,6 +796,9 @@ function applyPerCallConnection(toolName, args = {}) {
     return null;
   }
   loadConnections();
+  if (_proxyRecoveryNeedsBinding && Object.keys(_connections).length > 1 && !explicitToolConnection(args)) {
+    throw new Error("Proxy recovery requires an explicit connection to preserve the target binding.");
+  }
   const previous = {
     connection: _currentConnection,
     axios: _connectionAxios,
@@ -884,7 +889,7 @@ function setEtagCache(filePath, etag, content) {
 
 // --- Network error detection ---
 const NETWORK_ERROR_CODES = new Set([
-  "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "EPIPE",
+  "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ECONNABORTED", "EPIPE",
   "ENOTFOUND", "ENETUNREACH", "EAI_AGAIN",
 ]);
 
@@ -1036,7 +1041,10 @@ async function postWithFallback(paths, payload, retryCount = 0) {
         lastError = error;
         continue;
       }
-      // Network error: retry once with delay
+      if (isNetworkError(error) && !replaySafePost(paths) && !definitelyNotSent(error)) {
+        throw outcomeUnknown(path, error);
+      }
+      // Only reads or requests confirmed not sent may be retried.
       if (isNetworkError(error) && retryCount < MAX_RETRIES) {
         _stats.retries++;
         writeStderrLine(`Network error on ${path}: ${error.code || error.message}. Retrying in ${RETRY_DELAY_MS}ms... (attempt ${retryCount + 1}/${MAX_RETRIES})`);
@@ -1074,6 +1082,21 @@ function toTextResult(text) {
       },
     ],
   };
+}
+
+function toErrorResult(text, error = null) {
+  return {
+    ...toTextResult(text),
+    isError: true,
+    ...(error?.code ? { structuredContent: { code: error.code } } : {}),
+  };
+}
+
+function execResult(data) {
+  const result = toTextResult(formatExecOutput(data));
+  const exitCode = data?.code ?? data?.exitCode;
+  if (data?.error || data?.signal || (typeof exitCode === "number" && exitCode !== 0)) result.isError = true;
+  return result;
 }
 
 function writeJsonResponse(res, statusCode, payload) {
@@ -1133,34 +1156,78 @@ function updateSingletonLockFile(update = {}) {
   }
 }
 
-function getProxyBrokerHeaders() {
-  if (!_proxyBroker?.token) return {};
-  return { "x-agentport-broker-token": _proxyBroker.token };
+function readReplacementBroker(previous) {
+  try {
+    const data = JSON.parse(fs.readFileSync(getSingletonLockPath(), "utf8").replace(/^\uFEFF/, ""));
+    if (!isPidAlive(data.pid) || !data.broker?.token) return null;
+    const url = new URL(data.broker.url);
+    if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.username || url.password
+        || url.search || url.hash || (url.pathname !== "/" && url.pathname !== "")) return null;
+    if (data.broker.url === previous.url && data.broker.token === previous.token) return null;
+    return { url: data.broker.url, token: data.broker.token, pid: data.pid, sessionId: data.sessionId };
+  } catch {
+    return null;
+  }
+}
+
+async function recoverProxyRequest(operation, args, request) {
+  const broker = _proxyBroker;
+  return recoverBrokerCall({
+    operation, args, broker, request,
+    invalidate(target) {
+      if (_proxyBroker?.url === target.url && _proxyBroker?.token === target.token) {
+        _proxyBroker = null;
+        _proxyRecoveryNeedsBinding = true;
+      }
+    },
+    refresh(previous) {
+      const replacement = readReplacementBroker(previous);
+      if (replacement) _proxyBroker = replacement;
+      return replacement;
+    },
+    fallback() {
+      if (operation !== "tools/list" && operation !== "remote_connect"
+          && Object.keys(_connections).length > 1 && !explicitToolConnection(args)) {
+        throw new Error("Proxy recovery requires an explicit connection to preserve the target binding.");
+      }
+      return null;
+    },
+    warn(error, target) {
+      logProcessEvent("warn", "Proxy broker invalidated; recovering without blind replay", {
+        toolName: operation, error: errorMessage(error), brokerUrl: target.url, brokerPid: target.pid,
+      });
+    },
+  });
 }
 
 async function proxyListToolsRequest() {
   if (!_proxyBroker?.url) throw new Error("Proxy broker is not configured.");
-  const response = await axios.get(`${_proxyBroker.url}/mcp-tools`, {
-    timeout: Math.min(REQUEST_TIMEOUT_MS, 30000),
-    headers: getProxyBrokerHeaders(),
+  return recoverProxyRequest("tools/list", {}, async (broker) => {
+    const response = await axios.get(`${broker.url}/mcp-tools`, {
+      timeout: Math.min(REQUEST_TIMEOUT_MS, 30000),
+      httpAgent: HTTP_AGENT,
+      proxy: false,
+      maxRedirects: 0,
+      headers: { "x-agentport-broker-token": broker.token },
+    });
+    return response.data;
   });
-  return response.data;
 }
 
-async function proxyCallToolRequest(name, args) {
+async function proxyCallToolRequest(name, args, originCallId) {
   if (!_proxyBroker?.url) throw new Error("Proxy broker is not configured.");
-  const response = await axios.post(
-    `${_proxyBroker.url}/mcp-call`,
-    { name, arguments: args || {} },
-    {
+  return recoverProxyRequest(name, args, async (broker) => {
+    const response = await axios.post(`${broker.url}/mcp-call`, {
+      name, arguments: args || {}, originCallId,
+    }, {
       timeout: REQUEST_TIMEOUT_MS,
-      headers: {
-        "content-type": "application/json",
-        ...getProxyBrokerHeaders(),
-      },
-    }
-  );
-  return response.data;
+      httpAgent: HTTP_AGENT,
+      proxy: false,
+      maxRedirects: 0,
+      headers: { "content-type": "application/json", "x-agentport-broker-token": broker.token },
+    });
+    return response.data;
+  });
 }
 
 async function startSingletonBroker() {
@@ -1211,6 +1278,7 @@ async function startSingletonBroker() {
             params: {
               name: toolName,
               arguments: toolArgs,
+              _meta: { "agentport/origin-call": body.originCallId },
             },
           },
           { sessionId: `broker:${PROCESS_SESSION_ID}` }
@@ -1312,19 +1380,14 @@ function formatExecOutput(data) {
   // Normalize: server returns `code` for sync exec, `exitCode` for async task
   const exitCode = data?.code ?? data?.exitCode;
   if (typeof exitCode === "number") chunks.push(`EXIT_CODE: ${exitCode}`);
+  if (data?.signal) chunks.push(`SIGNAL: ${data.signal}`);
   return chunks.join("\n\n").trim() || "Command executed successfully with no output.";
 }
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   if (_proxyBroker) {
-    try {
-      return await proxyListToolsRequest();
-    } catch (error) {
-      logProcessEvent("warn", "Proxy tools/list failed, fallback to local handlers", {
-        error: errorMessage(error),
-        broker: _proxyBroker,
-      });
-    }
+    const result = await proxyListToolsRequest();
+    if (result) return result;
   }
 
   return {
@@ -1751,9 +1814,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const toolName = request.params.name;
   const startTime = Date.now();
   const callId = ++_toolCallSeq;
+  const requestedOrigin = request.params?._meta?.["agentport/origin-call"];
+  const originCallId = typeof requestedOrigin === "string" && /^[0-9TZ:.#-]{1,160}$/.test(requestedOrigin)
+    ? requestedOrigin : `${PROCESS_SESSION_ID}:${callId}`;
   const previousTraceContext = _currentTraceContext;
   let args = {};
   let caughtError = null;
+  let executionSummary = {};
   let callInfo = null;
   let restoreCallConnection = null;
   
@@ -1763,6 +1830,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const argSummary = summarizeArgs(toolName, args);
     callInfo = {
       callId,
+      originCallId,
       toolName,
       startTime,
       startedAt: new Date(startTime).toISOString(),
@@ -1771,6 +1839,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     };
     _currentTraceContext = {
       callId,
+      originCallId,
       toolName,
       traceBase: `${PROCESS_SESSION_ID}:${callId}`,
     };
@@ -1779,22 +1848,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (LOG_TOOL_START) {
       logger.info(toolName, `Start call #${callId}`, {
         callId,
+        originCallId,
         sessionId: PROCESS_SESSION_ID,
         connection: callInfo.connection,
         args: argSummary,
       });
     }
 
+    // Observe returned error envelopes before recording terminal call state.
+    const invoke = async () => {
     if (_proxyBroker) {
-      try {
-        return await proxyCallToolRequest(toolName, args);
-      } catch (error) {
-        logProcessEvent("warn", "Proxy tools/call failed, fallback to local handlers", {
-          toolName,
-          error: errorMessage(error),
-          broker: _proxyBroker,
-        });
-      }
+      const result = await proxyCallToolRequest(toolName, args, originCallId);
+      if (result) return result;
     }
 
     switch (toolName) {
@@ -2109,7 +2174,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const content = await sshClient.readFile(readPath);
             return toTextResult(content);
           } catch (error) {
-            return toTextResult(`Error reading file: ${error.message}`);
+            return toErrorResult(`Error reading file: ${error.message}`, error);
           }
         }
 
@@ -2164,7 +2229,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             await sshClient.writeFile(writePath, content);
             return toTextResult("File written successfully.");
           } catch (error) {
-            return toTextResult(`Error writing file: ${error.message}`);
+            return toErrorResult(`Error writing file: ${error.message}`, error);
           }
         }
 
@@ -2208,7 +2273,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               ...stats,
             }), null, 2));
           } catch (error) {
-            return toTextResult(`Stat error: ${error.message}`);
+            return toErrorResult(`Stat error: ${error.message}`, error);
           }
         }
 
@@ -2232,11 +2297,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 isDirectory: r.isDirectory !== undefined ? r.isDirectory : (r.isDir !== undefined ? r.isDir : !r.isFile),
               }), null, 2));
             }
-            return toTextResult(`Stat failed: ${r.error || "Unknown error"}`);
+            return toErrorResult(`Stat failed: ${r.error || "Unknown error"}`);
           }
-          return toTextResult(`Stat failed: ${data?.error || "Unknown error"}`);
+          return toErrorResult(`Stat failed: ${data?.error || "Unknown error"}`);
         } catch (error) {
-          return toTextResult(`Stat error: ${errorMessage(error)}`);
+          return toErrorResult(`Stat error: ${errorMessage(error)}`, error);
         }
       }
 
@@ -2252,7 +2317,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const files = await sshClient.glob(pattern, cwd);
             return toTextResult(JSON.stringify(files, null, 2));
           } catch (error) {
-            return toTextResult(`Glob error: ${error.message}`);
+            return toErrorResult(`Glob error: ${error.message}`, error);
           }
         }
 
@@ -2289,7 +2354,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               stderr: result.stderr || undefined,
             }), null, 2));
           } catch (error) {
-            return toTextResult(`Grep error: ${error.message}`);
+            return toErrorResult(`Grep error: ${error.message}`, error);
           }
         }
 
@@ -2319,9 +2384,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           try {
             const sshClient = getSSHClient();
             const result = await sshClient.exec(command, { cwd });
-            return toTextResult(formatExecOutput(result));
+            return execResult(result);
           } catch (error) {
-            return toTextResult(`Bash error: ${error.message}`);
+            return toErrorResult(`Bash error: ${error.message}`, error);
           }
         }
 
@@ -2330,7 +2395,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Auto base64 escape for commands containing bash special chars
         const effectiveCommand = needsBase64Escape(command) ? wrapBase64Command(command) : command;
         const data = await postWithFallback(["/api/exec", "/api/cmd/execute", "/bash"], { command: effectiveCommand, cwd });
-        return toTextResult(formatExecOutput(data));
+        return execResult(data);
       }
 
       case "remote_script": {
@@ -2339,7 +2404,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         let interpreter = typeof args.interpreter === "string" && args.interpreter.trim() ? args.interpreter.trim() : "bash";
         // Validate interpreter against whitelist to prevent command injection
         if (!ALLOWED_INTERPRETERS.has(interpreter)) {
-          return toTextResult(`Error: Unsupported interpreter '${interpreter}'. Allowed: ${[...ALLOWED_INTERPRETERS].join(", ")}`);
+          return toErrorResult(`Error: Unsupported interpreter '${interpreter}'. Allowed: ${[...ALLOWED_INTERPRETERS].join(", ")}`);
         }
         const cwd = typeof args.cwd === "string" ? args.cwd : undefined;
 
@@ -2364,9 +2429,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const result = await sshClient.exec(`${interpreter} ${tmpFile}`, { cwd });
             // Cleanup temp file (best effort)
             sshClient.rm(tmpFile).catch(() => {});
-            return toTextResult(formatExecOutput(result));
+            return execResult(result);
           } catch (error) {
-            return toTextResult(`Script exec error: ${error.message}`);
+            return toErrorResult(`Script exec error: ${error.message}`, error);
           }
         }
 
@@ -2379,7 +2444,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             cwd,
           });
           const data = response.data;
-          return toTextResult(formatExecOutput(data));
+          return execResult(data);
         } catch (error) {
           // If server doesn't support /api/exec/script yet, fallback to write + bash
           if (error?.response?.status === 404 || error?.response?.status === 405) {
@@ -2405,12 +2470,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               });
               // Cleanup temp file (best effort)
               postWithFallback(["/api/exec", "/bash"], { command: `rm -f ${tmpFile}` }).catch(() => {});
-              return toTextResult(formatExecOutput(execData));
+              return execResult(execData);
             } catch (fallbackError) {
-              return toTextResult(`Script exec error (fallback): ${errorMessage(fallbackError)}`);
+              return toErrorResult(`Script exec error (fallback): ${errorMessage(fallbackError)}`, fallbackError);
             }
           }
-          return toTextResult(`Script exec error: ${errorMessage(error)}`);
+          return toErrorResult(`Script exec error: ${errorMessage(error)}`, error);
         }
       }
 
@@ -2428,13 +2493,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ? args.interpreter.trim()
           : "bash";
         if (!ALLOWED_INTERPRETERS.has(interpreter)) {
-          return toTextResult(`Error: Unsupported interpreter '${interpreter}'. Allowed: ${[...ALLOWED_INTERPRETERS].join(", ")}`);
+          return toErrorResult(`Error: Unsupported interpreter '${interpreter}'. Allowed: ${[...ALLOWED_INTERPRETERS].join(", ")}`);
         }
 
         try { await ensureHealthy(); } catch (e) { if (isHealthError(e)) return healthCheckError(e.message); throw e; }
         const requestedCwd = typeof args.cwd === "string" && args.cwd.trim() ? args.cwd.trim() : "";
         const cwd = requestedCwd || _workspaceRoot;
-        if (!cwd) return toTextResult("Error: remote_script_async requires cwd when the daemon does not expose workspaceRoot.");
+        if (!cwd) return toErrorResult("Error: remote_script_async requires cwd when the daemon does not expose workspaceRoot.");
         const absoluteCwd = cwd.startsWith("/") || !_workspaceRoot
           ? cwd
           : `${_workspaceRoot.replace(/\/+$/, "")}/${cwd.replace(/^\/+/, "")}`;
@@ -2443,6 +2508,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const timeoutMs = asyncTimeoutMs(args.timeoutMs);
 
         let uploaded = false;
+        let submitAttempted = false;
         try {
           await postWithFallback(["/api/fs/write", "/write"], {
             path: wrapperPath,
@@ -2453,12 +2519,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           if ((readback.content ?? "") !== wrapperContent) {
             throw new Error("Async script upload verification failed");
           }
+          submitAttempted = true;
           const data = (await getCurrentAxios().post("/api/exec/async", {
             command: `bash ${shellSingleQuote(wrapperPath)}`,
             cwd,
             timeoutMs,
             connection: currentConnectionSummary(),
           })).data;
+          if (typeof data?.taskId !== "string" || !data.taskId) {
+            throw outcomeUnknown("remote_script_async", new Error("Submission response did not contain a task handle"));
+          }
           return toTextResult(JSON.stringify(withRuntimeMeta({
             taskId: data.taskId,
             status: data.status,
@@ -2470,14 +2540,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             message: `Task ${data.taskId} started. Use remote_task with this taskId to check progress.`,
           }), null, 2));
         } catch (error) {
-          if (uploaded) {
+          if (uploaded && (!submitAttempted || definitelyNotSent(error)
+              || (error?.response?.status >= 400 && error?.response?.status < 500))) {
             postWithFallback(["/api/exec/script"], {
               content: `rm -f -- ${shellSingleQuote(wrapperPath)}\n`,
               interpreter: "bash",
               cwd,
             }).catch(() => {});
           }
-          return toTextResult(`Async script error: ${errorMessage(error)}`);
+          return toErrorResult(`Async script error: ${errorMessage(error)}`, error);
         }
       }
 
@@ -2485,10 +2556,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         recordOp("remote_batch");
         const operations = args.operations;
         if (!Array.isArray(operations) || operations.length === 0) {
-          return toTextResult("Error: operations must be a non-empty array.");
+          return toErrorResult("Error: operations must be a non-empty array.");
         }
         if (operations.length > 20) {
-          return toTextResult("Error: Maximum 20 operations per batch.");
+          return toErrorResult("Error: Maximum 20 operations per batch.");
         }
 
         // SSH mode
@@ -2496,7 +2567,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           try {
             const sshClient = getSSHClient();
             const results = [];
+            let uncertain = false;
             for (const op of operations) {
+              if (uncertain) {
+                results.push({ type: op.type, status: 424, error: "Skipped after an uncertain batch operation" });
+                continue;
+              }
               try {
                 if (op.type === "read") {
                   const content = await sshClient.readFile(op.path);
@@ -2527,7 +2603,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   results.push({ type: op.type, status: 400, error: "Unknown operation type" });
                 }
               } catch (error) {
-                results.push({ type: op.type, status: 500, error: error.message });
+                const hasEffect = ["bash", "write", "script", "exec"].includes(op.type);
+                uncertain = hasEffect && (error?.code === "EOUTCOME_UNKNOWN"
+                  || (isNetworkError(error) && !definitelyNotSent(error)));
+                const failure = uncertain ? outcomeUnknown(`batch ${op.type}`, error) : error;
+                results.push({ type: op.type, status: 500, error: failure.message, code: failure.code, outcome: uncertain ? "unknown" : "failed" });
               }
             }
 
@@ -2554,15 +2634,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   lines.push(`\n--- BASH ${r.command} ---`);
                   if (r.stdout) lines.push(r.stdout);
                   if (r.stderr) lines.push(`STDERR: ${r.stderr}`);
+                  if (r.signal) lines.push(`SIGNAL: ${r.signal}`);
                 }
               } else {
                 lines.push(`\n--- ${r.type.toUpperCase()} FAILED (status=${r.status}) ---`);
                 lines.push(r.error || "Unknown error");
               }
             }
-            return toTextResult(lines.join("\n"));
+            return {
+              ...toTextResult(lines.join("\n")),
+              isError: results.some(batchItemFailed),
+              ...(uncertain ? { structuredContent: { code: "EOUTCOME_UNKNOWN", results } } : {}),
+            };
           } catch (error) {
-            return toTextResult(`Batch error: ${error.message}`);
+            return toErrorResult(`Batch error: ${error.message}`, error);
           }
         }
 
@@ -2572,7 +2657,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const response = await getCurrentAxios().post("/api/batch", { operations });
           const data = response.data;
           if (!data?.success) {
-            return toTextResult(`Batch error: ${data?.error || "Unknown error"}`);
+            return toErrorResult(`Batch error: ${data?.error || "Unknown error"}`);
           }
           // Format results
           const lines = [
@@ -2599,15 +2684,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 lines.push(`\n--- BASH ${r.command} (${r.ms}ms) ---`);
                 if (r.stdout) lines.push(r.stdout);
                 if (r.stderr) lines.push(`STDERR: ${r.stderr}`);
+                if (r.signal) lines.push(`SIGNAL: ${r.signal}`);
               }
             } else {
               lines.push(`\n--- ${r.type.toUpperCase()} FAILED (status=${r.status}) ---`);
               lines.push(r.error || "Unknown error");
             }
           }
-          return toTextResult(lines.join("\n"));
+          return { ...toTextResult(lines.join("\n")), isError: data.results.some(batchItemFailed) };
         } catch (error) {
-          return toTextResult(`Batch error: ${errorMessage(error)}`);
+          return toErrorResult(`Batch error: ${errorMessage(error)}`, error);
         }
       }
 
@@ -2637,6 +2723,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
           if (timeoutMs !== undefined) body.timeoutMs = timeoutMs;
           const data = (await getCurrentAxios().post("/api/exec/async", body)).data;
+          if (typeof data?.taskId !== "string" || !data.taskId) {
+            throw outcomeUnknown("remote_exec_async", new Error("Submission response did not contain a task handle"));
+          }
           return toTextResult(JSON.stringify(withRuntimeMeta({
             taskId: data.taskId,
             status: data.status,
@@ -2644,7 +2733,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             message: `Task ${data.taskId} started. Use remote_task with this taskId to check progress.`,
           }), null, 2));
         } catch (error) {
-          return toTextResult(`Async exec error: ${errorMessage(error)}`);
+          return toErrorResult(`Async exec error: ${errorMessage(error)}`, error);
         }
       }
 
@@ -2684,9 +2773,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               result.duration = null;
             }
           }
-          return toTextResult(JSON.stringify(result, null, 2));
+          return { ...toTextResult(JSON.stringify(result, null, 2)), isError: ["error", "failed", "timeout", "cancelled", "orphaned"].includes(data.status) || (typeof data.exitCode === "number" && data.exitCode !== 0) };
         } catch (error) {
-          return toTextResult(`Task error: ${errorMessage(error)}`);
+          return toErrorResult(`Task error: ${errorMessage(error)}`, error);
         }
       }
 
@@ -2712,14 +2801,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 `[Runtime] mode=${_runtimeMode.mode}, source=${_runtimeMode.source}\nConfig (${data.envPath}):\n${data.config}\n\nRuntime:\n${JSON.stringify(data.runtime, null, 2)}`
               );
             }
-            return toTextResult(`Config read failed: ${data.error || "Unknown error"}`);
+            return toErrorResult(`Config read failed: ${data.error || "Unknown error"}`);
           } catch (error) {
-            return toTextResult(`Config read error: ${errorMessage(error)}`);
+            return toErrorResult(`Config read error: ${errorMessage(error)}`, error);
           }
         } else if (action === "write") {
           const newConfig = typeof args.config === "string" ? args.config : "";
           if (!newConfig.trim()) {
-            return toTextResult("Error: config field is required for write action.");
+            return toErrorResult("Error: config field is required for write action.");
           }
           try {
             const response = await getCurrentAxios().put("/api/config", { config: newConfig });
@@ -2729,12 +2818,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 `[Runtime] mode=${_runtimeMode.mode}, source=${_runtimeMode.source}\n✅ Config updated and reloaded!\nClients: ${data.clients?.join(", ")}\nWorkspace: ${data.workspaceRoot}`
               );
             }
-            return toTextResult(`Config write failed: ${data.error || "Unknown error"}`);
+            return toErrorResult(`Config write failed: ${data.error || "Unknown error"}`);
           } catch (error) {
-            return toTextResult(`Config write error: ${errorMessage(error)}`);
+            return toErrorResult(`Config write error: ${errorMessage(error)}`, error);
           }
         } else {
-          return toTextResult("Error: action must be 'read' or 'write'.");
+          return toErrorResult("Error: action must be 'read' or 'write'.");
         }
       }
 
@@ -3178,32 +3267,45 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       default:
         throw new Error(`Unknown tool: ${request.params.name}`);
     }
+    };
+    const result = normalizeToolResult(toolName, await invoke());
+    executionSummary = jobResultSummary(toolName, result);
+    caughtError = toolResultError(result);
+    if (caughtError && isNetworkError(caughtError) && !definitelyNotSent(caughtError) && !replaySafeTool(toolName, args)) {
+      caughtError = outcomeUnknown(toolName, caughtError);
+      return toErrorResult(`Error: ${caughtError.message}`, caughtError);
+    }
+    if (toolName === "remote_connect" && args.connection && !caughtError) _proxyRecoveryNeedsBinding = false;
+    return result;
   } catch (error) {
-    caughtError = error;
+    caughtError = isNetworkError(error) && !definitelyNotSent(error) && !replaySafeTool(toolName, args)
+      ? outcomeUnknown(toolName, error) : error;
     
     // Mark unhealthy on network errors so next call prompts health check
     if (isNetworkError(error)) {
       markUnhealthy();
-      _stats.errors++;
     }
-    return {
-      content: [
-        {
-          type: "text",
-          text: `Error: ${errorMessage(error)}`,
-        },
-      ],
-      isError: true,
-    };
+    return toErrorResult(`Error: ${errorMessage(caughtError)}`, caughtError);
   } finally {
     _currentTraceContext = previousTraceContext;
     const durationMs = Date.now() - startTime;
-    markToolCallFinished(callId, caughtError ? "failed" : "completed", durationMs, caughtError);
+    if (caughtError) {
+      _stats.errors++;
+      if (isNetworkError(caughtError) || isNetworkError(caughtError.cause)) markUnhealthy();
+    }
+    const pendingExecution = ["queued", "running", "pending", "started", "created"].includes(executionSummary.executionStatus);
+    const outcome = caughtError?.code === "EOUTCOME_UNKNOWN" ? "unknown" : caughtError ? "failed"
+      : pendingExecution ? (toolName === "remote_task" ? "pending" : "submitted") : "completed";
+    markToolCallFinished(callId, outcome, durationMs, caughtError);
     const payload = {
       callId,
+      originCallId,
       sessionId: PROCESS_SESSION_ID,
       durationMs,
-      connection: currentConnectionSummary(),
+      outcome,
+      callOutcome: caughtError ? outcome : "succeeded",
+      ...executionSummary,
+      connection: callInfo?.connection || currentConnectionSummary(),
       args: summarizeArgs(toolName, args),
     };
 
@@ -3211,6 +3313,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       logger.error(toolName, `Failed call #${callId}: ${errorMessage(caughtError)}`, {
         ...payload,
         errorCode: caughtError?.code,
+        causeCode: caughtError?.cause?.code,
+        causeStatus: caughtError?.cause?.response?.status,
         error: errorMessage(caughtError),
         hint: timeoutHint(durationMs, caughtError),
         diagnostic: diagnosticSnapshot("tool failure", {
@@ -3229,6 +3333,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       });
     } else if (LOG_TOOL_SUCCESS) {
       logger.info(toolName, `Completed call #${callId}`, payload);
+    } else {
+      logger.info(toolName, `Completed call #${callId}`, { callId, originCallId, sessionId: PROCESS_SESSION_ID, durationMs, outcome, callOutcome: "succeeded", ...executionSummary });
     }
     if (restoreCallConnection) {
       try {
@@ -3277,6 +3383,9 @@ async function main() {
         try {
           await axios.get(`${broker.url}/health`, {
             timeout: 3000,
+            httpAgent: HTTP_AGENT,
+            proxy: false,
+            maxRedirects: 0,
             headers: { "x-agentport-broker-token": broker.token },
           });
           logProcessEvent("warn", "Duplicate instance switched to proxy mode", {

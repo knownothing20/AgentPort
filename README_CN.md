@@ -227,6 +227,12 @@ Windows 远端文件目标和目录参数。
 权限。健康检查中的 roots/boundary 是服务器报告值，不是独立安全验证；路径边界
 也不是 OS sandbox。本文不代表任何服务器已经启用该设置。
 
+本地 MCP broker 失效后不再无条件重放请求：确认未送达时可读取替代 broker，
+写入、命令和任务提交结果不明时返回 `EOUTCOME_UNKNOWN`，先核对原句柄与目标
+状态再重试。权限拒绝不会触发通道回退。执行失败使用 MCP `isError`；轻量结束
+日志区分完成、失败和结果未知，密钥字段在日志截断前脱敏。此更新不改写旧日志。
+定向回归入口：`npm run test:mcp:recovery`，仅使用隔离的本地模拟服务。
+
 ```bash
 node cli.js safe-bash local-readonly-check.sh --cwd /path/to/workspace \
   --connection <ssh-connection> --route ssh --plain

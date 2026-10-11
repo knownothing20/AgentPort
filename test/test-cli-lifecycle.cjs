@@ -476,6 +476,7 @@ async function testSshHealthWorkspaceBoundary() {
         session.on("sftp", (acceptSftp) => { acceptSftp(); });
         session.on("exec", (acceptExec) => {
           const stream = acceptExec();
+          stream.exit(0);
           stream.end("agentport-rg=available\ntest@fake:/workspace");
         });
       });

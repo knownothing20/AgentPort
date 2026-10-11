@@ -331,7 +331,9 @@ export class SSHClient {
     return new Promise((resolve, reject) => {
       this.client.exec(remoteCommand, {}, (err, stream) => {
         if (err) {
-          reject(new Error(`命令执行失败: ${err.message}`));
+          const error = new Error(`命令执行失败: ${err.message}`, { cause: err });
+          error.code = err.code || 'ESSH_EXEC';
+          reject(error);
           return;
         }
 
@@ -351,18 +353,31 @@ export class SSHClient {
         stream.on('data', (data) => { stdout += data.toString(); });
         stream.stderr.on('data', (data) => { stderr += data.toString(); });
 
-        stream.on('close', (code) => {
+        stream.on('close', (code, signal) => {
           if (timer) clearTimeout(timer);
+          if (!Number.isInteger(code) && !signal) {
+            const error = new Error('SSH command closed without an exit status; execution outcome is UNKNOWN. Do not resubmit without reconciling target state.');
+            error.code = 'EOUTCOME_UNKNOWN';
+            error.outcome = 'unknown';
+            error.stdout = output(stdout);
+            error.stderr = output(stderr);
+            reject(error);
+            return;
+          }
           resolve({
             stdout: output(stdout),
             stderr: output(stderr),
-            code: code || 0,
+            code,
+            ...(signal ? { signal } : {}),
           });
         });
 
         stream.on('error', (err) => {
           if (timer) clearTimeout(timer);
-          reject(new Error(`流错误: ${err.message}`));
+          const error = new Error(`SSH stream failed after command acceptance; execution outcome is UNKNOWN: ${err.message}`, { cause: err });
+          error.code = 'EOUTCOME_UNKNOWN';
+          error.outcome = 'unknown';
+          reject(error);
         });
       });
     });
