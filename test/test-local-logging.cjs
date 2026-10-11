@@ -42,8 +42,15 @@ const runner = `
     const boundaryJson = JSON.stringify({ payload: JSON.stringify({ token: "boundary-embedded-secret", normal: "boundary-normal-retained" }) });
     logger.info("test", "boundary check", "x".repeat(280) + " " + boundaryJson);
   } else if (mode === "rotation") {
-    logger.info("test", "rotation-1 " + "a".repeat(720000));
-    logger.info("test", "rotation-2 " + "b".repeat(720000));
+    for (let index = 0; index < 1200; index++) logger.info("test", "rotation " + "a".repeat(1000));
+  } else if (mode === "compact") {
+    const multibyte = String.fromCodePoint(0x4e2d, 0x6587, 0x1f680).repeat(12000);
+    logger.error("test", "bounded-message " + multibyte + "\\n[2020-01-01T00:00:00.000Z] [ERROR] [fake] forged", {
+      callId: 7, originCallId: "fixture-origin", sessionId: "fixture-session", durationMs: 123,
+      outcome: "failed", callOutcome: "failed", errorCode: "ETOOL", failureCategory: "command-failed",
+      error: multibyte, diagnostic: { token: "compact-token-secret", huge: multibyte },
+      entries: Array.from({ length: 100 }, (_, index) => ({ index, message: multibyte })),
+    });
   }
 `;
 
@@ -98,10 +105,31 @@ try {
     .join("\n");
   assert.equal(contents.includes("boundary-embedded-secret"), false, "nested JSON secret near the truncation boundary leaked");
 
+  run("compact", "4000");
+  const compactLog = fs.readdirSync(logDir).filter((file) => file.endsWith(".log"))
+    .map((file) => fs.readFileSync(path.join(logDir, file), "utf8")).join("\n");
+  const rows = compactLog.split("\n");
+  const index = rows.findIndex((line) => line.includes("bounded-message"));
+  assert.ok(index >= 0);
+  assert.ok(Buffer.byteLength(rows[index].split("] ").slice(3).join("] ")) <= 1024);
+  assert.equal(rows.some((line) => line.startsWith("[2020-01-01")), false, "message must not inject another record");
+  const dataLine = rows[index + 1].slice("  Data: ".length);
+  assert.ok(Buffer.byteLength(dataLine) <= 4000, "structured data limit is UTF-8 bytes");
+  const data = JSON.parse(dataLine);
+  assert.equal(data._truncated, true);
+  assert.equal(data.callId, 7);
+  assert.equal(data.originCallId, "fixture-origin");
+  assert.equal(data.callOutcome, "failed");
+  assert.equal(data.failureCategory, "command-failed");
+  assert.equal(data.errorCode, "ETOOL");
+  assert.equal(compactLog.includes("compact-token-secret"), false);
+  assert.equal(dataLine.includes("\ufffd"), false, "UTF-8 truncation must not split a code point");
+  for (const line of rows.filter((line) => line.startsWith("  Data: "))) JSON.parse(line.slice(8));
+
   run("rotation");
   const segments = fs.readdirSync(logDir).filter((file) => file.endsWith(".log"));
   assert.ok(segments.length >= 2, "size-based rotation did not create another segment");
-  console.log("PASS local logging redaction, diagnostics, truncation boundary, and rotation");
+  console.log("PASS local logging redaction, bounded UTF-8 messages, parseable metadata, and rotation");
 } finally {
   fs.rmSync(tempRoot, { recursive: true, force: true });
 }

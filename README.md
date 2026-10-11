@@ -208,6 +208,33 @@ log truncation; old log files are not rewritten by this update.
 
 Run the isolated recovery and logging regressions with `npm run test:mcp:recovery`.
 
+Inspect recent local MCP activity without connecting to a server:
+
+```bash
+node cli.js diagnostics --days 7
+node cli.js diagnostics --log-dir <skill-dir>/local/logs --days 7 --max-mb 64 --json
+```
+
+The report contains aggregate counts, error categories, and latency. Correlated
+proxy/owner records are deduplicated; older records without complete metadata
+are counted separately. It never prints raw arguments, command output, paths,
+client IDs, or tokens. Scans are bounded (32 MiB and 64 files by default), and
+partial coverage is explicit. Missing completion records are not proof of failed
+or still-running work. These are MCP observations, not a daemon availability or
+business success rate. `--days` accepts 1-90 and `--max-mb` accepts 1-256.
+
+New log messages are capped at 1024 UTF-8 bytes. Data remains valid JSON within
+`MCP_REMOTE_LOG_DATA_MAX_BYTES` (default 4000), with `_truncated` metadata when
+needed. Failure logs retain call identity, category and state instead of full
+stdout/stderr and repeated history snapshots. Tool responses still contain their
+normal output. Healthy proxy startup is informational. Run
+`npm run test:diagnostics` for isolated report tests. The update does not rewrite old logs.
+
+Daemon grep validates regular expressions before sending a search request. Use
+JavaScript syntax and `caseSensitive: false` instead of `(?i)`; CLI searches are
+case-insensitive unless `--case-sensitive` is supplied. Literal search remains
+the default. SSH grep keeps its existing native grep syntax.
+
 Provision a daemon token for a new AI software or new computer:
 
 ```bash

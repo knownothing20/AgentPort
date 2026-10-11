@@ -31,7 +31,7 @@ async function body(req) {
 }
 
 async function testPolicy() {
-  const { recoverBrokerCall, replaySafeTool, replaySafePost, normalizeToolResult } = await import(pathToFileURL(path.join(ROOT, "packages/client-core/mcp-recovery.js")));
+  const { recoverBrokerCall, replaySafeTool, replaySafePost, normalizeToolResult, failureDetails } = await import(pathToFileURL(path.join(ROOT, "packages/client-core/mcp-recovery.js")));
   assert.equal(replaySafeTool("remote_batch", { operations: [{ type: "read" }] }), true);
   assert.equal(replaySafeTool("remote_batch", { operations: [{ type: "bash" }] }), false);
   assert.equal(replaySafePost(["/api/exec"]), false);
@@ -66,13 +66,22 @@ async function testPolicy() {
   const text = { content: [{ type: "text", text: '{"error":"document contents"}' }] };
   assert.equal(normalizeToolResult("remote_read", text).isError, undefined);
   assert.equal(normalizeToolResult("remote_config", text).isError, true);
+  for (const [message, code, category] of [
+    ["Access denied: outside configured workspace roots (HTTP 403)", "ETOOL", "workspace-denied"],
+    ["Unauthorized (HTTP 401)", "ETOOL", "auth-denied"],
+    ["Script exec error: ENOSPC: no space left on device", "ETOOL", "disk-full"],
+    ["Invalid regular expression: Invalid group", "ETOOL", "invalid-regex"],
+    ["Not found (HTTP 404)", "ETOOL", "missing-file"],
+    ["Request timeout", "ETIMEDOUT", "transport"],
+    ["Request timeout", "EOUTCOME_UNKNOWN", "outcome-unknown"],
+  ]) assert.equal(failureDetails(Object.assign(new Error(message), { code })).failureCategory, category);
 }
 
 async function fixture(options = {}) {
   const base = await fs.mkdtemp(path.join(os.tmpdir(), "agentport-mcp-recovery-"));
   const logs = path.join(base, "test-logs");
   const runtime = path.join(base, "local/runtime");
-  const counts = { exec: 0, read: 0, write: 0, broker: 0, brokerEffect: 0, cleanup: 0 };
+  const counts = { exec: 0, read: 0, write: 0, grep: 0, broker: 0, brokerEffect: 0, cleanup: 0 };
   const state = { brokerMode: "ok", execMode: "ok", scriptMode: "ok", asyncMode: "queued", taskStatus: "error" };
   const servers = [];
   let child;
@@ -86,6 +95,7 @@ async function fixture(options = {}) {
     await fs.copyFile(path.join(ROOT, file), path.join(base, file));
   }
   await fs.copyFile(path.join(ROOT, "packages/client-core/mcp-recovery.js"), path.join(base, "packages/client-core/mcp-recovery.js"));
+  await fs.copyFile(path.join(ROOT, "packages/client-core/search-validation.js"), path.join(base, "packages/client-core/search-validation.js"));
   await fs.writeFile(path.join(base, "package.json"), JSON.stringify({ name: "agentport", version: "3.1.0", type: "module" }));
   await fs.symlink(path.join(ROOT, "node_modules"), path.join(base, "node_modules"), process.platform === "win32" ? "junction" : "dir");
   const daemon = http.createServer(async (req, res) => {
@@ -96,10 +106,11 @@ async function fixture(options = {}) {
       return json(res, { content: value.path?.includes("agentport-async-") ? state.lastUpload : "Error: ordinary document text", etag: "fixture-etag" });
     }
     if (req.url === "/api/fs/write") { counts.write++; state.lastUpload = value.content; return json(res, { success: true }); }
+    if (req.url === "/api/fs/grep") { counts.grep++; return json(res, { matches: [] }); }
     if (req.url === "/api/exec") {
       counts.exec++;
       if (state.execMode === "reset") return req.socket.destroy();
-      return json(res, { stdout: "local", code: state.execMode === "exit" ? 7 : 0 });
+      return json(res, { stdout: state.execMode === "large-exit" ? "output-only-canary".repeat(10000) : "local", code: ["exit", "large-exit"].includes(state.execMode) ? 7 : 0 });
     }
     if (req.url === "/api/exec/script") {
       if (String(value.content).startsWith("rm -f")) counts.cleanup++;
@@ -152,7 +163,7 @@ async function fixture(options = {}) {
   try {
     child = spawn(process.execPath, [path.join(base, "index.js")], {
       cwd: base, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost", MCP_REMOTE_URL: daemonUrl, MCP_REMOTE_CLIENT_ID: "fixture-client", MCP_REMOTE_AUTH_TOKEN: "fixture-token", MCP_REMOTE_INSTANCE_KEY: "fixture-client", MCP_REMOTE_LOG_DIR: logs, MCP_REMOTE_LOG_DATA_MAX_BYTES: "64000", MCP_REMOTE_TIMEOUT_MS: "2000", MCP_REMOTE_LOG_TOOL_SUCCESS: "0", MCP_REMOTE_LOG_TOOL_START: "1" },
+      env: { ...process.env, NO_PROXY: "127.0.0.1,localhost", no_proxy: "127.0.0.1,localhost", MCP_REMOTE_URL: daemonUrl, MCP_REMOTE_CLIENT_ID: "fixture-client", MCP_REMOTE_AUTH_TOKEN: "fixture-token", MCP_REMOTE_INSTANCE_KEY: "fixture-client", MCP_REMOTE_LOG_DIR: logs, MCP_REMOTE_LOG_DATA_MAX_BYTES: "4000", MCP_REMOTE_TIMEOUT_MS: "2000", MCP_REMOTE_LOG_TOOL_SUCCESS: "0", MCP_REMOTE_LOG_TOOL_START: "1" },
     });
     readline.createInterface({ input: child.stdout }).on("line", (line) => {
       let value;
@@ -241,12 +252,15 @@ async function withFixture(run, options) {
     const rows = [...log.matchAll(/^\[([^\]]+)\] \[(\w+)\] \[([^\]]+)\] ([\s\S]*?)\n  Data: ([^\n]+)$/gm)];
     for (const row of rows) {
       if (/^(?:Completed|Failed|Slow) call/.test(row[4])) {
+        assert.ok(Buffer.byteLength(row[5]) <= 4000, "terminal metadata must fit the default budget");
         f.terminalLogs.push({ tool: row[3], message: row[4], ...JSON.parse(row[5]) });
       }
     }
     try {
       if (!failure) {
       assert.ok(!log.includes(brokerToken), "broker token must not appear in local logs");
+      assert.ok(!log.includes("output-only-canary"), "command stdout belongs in the tool response, not diagnostic logs");
+      assert.ok(!log.includes("[WARN] [process] Duplicate instance switched"), "healthy proxy startup is informational");
       assert.match(log, /Completed call|Failed call/);
       assert.equal(f.terminalLogs.length, f.returnedCalls.length, "every tool return must have one terminal event");
       for (let i = 0; i < f.returnedCalls.length; i++) {
@@ -257,7 +271,11 @@ async function withFixture(run, options) {
       }
       for (const row of f.terminalLogs) {
         assert.ok(row.originCallId, "terminal events must include origin-call identity");
-        if (row.message.startsWith("Failed call")) assert.ok(["failed", "unknown"].includes(row.callOutcome));
+        if (row.message.startsWith("Failed call")) {
+          assert.ok(["failed", "unknown"].includes(row.callOutcome));
+          assert.ok(row.failureCategory);
+          assert.match(row.message, /^Failed call #\d+$/);
+        }
         if (row.tool === "remote_exec_async" && row.executionStatus === "queued") {
           assert.equal(row.outcome, "submitted");
           assert.equal(row.callOutcome, "succeeded");
@@ -280,6 +298,14 @@ async function main() {
   await testPolicy();
   await withFixture(async (f) => {
     await close(f.broker);
+    for (const pattern of ["(?i)invalid", "["]) {
+      const invalid = await f.call("remote_grep", { pattern, regex: true });
+      assert.equal(invalid.structuredContent.code, "EREGEX");
+      assert.match(invalid.content[0].text, /JavaScript syntax/);
+    }
+    assert.equal(f.counts.grep, 0, "invalid patterns should never reach daemon search");
+    assert.ok(!(await f.call("remote_grep", { pattern: "(?i)literal", regex: false })).isError);
+    assert.equal(f.counts.grep, 1, "literal text must not be interpreted as regex");
     let result = await f.call("remote_bash", { command: "fixture-noop" });
     assert.ok(!result.isError, JSON.stringify(result));
     result = await f.call("remote_bash", { command: "fixture-noop" });
@@ -292,6 +318,10 @@ async function main() {
     assert.equal((warnings.match(/Proxy broker invalidated;/g) || []).length, 1);
     f.state.execMode = "exit";
     assert.equal((await f.call("remote_bash", { command: "fixture-fail" })).isError, true);
+    f.state.execMode = "large-exit";
+    const large = await f.call("remote_bash", { command: "fixture-fail" });
+    assert.equal(large.isError, true);
+    assert.ok(large.content[0].text.includes("output-only-canary".repeat(10000)), "caller must still receive full command output");
     f.state.execMode = "reset";
     const before = f.counts.exec;
     result = await f.call("remote_bash", { command: "fixture-once" });

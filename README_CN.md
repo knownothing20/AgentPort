@@ -233,6 +233,29 @@ Windows 远端文件目标和目录参数。
 日志区分完成、失败和结果未知，密钥字段在日志截断前脱敏。此更新不改写旧日志。
 定向回归入口：`npm run test:mcp:recovery`，仅使用隔离的本地模拟服务。
 
+本地运行日志可以直接汇总，无需连接服务器：
+
+```bash
+node cli.js diagnostics --days 7
+node cli.js diagnostics --log-dir <skill-dir>/local/logs --days 7 --max-mb 64 --json
+```
+
+报告只输出统计数量、错误类别和耗时。带关联 ID 的代理/主进程记录会去重；
+旧日志缺失完整字段时单独计数，不猜测成功率。报告不输出原始参数、命令输出、
+路径、客户端 ID 或 Token。默认最多读取 32 MiB、64 个文件，达到限制会明确标注
+覆盖不完整。缺失结束记录不等于失败或仍在运行；此报告不能替代服务端可用性和
+业务验收。`--days` 范围为 1-90，`--max-mb` 范围为 1-256。
+
+新日志标题限制为 1024 UTF-8 字节；Data 在 `MCP_REMOTE_LOG_DATA_MAX_BYTES`
+限制内保持合法 JSON（默认 4000 字节），需要裁剪时附带 `_truncated` 标记。
+失败记录保留调用 ID、错误类别和状态，不重复保存整段 stdout/stderr 和历史快照；
+工具返回给调用方的正常输出保留。健康的代理启动记为 INFO。报告回归入口为
+`npm run test:diagnostics`。旧日志不会被此次更新改写。
+
+Daemon 搜索会在发出请求前检查正则语法。使用 JavaScript 正则及
+`caseSensitive: false` 代替 `(?i)`；CLI 默认不区分大小写，只有指定
+`--case-sensitive` 时才区分。默认的字面搜索和 SSH 原生 grep 语法保持不变。
+
 ```bash
 node cli.js safe-bash local-readonly-check.sh --cwd /path/to/workspace \
   --connection <ssh-connection> --route ssh --plain

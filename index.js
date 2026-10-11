@@ -13,7 +13,8 @@ import { randomBytes } from "crypto";
 import { SSHClient, SSHConnectionManager } from "./ssh-client.js";
 import { scanLocalSSH, formatSSHScanSummary } from "./ssh-scanner.js";
 import logger from "./logger.js";
-import { definitelyNotSent, replaySafeTool, replaySafePost, outcomeUnknown, recoverBrokerCall, toolResultError, normalizeToolResult, jobResultSummary, batchItemFailed } from "./packages/client-core/mcp-recovery.js";
+import { validateDaemonSearch } from "./packages/client-core/search-validation.js";
+import { definitelyNotSent, replaySafeTool, replaySafePost, outcomeUnknown, recoverBrokerCall, toolResultError, normalizeToolResult, jobResultSummary, batchItemFailed, failureDetails } from "./packages/client-core/mcp-recovery.js";
 
 // Node 19+ enables keep-alive on the global HTTP agents. Some lightweight
 // daemon/proxy combinations close those sockets without a reusable FIN, so a
@@ -432,7 +433,7 @@ function markToolCallFinished(callId, status, durationMs, error = null) {
     status,
     durationMs,
     finishedAt: new Date().toISOString(),
-    error: error ? errorMessage(error) : undefined,
+    error: error ? failureDetails(error).summary : undefined,
     errorCode: error?.code,
   };
   pushDiagnosticEvent(`tool.${status}`, _lastToolCall);
@@ -550,13 +551,12 @@ function writeProcessRegistry() {
     }
     const recent = entries.filter((entry) => {
       const ageMs = now - Number(entry.startedAtMs || 0);
-      return entry.pid !== process.pid && ageMs >= 0 && ageMs < 30 * 60 * 1000;
+      return entry.pid !== process.pid && ageMs >= 0 && ageMs < 30 * 60 * 1000 && isPidAlive(entry.pid);
     });
     if (recent.length) {
-      logProcessEvent("warn", "Recent MCP client processes found", {
-        registryPath,
-        recent,
-        hint: "If Transport closed is frequent, check whether the desktop host is spawning multiple MCP stdio clients for the same skill.",
+      logProcessEvent("info", "Other live MCP client processes found", {
+        count: recent.length,
+        role: _proxyBroker ? "proxy" : "owner",
       });
     }
     entries = [
@@ -2359,7 +2359,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         // Daemon mode
-        try { await ensureHealthy("Consider calling remote_health first to check if remote service is reachable before content search."); } catch (e) { if (isHealthError(e)) return healthCheckError(e.message + "\n\nIf you're sure the service is normal, you can ignore this鎻愮ず and retry directly."); throw e; }
+        validateDaemonSearch(args);
+        try { await ensureHealthy("Consider calling remote_health first to check if remote service is reachable before content search."); } catch (e) { if (isHealthError(e)) return healthCheckError(e.message); throw e; }
         const data = await postWithFallback(["/api/fs/grep", "/grep"], {
           pattern: args.pattern,
           cwd: typeof args.cwd === "string" ? args.cwd : undefined,
@@ -3270,7 +3271,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     };
     const result = normalizeToolResult(toolName, await invoke());
     executionSummary = jobResultSummary(toolName, result);
-    caughtError = toolResultError(result);
+    caughtError = toolResultError(result, toolName);
     if (caughtError && isNetworkError(caughtError) && !definitelyNotSent(caughtError) && !replaySafeTool(toolName, args)) {
       caughtError = outcomeUnknown(toolName, caughtError);
       return toErrorResult(`Error: ${caughtError.message}`, caughtError);
@@ -3304,32 +3305,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       durationMs,
       outcome,
       callOutcome: caughtError ? outcome : "succeeded",
+      role: requestedOrigin ? "broker-owner" : "client",
       ...executionSummary,
       connection: callInfo?.connection || currentConnectionSummary(),
       args: summarizeArgs(toolName, args),
     };
 
     if (caughtError) {
-      logger.error(toolName, `Failed call #${callId}: ${errorMessage(caughtError)}`, {
+      const details = failureDetails(caughtError);
+      logger.error(toolName, `Failed call #${callId}`, {
         ...payload,
+        failureCategory: details.failureCategory,
         errorCode: caughtError?.code,
         causeCode: caughtError?.cause?.code,
         causeStatus: caughtError?.cause?.response?.status,
-        error: errorMessage(caughtError),
-        hint: timeoutHint(durationMs, caughtError),
-        diagnostic: diagnosticSnapshot("tool failure", {
-          failedCall: callInfo,
-          failedDurationMs: durationMs,
-        }),
+        error: details.summary,
+        detail: errorMessage(caughtError),
+        hint: details.hint,
+        diagnostic: { activeCallCount: _activeToolCalls.size, uptimeMs: uptimeMs(), transport: _transportState },
       });
     } else if (durationMs >= SLOW_CALL_MS) {
       logger.warn(toolName, `Slow call #${callId}`, {
         ...payload,
         hint: timeoutHint(durationMs),
-        diagnostic: diagnosticSnapshot("slow tool call", {
-          slowCall: callInfo,
-          slowDurationMs: durationMs,
-        }),
+        diagnostic: { activeCallCount: _activeToolCalls.size, uptimeMs: uptimeMs(), transport: _transportState },
       });
     } else if (LOG_TOOL_SUCCESS) {
       logger.info(toolName, `Completed call #${callId}`, payload);
@@ -3388,10 +3387,8 @@ async function main() {
             maxRedirects: 0,
             headers: { "x-agentport-broker-token": broker.token },
           });
-          logProcessEvent("warn", "Duplicate instance switched to proxy mode", {
-            lockPath: singleton.lockPath,
-            existing: singleton.existing || null,
-            proxyBroker: _proxyBroker,
+          logProcessEvent("info", "Duplicate instance switched to proxy mode", {
+            ownerPid: singleton.existing?.pid,
           });
         } catch (error) {
           _proxyBroker = null;

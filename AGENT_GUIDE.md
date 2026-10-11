@@ -176,6 +176,13 @@ successful-call diagnostics; `MCP_REMOTE_LOG_DIR` can isolate diagnostic output.
 These changes protect new logs, not previously written files. Historical log
 cleanup and live MCP restarts require their own authorized maintenance scope.
 
+Use `node cli.js diagnostics --days 7 --json` to summarize this install's local
+MCP logs, or add `--log-dir <skill-dir>/local/logs` for another install. The
+read-only report contains aggregate counts, failure categories, latency, and
+coverage warnings, not raw arguments or identifiers. It is not a remote health
+check or a business success rate. New log metadata stays valid JSON when bounded;
+complete command output remains in the tool response, not duplicated in logs.
+
 ## Rule File Access
 
 Use the SKILL.md Rule Files and Workspace Boundaries contract during startup.

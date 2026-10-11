@@ -79,7 +79,7 @@ Use this order:
    required transport; an explicit SSH route is not a permission bypass.
    Synchronous SSH commands default to a 120-second timeout.
 
-The structured `recommendedOrder` in CLI diagnostics expresses these use cases;
+The structured `recommendedOrder` in CLI doctor output expresses these use cases;
 it does not select or change a route automatically.
 
 In Git Bash on Windows, MSYS can rewrite remote positional paths used by
@@ -167,6 +167,7 @@ node cli.js job list --connection <daemon-connection> --route daemon --limit 1 -
 ## Common CLI Commands
 
 ```bash
+node cli.js diagnostics --days 7 --json
 node cli.js health --connection <name> --route daemon --json
 node cli.js ssh-health --connection <name> --route ssh --json
 node cli.js read <remote-path> --connection <name> --route ssh --json
@@ -189,6 +190,12 @@ for short scripts when a caller needs their stdout on stdout and stderr on
 stderr; the CLI still exits with the remote script's failure code. Empty output
 is valid and must not trigger a retry. Do not combine `--plain` with `--json`
 or `--dry-run`.
+
+For recurring client errors, `diagnostics` reads local MCP logs only, without
+connecting remotely. Use `--log-dir <skill-dir>/local/logs` for another install.
+It reports bounded, redacted aggregates; incomplete historical records are not
+proof of failure, and a successful Job submission is not completed execution.
+It does not change logs, repair remote resources, or authorize a restart.
 
 ## Sync Maintained Repo To Skill Copies
 

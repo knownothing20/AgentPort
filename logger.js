@@ -17,6 +17,7 @@ const LOG_DIR = process.env.MCP_REMOTE_LOG_DIR
   : path.join(__dirname, "local", "logs");
 const MAX_DAYS = 7;
 const DEFAULT_DATA_MAX_BYTES = 4000;
+const MESSAGE_MAX_BYTES = 1024;
 const DEFAULT_LOG_SEGMENT_MAX_BYTES = 50 * 1024 * 1024;
 const DEFAULT_LOG_MAX_SEGMENTS_PER_DAY = 20;
 const rawDataMaxBytes = Number(process.env.MCP_REMOTE_LOG_DATA_MAX_BYTES || DEFAULT_DATA_MAX_BYTES);
@@ -227,11 +228,63 @@ function sanitizeValue(value, key, seen, state, embeddedDepth) {
   return result;
 }
 
+function truncateUtf8(value, limit) {
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.length <= limit) return value;
+  const marker = "...[truncated]";
+  let end = Math.max(0, limit - Buffer.byteLength(marker));
+  while ((bytes[end] & 0xc0) === 0x80) end--;
+  return bytes.subarray(0, end).toString("utf8") + marker;
+}
+
+const CALL_FIELDS = [
+  "callId", "originCallId", "sessionId", "durationMs", "outcome", "callOutcome",
+  "failureCategory", "errorCode", "causeCode", "causeStatus", "taskId", "executionStatus", "role",
+];
+
+function compactValue(value, stringBytes, collectionLimit, depth = 0) {
+  if (typeof value === "string") return truncateUtf8(value, stringBytes);
+  if (!value || typeof value !== "object") return value;
+  if (depth >= 5) return "[truncated depth]";
+  if (Array.isArray(value)) {
+    const items = value.slice(0, collectionLimit).map((item) => compactValue(item, stringBytes, collectionLimit, depth + 1));
+    if (items.length < value.length) items.push(`[${value.length - items.length} omitted]`);
+    return items;
+  }
+  const keys = depth === 0
+    ? [...CALL_FIELDS.filter((key) => Object.hasOwn(value, key)), ...Object.keys(value).filter((key) => !CALL_FIELDS.includes(key))]
+    : Object.keys(value);
+  const result = {};
+  for (const key of keys.slice(0, depth === 0 ? CALL_FIELDS.length + collectionLimit : collectionLimit)) {
+    result[key] = depth === 0 && CALL_FIELDS.includes(key) && typeof value[key] !== "object"
+      ? (typeof value[key] === "string" ? truncateUtf8(value[key], 160) : value[key])
+      : compactValue(value[key], stringBytes, collectionLimit, depth + 1);
+  }
+  if (Object.keys(result).length < keys.length) result._omittedKeys = keys.length - Object.keys(result).length;
+  return result;
+}
+
 function safeStringify(value) {
-  const state = createRedactionState();
-  if (typeof value === "string") return redactString(value, new WeakSet(), state);
-  const serialized = JSON.stringify(sanitizeValue(value, "", new WeakSet(), state, 0));
-  return serialized === undefined ? String(value) : serialized;
+  const sanitized = sanitizeValue(value, "", new WeakSet(), createRedactionState(), 0);
+  const serialized = JSON.stringify(sanitized) ?? "null";
+  const originalBytes = Buffer.byteLength(serialized);
+  if (originalBytes <= DATA_MAX_BYTES) return serialized;
+  const source = sanitized && typeof sanitized === "object" && !Array.isArray(sanitized)
+    ? sanitized : { value: sanitized };
+  const metadata = { _truncated: true, _originalBytes: originalBytes };
+  // Shrink values before serializing, so even clipped records retain valid JSON.
+  for (const budget of [1024, 512, 256, 128, 64]) {
+    const result = JSON.stringify({ ...compactValue(source, budget, budget >= 512 ? 8 : 3), ...metadata });
+    if (Buffer.byteLength(result) <= DATA_MAX_BYTES) return result;
+  }
+  const result = { ...metadata };
+  const compact = compactValue(source, 64, 1);
+  for (const key of [...CALL_FIELDS, "error", "hint", "value"]) {
+    if (!Object.hasOwn(compact, key)) continue;
+    const candidate = { ...result, [key]: compact[key] };
+    if (Buffer.byteLength(JSON.stringify(candidate)) <= DATA_MAX_BYTES) result[key] = compact[key];
+  }
+  return JSON.stringify(result);
 }
 
 // Write log entry
@@ -242,16 +295,13 @@ function write(level, tool, message, data = null) {
 
     const timestamp = new Date().toISOString();
     const state = createRedactionState();
-    let logLine = `[${timestamp}] [${level}] [${redactString(String(tool), new WeakSet(), state)}] ${redactString(String(message), new WeakSet(), state)}`;
+    const safeTool = truncateUtf8(redactString(String(tool), new WeakSet(), state).replace(/[\r\n\[\]]/g, "_"), 80);
+    const safeMessage = truncateUtf8(redactString(String(message), new WeakSet(), state).replace(/[\r\n]/g, " "), MESSAGE_MAX_BYTES);
+    let logLine = `[${timestamp}] [${level}] [${safeTool}] ${safeMessage}`;
 
     if (data) {
-      // Truncate long data for readability
       const dataStr = safeStringify(data);
-      if (dataStr.length > DATA_MAX_BYTES) {
-        logLine += `\n  Data: ${dataStr.slice(0, DATA_MAX_BYTES)}... (truncated ${dataStr.length - DATA_MAX_BYTES} chars)`;
-      } else {
-        logLine += `\n  Data: ${dataStr}`;
-      }
+      logLine += `\n  Data: ${dataStr}`;
     }
 
     const encoded = Buffer.from(logLine + "\n", "utf8");

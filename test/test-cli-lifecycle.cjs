@@ -273,11 +273,17 @@ async function testCliPropagatesRemoteFailures() {
   const connectionsPath = path.join(tempDir, "connections.json");
   const scriptPath = path.join(tempDir, "diagnostic.sh");
   let scriptRequests = 0;
+  let grepRequests = 0;
   const server = http.createServer((req, res) => {
     const chunks = [];
     req.on("data", (chunk) => chunks.push(chunk));
     req.on("end", () => {
       res.setHeader("content-type", "application/json");
+      if (req.url === "/api/fs/grep") {
+        grepRequests++;
+        res.end(JSON.stringify({ matches: [] }));
+        return;
+      }
       if (req.url === "/api/fs/read") {
         const { path: targetPath } = JSON.parse(Buffer.concat(chunks).toString("utf8"));
         res.end(JSON.stringify(targetPath === "/registered/rules.md"
@@ -357,6 +363,15 @@ async function testCliPropagatesRemoteFailures() {
       AGENTPORT_LEGACY_CONNECTIONS_PATH: connectionsPath,
       AGENTPORT_SESSION_ID: "cli-exit-test",
     };
+    for (const pattern of ["(?i)invalid", "["]) {
+      const invalid = await runCli(["grep", pattern, "--regex", "--connection", "fake", "--route", "daemon", "--json"], env);
+      assert.strictEqual(invalid.code, 1);
+      assert.match(JSON.parse(invalid.stdout).error, /JavaScript syntax/);
+    }
+    assert.strictEqual(grepRequests, 0, "invalid daemon regex must fail before network search");
+    const literal = await runCli(["grep", "(?i)literal", "--connection", "fake", "--route", "daemon", "--json"], env);
+    assert.strictEqual(literal.code, 0, literal.stderr || literal.stdout);
+    assert.strictEqual(grepRequests, 1);
     const stat = await runCli(["stat", "/outside", "--connection", "fake"], env);
     assert.strictEqual(stat.code, 1, stat.stderr || stat.stdout);
 
@@ -693,6 +708,37 @@ async function testConvertedRemoteFileTargetsAreRejectedBeforeIO() {
   assert.match(JSON.parse(namedRead.stdout).error, /Connection 'unknown' not found/);
 }
 
+async function testLocalDiagnosticsCli() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "agentport-cli-diagnostics-"));
+  const now = new Date().toISOString();
+  const logPath = path.join(tempDir, `agentport-${now.slice(0, 10)}.log`);
+  const data = { callId: 1, originCallId: "private-origin-canary", sessionId: "private-session-canary", durationMs: 123, callOutcome: "failed", outcome: "failed", failureCategory: "command-failed", args: { token: "private-token-canary" } };
+  const content = `[${now}] [ERROR] [remote_bash] Failed call #1\n  Data: ${JSON.stringify(data)}\n`;
+  fs.writeFileSync(logPath, content);
+  try {
+    const env = { AGENTPORT_LEGACY_CONNECTIONS_PATH: path.join(tempDir, "nonexistent-config.json") };
+    const result = await runCli(["diagnostics", "--log-dir", tempDir, "--json"], env);
+    assert.strictEqual(result.code, 0, result.stderr || result.stdout);
+    const report = JSON.parse(result.stdout);
+    assert.strictEqual(report.scope, "observed-mcp-logs-only");
+    assert.strictEqual(report.totals.callOutcome.failed, 1);
+    assert.strictEqual(report.totals.failureCategories["command-failed"], 1);
+    assert.ok(!result.stdout.includes("canary"));
+    assert.ok(!result.stdout.includes(tempDir));
+    const plain = await runCli(["diagnostics", "--log-dir", tempDir], env);
+    assert.strictEqual(plain.code, 0, plain.stderr);
+    assert.match(plain.stdout, /command-failed/);
+    assert.match(plain.stdout, /remote_bash/);
+    const invalid = await runCli(["diagnostics", "--days", "NaN", "--json"], env);
+    assert.strictEqual(invalid.code, 1);
+    assert.strictEqual(JSON.parse(invalid.stdout).ok, false);
+    assert.strictEqual(fs.readFileSync(logPath, "utf8"), content, "diagnostics must never modify source logs");
+  } finally {
+    assert.strictEqual(path.dirname(tempDir), os.tmpdir());
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
 async function main() {
   const tests = [
     ["parent watchdog unit", testParentWatchdogUnit],
@@ -710,6 +756,7 @@ async function main() {
     ["safe-job dry-run", testSafeJobDryRun],
     ["converted remote cwd rejection", testConvertedRemoteCwdIsRejected],
     ["converted remote file targets preflight", testConvertedRemoteFileTargetsAreRejectedBeforeIO],
+    ["local diagnostics CLI", testLocalDiagnosticsCli],
   ];
   for (const [name, test] of tests) {
     await test();

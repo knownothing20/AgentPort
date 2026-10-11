@@ -10,6 +10,7 @@ import { fileURLToPath } from "url";
 import { scheduleForcedExit, startParentWatchdog } from "./cli-lifecycle.js";
 import { parseSshDoctorOutput } from "./doctor-utils.js";
 import { SSHClient } from "./ssh-client.js";
+import { validateDaemonSearch } from "./packages/client-core/search-validation.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -36,7 +37,9 @@ function printJson(value) {
 function fail(message, code = 1, args = null) {
   if (args?.json) {
     const text = String(message || "Unknown error");
-    const hint = /Transport closed|ECONNRESET|EPIPE|ETIMEDOUT|ECONNABORTED/i.test(text)
+    const hint = args._?.[0] === "diagnostics"
+      ? "Check the local log directory and diagnostics options. This command does not require a remote connection."
+      : /Transport closed|ECONNRESET|EPIPE|ETIMEDOUT|ECONNABORTED/i.test(text)
       ? "Native MCP or daemon transport is unstable. Retry with --route ssh or switch to an SSH connection."
       : "Run `node cli.js doctor --json` to inspect route health.";
     printJson({
@@ -1688,6 +1691,7 @@ async function commandGrep(args) {
       });
       return;
     }
+    validateDaemonSearch({ pattern, regex: Boolean(args.regex), caseSensitive: Boolean(args.caseSensitive || args["case-sensitive"]) });
     const data = await postWithFallback(http, ["/api/fs/grep", "/grep"], {
       pattern,
       cwd: args.cwd,
@@ -2617,6 +2621,7 @@ Commands:
   node cli.js ssh-health [--connection name]
   node cli.js status [--connection name]
   node cli.js doctor
+  node cli.js diagnostics [--days 7] [--log-dir <directory>] [--max-mb 32] [--json]
   node cli.js read <remote-path> [--connection name]
   node cli.js write <remote-path> --content "text"
   node cli.js write <remote-path> --file local.txt
@@ -2693,6 +2698,18 @@ async function main(args) {
     case "probe":
       await commandDoctor(args);
       break;
+    case "diagnostics": {
+      const days = Number(args.days ?? 7);
+      const maxMb = Number(args["max-mb"] ?? 32);
+      if (!Number.isInteger(days) || days < 1 || days > 90 || args.days === true) throw new Error("diagnostics --days must be an integer from 1 to 90");
+      if (!Number.isInteger(maxMb) || maxMb < 1 || maxMb > 256 || args["max-mb"] === true) throw new Error("diagnostics --max-mb must be an integer from 1 to 256");
+      if (args["log-dir"] !== undefined && (typeof args["log-dir"] !== "string" || !args["log-dir"].trim())) throw new Error("diagnostics --log-dir requires a local directory");
+      const { analyzeLogs, formatLogReport } = await import("./packages/client-core/log-report.js");
+      const report = await analyzeLogs({ directory: path.resolve(args["log-dir"] || process.env.MCP_REMOTE_LOG_DIR || path.join(__dirname, "local", "logs")), days, maxBytes: maxMb * 1024 * 1024 });
+      if (args.json) printJson(report);
+      else print(formatLogReport(report));
+      break;
+    }
     case "read":
       await commandRead(args);
       break;
