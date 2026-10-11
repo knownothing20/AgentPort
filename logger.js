@@ -116,7 +116,7 @@ const MAX_EMBEDDED_JSON_SCAN_CHARS = 1024 * 1024;
 
 function isSensitiveKey(key) {
   const normalized = String(key).toLowerCase().replace(/[^a-z0-9]/g, "");
-  return /(?:token|password|passphrase|privatekey|apikey|secret|authorization)$/.test(normalized);
+  return /(?:tokens?|passwords?|passphrase|privatekey(?:data|s)?|apikeys?|secrets?|authorization|cookies?|credentials?)$/.test(normalized);
 }
 
 function findJsonFragmentEnd(value, start, state) {
@@ -150,7 +150,17 @@ function findJsonFragmentEnd(value, start, state) {
 
 function redactString(value, seen = new WeakSet(), state = createRedactionState(), embeddedDepth = 0) {
   let result = value
+    .replace(/\bagentport-[a-z\d._-]+-[a-z\d]+-[a-f\d]{32}\b/gi, REDACTED)
+    .replace(/-----BEGIN ((?:(?:ENCRYPTED|OPENSSH|RSA|EC|DSA) )?PRIVATE KEY)-----[\s\S]*?(?:-----END \1-----|$)/g, REDACTED)
+    .replace(/\b([a-z][a-z\d+.-]*:\/\/)[^/\s@"']+@/gi, `$1${REDACTED}@`)
     .replace(/\bBearer\s+[^\s,;"'<>]+/gi, `Bearer ${REDACTED}`)
+    .replace(/\bBasic\s+[a-z\d+/=_-]+/gi, `Basic ${REDACTED}`)
+    .replace(/(^|[\r\n])([ \t]*(?:set-cookie|cookie)[ \t]*:[ \t]*)[^\r\n]*/gi,
+      (_match, newline, header) => `${newline}${header}${REDACTED}`)
+    .replace(/\b((?:auth|admin)[_-]*tokens)\s*([=:])\s*(?:"[^"]*"|'[^']*'|[^\s"']+)/gi,
+      (_match, key, separator) => `${key}${separator}${REDACTED}`)
+    .replace(/\b((?:set[-_])?cookie)\s*([=:])\s*(?:"[^"]*"|'[^']*'|[^\r\n"'<>]+)/gi,
+      (_match, key, separator) => `${key}${separator}${REDACTED}`)
     .replace(/\b((?:x-agentport-broker-token|authorization|auth[\s_-]*token|access[\s_-]*token|refresh[\s_-]*token|api[\s_-]*key|private[\s_-]*key|passphrase|password|secret|token))\s*([=:])\s*(?:"([^"]*)"|'([^']*)'|([^\s,;&]+))/gi,
       (_match, key, separator) => `${key}${separator}${REDACTED}`);
 

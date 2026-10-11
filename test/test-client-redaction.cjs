@@ -46,6 +46,19 @@ async function main() {
   assert.doesNotMatch(unitText, new RegExp(secret));
   assert.doesNotMatch(unitText, /password-value|PRIVATE-KEY-DATA/);
   assert.match(unitText, /REDACTED/);
+  const { sanitizePublicValue } = require("../packages/daemon-core/job-service-resilient.cjs");
+  for (const sanitize of [redactSensitive, sanitizePublicValue]) {
+    const safe = sanitize({
+      AUTH_TOKENS: { client: secret }, adminTokens: [secret], tokens: [secret],
+      headers: { Cookie: `sid=${secret}`, "Set-Cookie": `sid=${secret}`, "Proxy-Authorization": secret },
+      url: `https://example.invalid/?auth_tokens=${secret}&normal=retained`,
+      diff: "const ordinaryCode = true;", status: "healthy",
+    });
+    assert.equal(JSON.stringify(safe).includes(secret), false);
+    assert.equal(safe.diff, "const ordinaryCode = true;");
+    assert.equal(safe.status, "healthy");
+    assert.ok(safe.url.includes("normal=retained"));
+  }
 
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "agentport-redaction-"));
   const connectionsPath = path.join(root, "connections.v3.json");

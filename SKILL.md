@@ -207,8 +207,12 @@ node sync.cjs --skills --target <skill-dir-1> --target <skill-dir-2>
 node sync.cjs --check --skills --target <skill-dir-1> --target <skill-dir-2>
 ```
 
-If local policy blocks `node sync.cjs`, copy repository files with the same
-exclusions: `.git`, `local`, and `node_modules`.
+Sync requires the maintained Git repository and copies Git-tracked source only.
+Review and stage intended new source files before syncing. Ignored/untracked
+files, nested dependencies, logs, and private runtime config are not payloads.
+Existing target symlinks/junctions are rejected; never share private identities.
+If local policy blocks the sync command, stop and report the policy. Do not
+fall back to copying an entire directory or bypassing the privacy check.
 
 ## Safety Rules
 

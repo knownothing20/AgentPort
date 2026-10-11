@@ -642,3 +642,17 @@ MIT License - See [LICENSE](./LICENSE)
 ## Contributing
 
 Issues and Pull Requests are welcome!
+
+Enable the repository-local privacy hooks once:
+
+```bash
+git config core.hooksPath .githooks
+npm run privacy:check
+npm run test:privacy
+```
+
+Use your verified GitHub noreply commit identity. Pre-commit checks the staged
+snapshot and identity; pre-push checks outgoing commits, including intermediate
+versions. Never bypass these hooks. Skill synchronization copies only tracked
+source and preserves each installation's private configuration. These local
+guards do not remove already published history or replace server-side policy.

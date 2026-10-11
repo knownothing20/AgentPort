@@ -2,11 +2,18 @@ const REDACTED = "[REDACTED]";
 
 const SENSITIVE_KEYS = new Set([
   "authorization",
+  "proxyauthorization",
+  "cookie",
+  "cookies",
+  "setcookie",
   "authtoken",
+  "authtokens",
+  "admintokens",
   "accesstoken",
   "refreshtoken",
   "bearertoken",
   "token",
+  "tokens",
   "password",
   "passphrase",
   "privatekey",

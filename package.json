@@ -36,7 +36,7 @@
     "sync:check": "node sync.cjs --check",
     "sync:dry": "node sync.cjs --dry-run",
     "sync:skills": "node sync.cjs --skills",
-    "test:privacy": "node test/test-privacy-check.cjs",
+    "test:privacy": "node test/test-privacy-check.cjs && node test/test-skill-sync-privacy.cjs",
     "privacy:check": "node scripts/check-privacy.cjs",
     "hooks:install": "git config core.hooksPath .githooks"
   },

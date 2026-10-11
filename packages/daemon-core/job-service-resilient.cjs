@@ -7,11 +7,18 @@ const { pidAlive, terminateProcessTree } = require("./process-utils.cjs");
 const REDACTED = "[REDACTED]";
 const SECRET_OUTPUT_KEYS = new Set([
   "authorization",
+  "proxyauthorization",
+  "cookie",
+  "cookies",
+  "setcookie",
   "authtoken",
+  "authtokens",
+  "admintokens",
   "accesstoken",
   "refreshtoken",
   "bearertoken",
   "token",
+  "tokens",
   "password",
   "passphrase",
   "privatekey",

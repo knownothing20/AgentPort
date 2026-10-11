@@ -1,4 +1,4 @@
 #!/bin/sh
 set -eu
 
-node scripts/check-privacy.cjs
+node scripts/check-privacy.cjs --pre-push "${1-}"

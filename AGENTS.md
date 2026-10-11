@@ -8,6 +8,13 @@ Before committing or pushing, run `npm run privacy:check`.
   copy values from a live machine into source, tests, or examples.
 - Do not bypass the repository hook with `--no-verify`.
 - If the privacy check fails, remove or replace the value before committing.
+- Use the owner's verified GitHub noreply identity, never a personal machine
+  account name or personal email. Keep this setting repository-local.
+- Enable the lightweight hooks with `git config core.hooksPath .githooks`.
+  Pre-commit checks staged bytes and identity; pre-push checks outgoing history,
+  including intermediate commits whose sensitive content was later removed.
+- Skill sync copies only Git-tracked source files. Review and stage intended new
+  source files first; never force-add private configs, logs, or scratch scripts.
 
 ## Remote Search
 

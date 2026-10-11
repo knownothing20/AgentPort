@@ -437,3 +437,16 @@ MIT License - 详见 [LICENSE](./LICENSE)
 ## 贡献
 
 欢迎提交 Issue 和 Pull Request！
+
+首次启用仓库本地隐私拦截：
+
+```bash
+git config core.hooksPath .githooks
+npm run privacy:check
+npm run test:privacy
+```
+
+提交身份使用本人已核实的 GitHub noreply 身份。提交前检查暂存区快照及身份；
+推送前检查待推送提交，包括后来已被删除或修复的中间版本，不要绕过 hook。
+Skill 同步只复制 Git 跟踪的源码，保留各软件独立的私有配置。
+本地拦截不能清除已经公开的历史，也不能替代 GitHub 服务端规则。

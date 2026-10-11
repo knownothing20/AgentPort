@@ -40,6 +40,33 @@ const SKILL_SYNC_LOCAL_FILES = new Set([
   "local/projects.json.example",
   "local/runtime-mode.json.example",
 ]);
+let skillSourceEntries;
+
+function loadSkillSourceEntries() {
+  const options = { cwd: SKILL_DIR, encoding: "utf8", windowsHide: true, maxBuffer: 16 * 1024 * 1024 };
+  const top = spawnSync("git", ["rev-parse", "--show-toplevel"], options);
+  if (top.status !== 0 || fs.realpathSync(top.stdout.trim()) !== fs.realpathSync(SKILL_DIR)) {
+    throw new Error("Skill sync requires the AgentPort source Git repository");
+  }
+  const listed = spawnSync("git", ["ls-files", "--cached", "-z"], options);
+  if (listed.status !== 0) throw new Error("Cannot read the source Git file list; refusing Skill sync");
+  const entries = new Set();
+  for (const file of listed.stdout.split("\0").filter(Boolean)) {
+    const parts = file.split("/");
+    for (let end = 1; end <= parts.length; end += 1) entries.add(parts.slice(0, end).join("/"));
+  }
+  return entries;
+}
+
+function assertRegularTarget(target) {
+  try {
+    if (fs.lstatSync(target).isSymbolicLink()) {
+      throw new Error("Refusing to sync through a target symlink or junction");
+    }
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+}
 
 function repeatedArg(names) {
   const out = [];
@@ -129,18 +156,21 @@ function shouldSyncSkillEntry(srcDir, entryName) {
   const sourcePath = path.join(srcDir, entryName);
   const relative = path.relative(SKILL_DIR, sourcePath).replace(/\\/g, "/");
   if (!relative || relative.startsWith("../")) return false;
-  if (!relative.includes("/") && SKILL_SYNC_EXCLUDES.has(relative)) return false;
+  if (!skillSourceEntries.has(relative)) return false;
+  if (relative.split("/").some((part) => SKILL_SYNC_EXCLUDES.has(part))) return false;
   if (relative === "local") return true;
   if (relative.startsWith("local/")) return SKILL_SYNC_LOCAL_FILES.has(relative);
   return true;
 }
 
 function countSkillDiffs(srcDir, dstDir) {
+  assertRegularTarget(dstDir);
   let changed = 0;
   for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
     if (!shouldSyncSkillEntry(srcDir, entry.name)) continue;
     const src = path.join(srcDir, entry.name);
     const dst = path.join(dstDir, entry.name);
+    assertRegularTarget(dst);
     if (!fs.existsSync(dst)) {
       changed += 1;
       log("sync", `${CHECK ? "Missing" : "Would copy"}: ${dst}`);
@@ -163,11 +193,13 @@ function countSkillDiffs(srcDir, dstDir) {
 }
 
 function copySkillTree(srcDir, dstDir) {
+  assertRegularTarget(dstDir);
   fs.mkdirSync(dstDir, { recursive: true });
   for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
     if (!shouldSyncSkillEntry(srcDir, entry.name)) continue;
     const src = path.join(srcDir, entry.name);
     const dst = path.join(dstDir, entry.name);
+    assertRegularTarget(dst);
     if (entry.isDirectory()) {
       copySkillTree(src, dst);
     } else if (entry.isFile()) {
@@ -248,6 +280,7 @@ function main() {
   console.log(`\n\x1b[1m\x1b[36m agentport sync\x1b[0m ${DRY_RUN ? "(dry-run)" : CHECK ? "(check)" : ENV_ONLY ? "(env-only)" : ""}\n`);
 
   ensurePrivacyCheck();
+  if (SYNC_SKILLS) skillSourceEntries = loadSkillSourceEntries();
 
   const configPath = resolveConfigPath();
   const packageData = readJson(PACKAGE_JSON_PATH);

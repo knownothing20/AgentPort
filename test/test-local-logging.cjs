@@ -38,6 +38,24 @@ const runner = `
     const legacyError = new Error(legacyQuoted);
     legacyError.stack = legacyQuoted;
     logger.info("test", legacyQuoted, { raw: legacyQuoted, legacyError });
+    logger.info("test", "credential containers", {
+      AUTH_TOKENS: "client-a=plural-auth-secret,client-b=second-auth-secret",
+      adminTokens: ["plural-admin-secret"],
+      cookies: { sid: "object-cookie-secret" },
+      credentials: { value: "credentials-secret" },
+      normal: "container-diagnostic-retained",
+    });
+    for (const text of [
+      "AUTH_TOKENS=client-a=env-auth-secret,client-b=env-second-secret",
+      "Cookie: sid=header-cookie-secret; other=second-cookie-secret",
+      'Cookie: sid="quoted-cookie-secret"; other=quoted-second-secret',
+      "Set-Cookie: sid=response-cookie-secret; HttpOnly",
+      "Proxy-Authorization: Basic YmFzaWMtc2VjcmV0",
+      "url https://fixture-user:url-password-secret@example.invalid/path",
+      "-----BEGIN " + "PRIVATE KEY-----\\nprivate-key-payload\\n-----END " + "PRIVATE KEY-----",
+    ]) logger.info("test", text, { raw: text });
+    const generatedToken = ["agentport", "fixture", "abc123", "f".repeat(32)].join("-");
+    logger.info("test", "raw credential " + generatedToken, { privateKeyData: "private-data-secret", credential: "credential-secret" });
   } else if (mode === "boundary") {
     const boundaryJson = JSON.stringify({ payload: JSON.stringify({ token: "boundary-embedded-secret", normal: "boundary-normal-retained" }) });
     logger.info("test", "boundary check", "x".repeat(280) + " " + boundaryJson);
@@ -82,6 +100,11 @@ try {
     "error-bearer-secret", "error-secret", "stack-secret", "error-property-secret", "json-token-secret",
     "message-secret", "message-auth-secret", "message-api-secret", "synthetic-secret", "other-secret", "url-token-secret",
     "message-embedded-secret", "data-embedded-secret",
+    "plural-auth-secret", "second-auth-secret", "plural-admin-secret", "object-cookie-secret", "credentials-secret",
+    "env-auth-secret", "env-second-secret", "header-cookie-secret", "second-cookie-secret", "response-cookie-secret",
+    "quoted-cookie-secret", "quoted-second-secret",
+    "YmFzaWMtc2VjcmV0", "url-password-secret", "fixture-user", "private-key-payload",
+    "private-data-secret", "credential-secret", ["agentport", "fixture", "abc123", "f".repeat(32)].join("-"),
   ]) {
     assert.equal(contents.includes(secret), false, `secret leaked: ${secret}`);
   }
