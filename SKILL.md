@@ -216,6 +216,12 @@ fall back to copying an entire directory or bypassing the privacy check.
 
 ## Safety Rules
 
+- `EOUTCOME_UNKNOWN` means an operation may already have run. Do not replay it
+  or switch endpoints; reconcile its existing handle and retained payload path.
+- A queued/running Job is accepted, not completed. Check its terminal status,
+  exit code, and output before reporting success; empty output with code 0 is valid.
+- SSH rejects unsupported ETag, create-only, mode, line/byte and scan-size guards
+  before access. Do not remove the requested protection to make a call succeed.
 - Always pass explicit `--connection` for write, exec, script, batch, job,
   trace, token, and config operations.
 - Prefer structured `safe-write`, `safe-apply`, `safe-script`, `write --file`, or

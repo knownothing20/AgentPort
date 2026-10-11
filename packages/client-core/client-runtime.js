@@ -7,6 +7,7 @@ import { selectEndpoint } from "./endpoint-selector.js";
 import { createClientState } from "./client-state.js";
 import { loadConnectionRegistry } from "./connection-registry.js";
 import { loadProjectProfiles, resolveProjectPath } from "./project-profile.js";
+import { definitelyNotSent, outcomeUnknown, replaySafeTool } from "./mcp-recovery.js";
 
 function normalizeString(value) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
@@ -40,16 +41,33 @@ function enrichProjectArgs(operation, args, profile) {
   return next;
 }
 
-function stableScriptToken({ idempotencyKey, content, interpreter, cwd }) {
+function stableScriptToken({ idempotencyKey, content, interpreter, cwd, clientId, serverId, workspaceId }) {
   return createHash("sha256")
     .update(JSON.stringify({
       idempotencyKey: String(idempotencyKey || ""),
       content: String(content || ""),
       interpreter: String(interpreter || "bash"),
       cwd: String(cwd || ""),
+      clientId: String(clientId || ""),
+      serverId: String(serverId || ""),
+      workspaceId: String(workspaceId || ""),
     }))
     .digest("hex")
     .slice(0, 32);
+}
+
+function usesDaemonRegex(operation, args) {
+  return (operation === "remote_grep" && Boolean(args.regex))
+    || (operation === "remote_batch" && Array.isArray(args.operations) && args.operations.some((item) => item?.type === "grep" && item.regex));
+}
+
+function isAmbiguousHttpFailure(error) {
+  if (![408, 502, 503, 504].includes(Number(error.status)) || error.code === "EWORKSPACE") return false;
+  const details = error.details;
+  const rejectionCode = details && typeof details.code === "string" ? details.code.trim() : "";
+  const applicationRejection = rejectionCode && !isTransportError({ code: rejectionCode })
+    && (typeof details.error === "string" || typeof details.message === "string");
+  return !applicationRejection;
 }
 
 function asyncScriptWrapper(content, interpreter, marker) {
@@ -160,9 +178,16 @@ export async function createClientRuntime({
     return { server: target.server, healthByEndpoint: Object.fromEntries(rows) };
   }
 
-  async function chooseEndpoint({ server, operation, explicitEndpointId = null, forceProbe = false, excluded = new Set() }) {
+  async function chooseEndpoint({ server, operation, explicitEndpointId = null, forceProbe = false, excluded = new Set(), daemonOnly = false, recoveryClientId } = {}) {
+    const filteredServer = {
+      ...server,
+      endpoints: server.endpoints.filter((endpoint) => (
+        (!(operationNeedsDaemon(operation) || daemonOnly) || endpoint.type === "daemon")
+        && (recoveryClientId === undefined || (endpoint.type === "daemon" && endpoint.clientId === recoveryClientId))
+      )),
+    };
     const healthByEndpoint = {};
-    await Promise.all(server.endpoints.map(async (endpoint) => {
+    await Promise.all(filteredServer.endpoints.map(async (endpoint) => {
       const id = endpointId(endpoint);
       if (excluded.has(id)) {
         healthByEndpoint[id] = { ok: false, error: "excluded" };
@@ -171,9 +196,6 @@ export async function createClientRuntime({
       healthByEndpoint[id] = await probeEndpoint(server, endpoint, { force: forceProbe });
     }));
 
-    const filteredServer = operationNeedsDaemon(operation)
-      ? { ...server, endpoints: server.endpoints.filter((endpoint) => endpoint.type === "daemon") }
-      : server;
     const selected = selectEndpoint({
       server: filteredServer,
       operation,
@@ -185,7 +207,7 @@ export async function createClientRuntime({
 
   async function invokeOnSelection(operation, args, server, selection, context) {
     const endpoint = selection.endpoint;
-    const bound = bindRequestEndpoint(context, endpoint, selection.health || {});
+    const bound = bindRequestEndpoint({ ...context, clientId: endpoint.clientId || context.clientId }, endpoint, selection.health || {});
     const transport = transportFor(endpoint);
 
     if (operation === "remote_script_async") {
@@ -196,11 +218,15 @@ export async function createClientRuntime({
       }
       const cwd = args.cwd || selection.health?.workspaceRoot;
       if (!cwd) throw new Error("remote_script_async requires cwd or a daemon workspaceRoot");
-      const token = args.__scriptToken || stableScriptToken({
+      const token = stableScriptToken({
         idempotencyKey: bound.idempotencyKey,
         content: args.content,
         interpreter: args.interpreter,
         cwd,
+        // Unknown client identity gets a request-local filename, never a shared stable wrapper.
+        clientId: bound.clientId || `request:${bound.requestId}`,
+        serverId: bound.serverId,
+        workspaceId: bound.workspaceId,
       });
       const marker = `AGENTPORT_${token.toUpperCase()}`;
       const wrapperPath = `${String(cwd).replace(/\/+$/, "")}/.agentport-tmp/client-v3-${token}.sh`;
@@ -212,8 +238,10 @@ export async function createClientRuntime({
         sessionId,
         clientId: endpoint.clientId || null,
       });
-      await transport.invoke("remote_write", { path: wrapperPath, content: wrapper }, bindRequestEndpoint(writeContext, endpoint, selection.health || {}));
+      let phase = "upload";
       try {
+        await transport.invoke("remote_write", { path: wrapperPath, content: wrapper }, bindRequestEndpoint(writeContext, endpoint, selection.health || {}));
+        phase = "submit";
         return await transport.invoke("remote_exec_async", {
           command: `bash ${shellQuote(wrapperPath)}`,
           cwd,
@@ -221,8 +249,16 @@ export async function createClientRuntime({
           idempotencyKey: bound.idempotencyKey,
         }, bound);
       } catch (error) {
-        transport.request?.({ method: "DELETE", route: "/api/fs/delete", body: { path: wrapperPath }, context: bound }).catch(() => {});
-        throw error;
+        const uncertain = error.code === "EOUTCOME_UNKNOWN" || isAmbiguousHttpFailure(error)
+          || (error.transport !== false && !error.status && isTransportError(error) && !definitelyNotSent(error));
+        const failure = uncertain && error.code !== "EOUTCOME_UNKNOWN" ? outcomeUnknown(operation, error) : error;
+        // Even rejection cannot prove this stable path is unowned by an earlier accepted Job.
+        failure.recovery = {
+          ...failure.recovery, wrapperPath, idempotencyKey: bound.idempotencyKey,
+          serverId: bound.serverId, workspaceId: bound.workspaceId, endpointId: endpointId(endpoint),
+          clientId: bound.clientId, route: endpoint.type, cwd, phase, retained: true,
+        };
+        throw failure;
       }
     }
 
@@ -246,14 +282,6 @@ export async function createClientRuntime({
       idempotencyKey ||= randomUUID();
       args.idempotencyKey = idempotencyKey;
     }
-    if (operation === "remote_script_async") {
-      args.__scriptToken = stableScriptToken({
-        idempotencyKey,
-        content: args.content,
-        interpreter: args.interpreter,
-        cwd: args.cwd,
-      });
-    }
     const context = createRequestContext({
       operation,
       serverId: server.id,
@@ -265,12 +293,19 @@ export async function createClientRuntime({
     });
 
     const excluded = new Set();
-    let selection = await chooseEndpoint({ server, operation, explicitEndpointId, excluded });
+    const preferred = explicitEndpointId || selectedEndpointId;
+    const explicitSsh = server.endpoints.some((endpoint) => endpointId(endpoint) === preferred && endpoint.type === "ssh");
+    const requestArgs = ["remote_exec_async", "remote_batch"].includes(operation) ? JSON.parse(JSON.stringify(args)) : args;
+    const daemonRegex = usesDaemonRegex(operation, requestArgs) && !explicitSsh;
+    // The default batch policy stays conservative; only this existing validator can mark the whole payload read-only.
+    const readOnlyBatch = operation === "remote_batch" && replaySafeTool(operation, requestArgs);
+    const mutating = context.policy.mutating && !readOnlyBatch;
+    let selection = await chooseEndpoint({ server, operation, explicitEndpointId, excluded, daemonOnly: daemonRegex });
     let attempts = 0;
     while (true) {
       attempts += 1;
       try {
-        const data = await invokeOnSelection(operation, args, server, selection, context);
+        const data = await invokeOnSelection(operation, requestArgs, server, selection, context);
         return {
           data,
           meta: {
@@ -288,14 +323,37 @@ export async function createClientRuntime({
           },
         };
       } catch (error) {
-        const accepted = Boolean(error.requestAccepted);
-        const retrySame = isTransportError(error) && attempts === 1 && canRetryOperation({ operation, requestAccepted: accepted, idempotencyKey });
+        if (error.code === "EOUTCOME_UNKNOWN" || error.outcome === "unknown" || error.code === "EWORKSPACE") throw error;
+        const proxyUnknown = isAmbiguousHttpFailure(error);
+        if (!proxyUnknown && (error.transport === false || error.status)) throw error;
+        const recoverable = proxyUnknown || isTransportError(error);
+        const unsent = !proxyUnknown && definitelyNotSent(error);
+        const verifiedIdempotency = selection.endpoint.type === "daemon" && selection.identityMatch === true
+          && Boolean(normalizeString(selection.endpoint.clientId))
+          && selection.health?.capabilities?.idempotentJobs === true
+          && selection.health?.capabilities?.clientScopedIdempotency === true;
+        const retrySame = recoverable && attempts === 1 && !(proxyUnknown && mutating)
+          && (readOnlyBatch || canRetryOperation({ operation, definitelyNotSent: unsent, idempotencyKey, verifiedIdempotency }));
         if (retrySame) continue;
-        const fallbackAllowed = isTransportError(error)
-          && canFallbackOperation({ operation, identityMatch: selection.identityMatch });
+        if (mutating && recoverable && !unsent) {
+          const failure = outcomeUnknown(operation, error);
+          failure.recovery = {
+            serverId: server.id, workspaceId: server.workspaceId, endpointId: endpointId(selection.endpoint),
+            route: selection.endpoint.type, clientId: selection.endpoint.clientId || null, idempotencyKey,
+          };
+          throw failure;
+        }
+        const fallbackAllowed = recoverable && (readOnlyBatch
+          ? selection.identityMatch === true
+          : canFallbackOperation({ operation, identityMatch: selection.identityMatch, definitelyNotSent: unsent }));
         if (!fallbackAllowed) throw error;
         excluded.add(endpointId(selection.endpoint));
-        selection = await chooseEndpoint({ server, operation, explicitEndpointId: null, forceProbe: true, excluded });
+        if (mutating && !normalizeString(selection.endpoint.clientId)) throw error;
+        selection = await chooseEndpoint({
+          server, operation, explicitEndpointId: null, forceProbe: true, excluded,
+          daemonOnly: daemonRegex || (selection.endpoint.type === "daemon" && usesDaemonRegex(operation, requestArgs)),
+          recoveryClientId: mutating ? selection.endpoint.clientId : undefined,
+        });
       }
     }
   }

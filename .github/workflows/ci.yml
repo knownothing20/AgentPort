@@ -38,6 +38,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
+      - run: npm ci --ignore-scripts
       - run: node test/test-architecture.cjs
       - run: node test/test-daemon-gateway.cjs
       - run: node test/test-exec-core.cjs
@@ -49,6 +50,7 @@ jobs:
       - run: node test/test-client-redaction.cjs
       - run: node test/test-daemon-response-redaction.cjs
       - run: node test/test-named-workspaces.cjs
+      - run: npm run test:stability
 
   windows-jobs:
     name: Job Service (windows-latest, Node ${{ matrix.node }})

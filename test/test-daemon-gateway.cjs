@@ -4,6 +4,7 @@ const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const { createAgentPortGateway } = require('../daemon/modular-gateway.cjs');
+const { createDevelopmentFrontServer } = require('../daemon/development-gateway.cjs');
 const { createDaemonConfigLoader, parseEnvText } = require('../daemon/config-loader.cjs');
 const { startLegacyProcess } = require('../daemon/legacy-process.cjs');
 const { createFileSearchService } = require('../packages/daemon-core/file-search-service.cjs');
@@ -42,6 +43,21 @@ function request(port, method, requestPath, body, headers = {}) {
     if (payload) req.write(payload);
     req.end();
   });
+}
+
+function shellArg(value) {
+  const text = String(value);
+  if (process.platform === 'win32') return `"${text.replace(/"/g, '""')}"`;
+  return `'${text.replace(/'/g, `'"'"'`)}'`;
+}
+
+async function waitForJob(port, jobId, headers) {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const response = await request(port, 'GET', `/api/jobs/${encodeURIComponent(jobId)}`, undefined, headers);
+    if (['completed', 'error', 'timeout', 'cancelled', 'orphaned'].includes(response.json?.job?.status)) return response;
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  }
+  throw new Error(`Job ${jobId} did not finish during the test`);
 }
 
 async function testConfigAndLegacyProcess(root) {
@@ -96,6 +112,7 @@ async function main() {
   });
   const legacyPort = await listen(legacy);
   const configLoader = {
+    allowExec: true,
     async load() {
       return {
         workspaceRoot: root,
@@ -107,7 +124,7 @@ async function main() {
         adminTokens: new Set(),
         dashboardEnabled: false,
         values: {},
-        command: { allowExec: true, allowedCommands: '', allowedInterpreters: '' },
+        command: { allowExec: this.allowExec, allowedCommands: '', allowedInterpreters: '' },
         exec: {
           timeoutMs: 5000,
           maxTimeoutMs: 60_000,
@@ -129,6 +146,19 @@ async function main() {
   };
   const gateway = createAgentPortGateway({ legacyOrigin: `http://127.0.0.1:${legacyPort}`, configLoader });
   const port = await listen(gateway);
+  const attachedSessionJobs = [];
+  const developmentGateway = createDevelopmentFrontServer({
+    baseOrigin: `http://127.0.0.1:${port}`,
+    configLoader,
+    authorizeContext: () => ({ clientId: 'client-a' }),
+    serviceFactory: () => ({
+      async status() {
+        return { id: 'session-test', clientId: 'client-a', status: 'active', worktreePath: root, commands: {} };
+      },
+      async attachJob(sessionId, job) { attachedSessionJobs.push({ sessionId, ...job }); },
+    }),
+  });
+  const developmentPort = await listen(developmentGateway);
   const auth = { authorization: 'Bearer secret', 'x-mcp-client-id': 'client-a' };
 
   try {
@@ -190,9 +220,98 @@ async function main() {
     assert.equal(jobs.json.success, true);
     assert.equal(jobs.json.count, 0);
 
+    const enabledCommand = `${shellArg(process.execPath)} -e ${shellArg("process.stdout.write('gateway-command-ok')")}`;
+    const commandResponse = await request(port, 'POST', '/api/exec', { command: enabledCommand }, auth);
+    assert.equal(commandResponse.status, 200);
+    assert.equal(commandResponse.json.stdout, 'gateway-command-ok');
+
+    const enabledScript = await request(port, 'POST', '/api/exec/script', {
+      interpreter: process.execPath,
+      content: "process.stdout.write('gateway-script-ok')",
+    }, auth);
+    assert.equal(enabledScript.status, 200);
+    assert.equal(enabledScript.json.stdout, 'gateway-script-ok');
+
+    configLoader.allowExec = false;
+    const disabledCommand = await request(port, 'POST', '/api/exec', { command: enabledCommand }, auth);
+    assert.equal(disabledCommand.status, 403);
+    assert.equal(disabledCommand.json.code, 'ECOMMAND_POLICY');
+
+    const scriptSentinel = path.join(root, 'disabled-script-sentinel');
+    const disabledScript = await request(port, 'POST', '/api/exec/script', {
+      interpreter: process.execPath,
+      content: `require('node:fs').writeFileSync(${JSON.stringify(scriptSentinel)}, 'executed')`,
+    }, auth);
+    assert.equal(disabledScript.status, 403);
+    assert.equal(disabledScript.json.code, 'ECOMMAND_POLICY');
+    await assert.rejects(() => fs.access(scriptSentinel), (error) => error.code === 'ENOENT');
+
+    const disabledBatchSentinel = path.join(root, 'disabled-batch-sentinel');
+    const disabledBatch = await request(port, 'POST', '/api/batch', {
+      operations: [
+        { type: 'read', path: 'src/a.js' },
+        {
+          type: 'bash',
+          command: `${shellArg(process.execPath)} -e ${shellArg(`require('node:fs').writeFileSync(${JSON.stringify(disabledBatchSentinel)}, 'executed')`)}`,
+        },
+      ],
+    }, auth);
+    assert.equal(disabledBatch.status, 200);
+    assert.equal(disabledBatch.json.results[0].status, 200);
+    assert.equal(disabledBatch.json.results[1].status, 403);
+    await assert.rejects(() => fs.access(disabledBatchSentinel), (error) => error.code === 'ENOENT');
+
+    const disabledJob = await request(port, 'POST', '/api/jobs/start', { command: enabledCommand }, auth);
+    assert.equal(disabledJob.status, 403);
+    assert.equal(disabledJob.json.code, 'ECOMMAND_POLICY');
+    assert.equal((await request(port, 'GET', '/api/jobs', undefined, auth)).json.count, 0);
+
+    const disabledSessionRun = await request(developmentPort, 'POST', '/api/dev/sessions/session-test/run', {
+      command: enabledCommand,
+    }, auth);
+    assert.equal(disabledSessionRun.status, 403);
+    assert.equal(disabledSessionRun.json.code, 'ECOMMAND_POLICY');
+    assert.equal(attachedSessionJobs.length, 0);
+
+    const stillReadable = await request(port, 'POST', '/api/fs/read', { path: 'src/a.js' }, auth);
+    assert.equal(stillReadable.status, 200);
+
+    configLoader.allowExec = true;
+    const reenabledCommand = await request(port, 'POST', '/api/exec', { command: enabledCommand }, auth);
+    assert.equal(reenabledCommand.status, 200);
+    assert.equal(reenabledCommand.json.stdout, 'gateway-command-ok');
+    const reenabledScript = await request(port, 'POST', '/api/exec/script', {
+      interpreter: process.execPath,
+      content: "process.stdout.write('gateway-script-ok')",
+    }, auth);
+    assert.equal(reenabledScript.status, 200);
+    assert.equal(reenabledScript.json.stdout, 'gateway-script-ok');
+
+    const enabledBatch = await request(port, 'POST', '/api/batch', {
+      operations: [{ type: 'bash', command: enabledCommand }],
+    }, auth);
+    assert.equal(enabledBatch.status, 200);
+    assert.equal(enabledBatch.json.results[0].status, 200);
+    assert.equal(enabledBatch.json.results[0].stdout, 'gateway-command-ok');
+
+    const enabledJob = await request(port, 'POST', '/api/jobs/start', { command: enabledCommand }, auth);
+    assert.equal(enabledJob.status, 200);
+    const finishedJob = await waitForJob(port, enabledJob.json.jobId, auth);
+    assert.equal(finishedJob.json.job.status, 'completed');
+
+    const enabledSessionRun = await request(developmentPort, 'POST', '/api/dev/sessions/session-test/run', {
+      command: enabledCommand,
+    }, auth);
+    assert.equal(enabledSessionRun.status, 200);
+    assert.equal(enabledSessionRun.json.success, true);
+    const finishedSessionJob = await waitForJob(port, enabledSessionRun.json.jobId, auth);
+    assert.equal(finishedSessionJob.json.job.status, 'completed');
+    assert.equal(attachedSessionJobs.length, 1);
+
     const proxied = await request(port, 'GET', '/legacy-route', undefined, auth);
     assert.equal(proxied.json.proxied, true);
   } finally {
+    await close(developmentGateway);
     await close(gateway);
     await close(legacy);
     await fs.rm(root, { recursive: true, force: true });

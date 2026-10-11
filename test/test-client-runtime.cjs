@@ -101,6 +101,10 @@ async function main() {
     const tokenB = clientRuntimeInternals.stableScriptToken({ idempotencyKey: "key-1", content: "echo two", interpreter: "bash", cwd: "/srv/projects/demo" });
     assert.equal(tokenA, tokenA2);
     assert.notEqual(tokenA, tokenB);
+    const scopedToken = { idempotencyKey: "key-1", content: "echo one", interpreter: "bash", cwd: "/srv/projects/demo", clientId: "client-a", serverId: "srv-main", workspaceId: "workspace-main" };
+    assert.equal(clientRuntimeInternals.stableScriptToken(scopedToken), clientRuntimeInternals.stableScriptToken({ ...scopedToken }));
+    assert.notEqual(clientRuntimeInternals.stableScriptToken(scopedToken), clientRuntimeInternals.stableScriptToken({ ...scopedToken, clientId: "client-b" }));
+    assert.notEqual(clientRuntimeInternals.stableScriptToken(scopedToken), clientRuntimeInternals.stableScriptToken({ ...scopedToken, serverId: "srv-other" }));
 
     const registry = await loadConnectionRegistry({ filePath: connectionsPath, baseDir: root });
     assert.equal(registry.defaultServerId, "srv-main");
@@ -126,9 +130,12 @@ async function main() {
       const status = await runtime.projectStatus("demo");
       assert.match(status.data.stdout, /cwd=\/srv\/projects\/demo/);
 
+      // This mock advertises persistent Jobs, not the verified client-scoped dedup contract.
+      await assert.rejects(() => runtime.projectRun("demo", "build", { idempotencyKey: "demo:build:abc" }), { code: "EOUTCOME_UNKNOWN" });
+      assert.equal(asyncAttempts, 1);
       const run = await runtime.projectRun("demo", "build", { idempotencyKey: "demo:build:abc" });
       assert.equal(run.data.jobId, "job-1");
-      assert.equal(run.meta.attempts, 2);
+      assert.equal(run.meta.attempts, 1);
       assert.equal(run.meta.idempotencyKey, "demo:build:abc");
       assert.equal(idempotencyKey, "demo:build:abc");
       assert.equal(asyncAttempts, 2);
@@ -160,7 +167,7 @@ async function main() {
     await fs.rm(root, { recursive: true, force: true });
   }
 
-  console.log("PASS modular client registry, runtime, stable script identity, project actions, idempotency, cursor logs, and CLI");
+  console.log("PASS modular client registry, runtime, scoped script identity, project actions, explicit same-key recovery, cursor logs, and CLI");
 }
 
 main().catch((error) => {

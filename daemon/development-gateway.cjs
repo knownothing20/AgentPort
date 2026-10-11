@@ -3,7 +3,7 @@ const net = require('node:net');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { URL } = require('node:url');
-const { createDevelopmentSessionService } = require('../packages/daemon-core/development-session-service.cjs');
+const { assertSessionJobsIdle, createDevelopmentSessionService } = require('../packages/daemon-core/development-session-service.cjs');
 const { assertResourceOwner, filterOwnedResources, normalizeAuthContext } = require('./auth-context.cjs');
 
 function readBody(req, maxBytes = 10 * 1024 * 1024) {
@@ -137,23 +137,22 @@ function createDevelopmentFrontServer({ baseOrigin, configLoader, authorizeApi, 
     const rows = [];
     for (const reference of session.jobs || []) {
       try {
+        if (!reference?.jobId) throw new Error('Session job reference is missing');
         const response = await baseRequest(baseOrigin, { route: `/api/jobs/${encodeURIComponent(reference.jobId)}`, headers: authHeaders(headers), timeoutMs: 10_000 });
-        rows.push({ ...reference, status: response.data?.job?.status || response.data?.status || 'unknown' });
+        const job = response.data?.job;
+        if (response.status < 200 || response.status >= 300 || response.data?.success === false || !job || job.id !== reference.jobId) throw new Error('Session job query failed or returned a missing/mismatched record');
+        rows.push({ ...reference, status: job.status || 'unknown', processAlive: job.processAlive });
       } catch (error) {
         rows.push({ ...reference, status: 'unknown', error: error.message });
       }
     }
     return rows;
   }
-  async function ensureIdle(session, headers, force = false) {
-    if (force) return;
+  async function ensureIdle(session, headers) {
+    if (!Array.isArray(session.jobs)) assertSessionJobsIdle(session);
     const jobs = await jobsFor(session, headers);
-    const active = jobs.filter((item) => ['queued', 'running', 'cancelling'].includes(item.status));
-    if (active.length) {
-      const error = new Error('Session has active jobs');
-      error.code = 'ESESSION_JOBS_ACTIVE'; error.statusCode = 409; error.details = { jobs: active };
-      throw error;
-    }
+    assertSessionJobsIdle(session, jobs);
+    return jobs;
   }
 
   return http.createServer(async (req, res) => {
@@ -268,17 +267,19 @@ function createDevelopmentFrontServer({ baseOrigin, configLoader, authorizeApi, 
         return sendJson(res, 200, { success: true, ...(await service.commit(developmentRoute.sessionId, await readJson(req, maxBodyBytes))) });
       }
       if (developmentRoute.action === 'rollback' && req.method === 'POST') {
-        return sendJson(res, 200, { success: true, ...(await service.rollback(developmentRoute.sessionId, await readJson(req, maxBodyBytes))) });
+        const body = await readJson(req, maxBodyBytes);
+        const jobs = await ensureIdle(session, headers);
+        return sendJson(res, 200, { success: true, ...(await service.rollback(developmentRoute.sessionId, body, jobs)) });
       }
       if (developmentRoute.action === 'merge' && req.method === 'POST') {
         const body = await readJson(req, maxBodyBytes);
-        await ensureIdle(session, headers, Boolean(body.force));
-        return sendJson(res, 200, { success: true, ...(await service.merge(developmentRoute.sessionId, body)) });
+        const jobs = await ensureIdle(session, headers);
+        return sendJson(res, 200, { success: true, ...(await service.merge(developmentRoute.sessionId, body, jobs)) });
       }
       if (developmentRoute.action === 'cleanup' && req.method === 'POST') {
         const body = await readJson(req, maxBodyBytes);
-        await ensureIdle(session, headers, Boolean(body.force));
-        return sendJson(res, 200, { success: true, ...(await service.cleanup(developmentRoute.sessionId, body)) });
+        const jobs = await ensureIdle(session, headers);
+        return sendJson(res, 200, { success: true, ...(await service.cleanup(developmentRoute.sessionId, body, jobs)) });
       }
       return sendJson(res, 405, { error: 'Method not allowed' });
     } catch (error) {

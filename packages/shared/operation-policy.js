@@ -62,7 +62,7 @@ const POLICIES = Object.freeze({
     mutating: true,
     requiresExplicitTarget: true,
     requiresIdentityMatch: true,
-    retryMode: "idempotency-key",
+    retryMode: "never-after-send",
     fallbackMode: "same-server",
   }),
   exec: Object.freeze({
@@ -86,7 +86,7 @@ const POLICIES = Object.freeze({
     mutating: true,
     requiresExplicitTarget: true,
     requiresIdentityMatch: true,
-    retryMode: "idempotency-key",
+    retryMode: "never-after-send",
     fallbackMode: "same-server",
   }),
   "admin-read": Object.freeze({
@@ -141,16 +141,18 @@ export function getOperationPolicy(operation) {
   return POLICIES[classifyOperation(operation)] || POLICIES.unknown;
 }
 
-export function canRetryOperation({ operation, requestAccepted = false, idempotencyKey = "" } = {}) {
+export function canRetryOperation({ operation, definitelyNotSent = false, idempotencyKey = "", verifiedIdempotency = false } = {}) {
   const policy = getOperationPolicy(operation);
   if (policy.retryMode === "safe") return true;
-  if (requestAccepted && policy.retryMode === "never-after-send") return false;
-  if (policy.retryMode === "idempotency-key") return Boolean(String(idempotencyKey || "").trim());
-  return !requestAccepted && policy.retryMode !== "never-after-send";
+  if (normalizeOperationName(operation) === "remote_script_async") return false;
+  if (definitelyNotSent === true) return true;
+  return normalizeOperationName(operation) === "remote_exec_async"
+    && verifiedIdempotency === true && Boolean(String(idempotencyKey || "").trim());
 }
 
-export function canFallbackOperation({ operation, identityMatch = false } = {}) {
+export function canFallbackOperation({ operation, identityMatch = false, definitelyNotSent = false } = {}) {
   const policy = getOperationPolicy(operation);
+  if (policy.mutating && (definitelyNotSent !== true || normalizeOperationName(operation) === "remote_script_async")) return false;
   if (policy.fallbackMode === "never") return false;
   if (policy.fallbackMode === "verified-endpoint") return identityMatch !== false;
   return identityMatch === true;

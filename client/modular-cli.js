@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createClientRuntime } from "../packages/client-core/client-runtime.js";
 import { redactSensitive } from "../packages/client-core/redaction.js";
+import { executionExitCode } from "../packages/shared/execution-result.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -46,6 +47,11 @@ function printJson(payload) {
 function printResult(result, args) {
   if (args.json || typeof result !== "string") printJson(result);
   else process.stdout.write(`${result}\n`);
+}
+
+function applyExecutionExitCode(value) {
+  const code = executionExitCode(value);
+  if (code !== 0) process.exitCode = code;
 }
 
 function timeoutValue(args) {
@@ -97,8 +103,15 @@ async function followJob(runtime, jobId, args) {
 
     const statusResult = await runtime.invoke("job_status", { jobId, server });
     const status = statusResult.data?.job?.status || statusResult.data?.status;
+    const statusExitCode = executionExitCode(statusResult);
     if (terminalStatus(status)) {
       process.stdout.write(`\n[agentport] job ${jobId}: ${status}\n`);
+      if (statusExitCode !== 0) process.exitCode = statusExitCode;
+      return statusResult;
+    }
+    if (statusExitCode !== 0) {
+      printJson(statusResult.data ?? statusResult);
+      process.exitCode = statusExitCode;
       return statusResult;
     }
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
@@ -153,6 +166,7 @@ async function handleProject(runtime, args) {
       idempotencyKey: value(args, "idempotency-key", "idempotencyKey", "key"),
     });
     printJson({ ...result.data, _agentport: result.meta });
+    applyExecutionExitCode(result.data);
     if (args.follow && (result.data?.jobId || result.data?.taskId)) {
       await followJob(runtime, result.data.jobId || result.data.taskId, { ...args, server: result.meta.serverId });
     }
@@ -190,6 +204,7 @@ async function handleJob(runtime, args, offset = 1) {
       idempotencyKey: value(args, "idempotency-key", "idempotencyKey", "key"),
     });
     printJson({ ...result.data, _agentport: result.meta });
+    applyExecutionExitCode(result.data);
     if (args.follow) await followJob(runtime, result.data.jobId || result.data.taskId, { ...args, server: result.meta.serverId });
     return;
   }
@@ -212,6 +227,7 @@ async function handleJob(runtime, args, offset = 1) {
     tailBytes: value(args, "tail-bytes", "tailBytes"),
   });
   printJson({ ...result.data, _agentport: result.meta });
+  applyExecutionExitCode(result.data);
 }
 
 export async function main(argv = process.argv.slice(2)) {

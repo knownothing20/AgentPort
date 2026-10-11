@@ -18,6 +18,25 @@ async function main() {
   try {
     const disabled = createCommandPolicy({ allowExec: false });
     assert.throws(() => disabled.validateCommand("echo no"), (error) => error?.statusCode === 403);
+    assert.throws(() => disabled.validateInterpreter("node"), (error) => error?.statusCode === 403);
+
+    const deniedTempDir = path.join(root, "disabled-temp");
+    const deniedExec = createExecService({
+      workspaceRoot: root,
+      policy: disabled,
+      queue: createExecutionQueue(),
+      tempDir: deniedTempDir,
+    });
+    const sentinel = path.join(root, "disabled-script-sentinel");
+    await assert.rejects(
+      () => deniedExec.executeScript(
+        `require('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'executed')`,
+        { interpreter: process.execPath, cwd: root },
+      ),
+      (error) => error?.statusCode === 403,
+    );
+    await assert.rejects(() => fs.access(deniedTempDir), (error) => error?.code === "ENOENT");
+    await assert.rejects(() => fs.access(sentinel), (error) => error?.code === "ENOENT");
 
     const allowlist = createCommandPolicy({ allowedCommands: ["git"] });
     assert.throws(

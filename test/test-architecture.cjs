@@ -24,9 +24,17 @@ async function testOperationPolicy() {
   assert.equal(getOperationPolicy("remote_write").class, "write");
   assert.equal(canRetryOperation({ operation: "remote_read", requestAccepted: true }), true);
   assert.equal(canRetryOperation({ operation: "remote_exec_async", requestAccepted: true }), false);
-  assert.equal(canRetryOperation({ operation: "remote_exec_async", requestAccepted: true, idempotencyKey: "build:abc" }), true);
+  assert.equal(canRetryOperation({ operation: "remote_exec_async", requestAccepted: true, idempotencyKey: "build:abc" }), false);
+  assert.equal(canRetryOperation({ operation: "remote_exec_async", requestAccepted: true, idempotencyKey: "build:abc", verifiedIdempotency: true }), true);
+  for (const operation of ["remote_write", "job_cancel", "job_delete", "remote_batch", "remote_bash", "remote_script_async"]) {
+    assert.equal(canRetryOperation({ operation, requestAccepted: false, idempotencyKey: "a-key", verifiedIdempotency: true }), false);
+    assert.equal(canFallbackOperation({ operation, requestAccepted: false, identityMatch: true }), false);
+  }
+  assert.equal(canRetryOperation({ operation: "remote_write", definitelyNotSent: true }), true);
+  assert.equal(canRetryOperation({ operation: "remote_script_async", definitelyNotSent: true, idempotencyKey: "a-key" }), false);
   assert.equal(canFallbackOperation({ operation: "remote_write", identityMatch: false }), false);
-  assert.equal(canFallbackOperation({ operation: "remote_write", identityMatch: true }), true);
+  assert.equal(canFallbackOperation({ operation: "remote_write", identityMatch: true }), false);
+  assert.equal(canFallbackOperation({ operation: "remote_write", identityMatch: true, definitelyNotSent: true }), true);
 }
 
 async function testRequestContext() {

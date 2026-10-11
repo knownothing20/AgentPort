@@ -3,7 +3,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { atomicWriteFile } = require('./atomic-write.cjs');
-const { createWorkspacePathGuard, isWithin } = require('./path-guard.cjs');
+const { canonicalRealpath, createWorkspacePathGuard, isWithin, sameFileIdentity } = require('./path-guard.cjs');
 const { pidAlive, terminateProcessTree } = require('./process-utils.cjs');
 const { createProjectLockManager } = require('./project-lock.cjs');
 
@@ -11,7 +11,8 @@ function nowIso() { return new Date().toISOString(); }
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 function safeId(value, label = 'id') {
   const normalized = String(value || '').trim();
-  if (!normalized || !/^[A-Za-z0-9._-]{1,120}$/.test(normalized)) {
+  if (!normalized || !/^[A-Za-z0-9._-]{1,120}$/.test(normalized) || normalized.endsWith('.')
+      || (process.platform === 'win32' && /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(normalized))) {
     const error = new Error(`${label} must match [A-Za-z0-9._-] and be at most 120 characters`);
     error.code = 'EINVAL'; error.statusCode = 400; throw error;
   }
@@ -23,6 +24,21 @@ function slug(value, fallback = 'task') {
 }
 function errorWith(message, code, statusCode = 400, details = null) {
   const error = new Error(message); error.code = code; error.statusCode = statusCode; if (details) error.details = details; return error;
+}
+function assertSessionJobsIdle(session, jobStates = session.jobs) {
+  // Additional job states must be server-observed snapshots, not request body fields.
+  const references = session.jobs;
+  if (!Array.isArray(references) || !Array.isArray(jobStates)) {
+    throw errorWith('Session job state cannot be confirmed', 'ESESSION_JOBS_ACTIVE', 409);
+  }
+  const unsafe = references.filter((reference) => {
+    const matches = reference?.jobId ? jobStates.filter((item) => item?.jobId === reference.jobId) : [];
+    const job = matches.length === 1 ? matches[0] : null;
+    if (!job || (job.error && job.status !== 'error') || job.processAlive === true) return true;
+    if (['completed', 'failed'].includes(job.status)) return false;
+    return !(['cancelled', 'timeout', 'orphaned', 'error'].includes(job.status) && job.processAlive === false);
+  });
+  if (unsafe.length) throw errorWith('Session has active or unconfirmed jobs', 'ESESSION_JOBS_ACTIVE', 409, { jobs: unsafe });
 }
 function truncate(text, maxBytes) {
   const buffer = Buffer.from(String(text || ''), 'utf8');
@@ -103,11 +119,57 @@ function createDevelopmentSessionService({
   const sessionRoot = path.resolve(sessionsDir || path.join(root, '.agentport-sessions'));
   const worktreeRoot = path.resolve(worktreesDir || path.join(root, '.agentport-worktrees'));
   const locksDir = path.join(sessionRoot, '.locks');
+  let managedRootReal = null;
 
   async function init() {
     await fs.mkdir(sessionRoot, { recursive: true, mode: 0o700 });
     await fs.mkdir(worktreeRoot, { recursive: true, mode: 0o700 });
     await fs.mkdir(locksDir, { recursive: true, mode: 0o700 });
+    const currentRoot = await canonicalRealpath(worktreeRoot);
+    if (managedRootReal && path.relative(managedRootReal, currentRoot) !== '') throw errorWith('Managed worktree root changed', 'ESESSION_PATH', 409);
+    managedRootReal = currentRoot;
+  }
+  async function managedWorktree(id, storedPath, creating = false) {
+    const expected = path.resolve(worktreeRoot, safeId(id, 'sessionId'));
+    const rootReal = await canonicalRealpath(worktreeRoot);
+    if (managedRootReal && path.relative(managedRootReal, rootReal) !== '') throw errorWith('Managed worktree root changed', 'ESESSION_PATH', 409);
+    managedRootReal ||= rootReal;
+    const target = path.join(rootReal, id);
+    if (path.relative(worktreeRoot, path.dirname(expected)) !== '' || !isWithin(target, rootReal) || path.relative(target, rootReal) === '') {
+      throw errorWith('Worktree must be a managed root child', 'ESESSION_PATH', 409);
+    }
+    if (storedPath !== undefined && (typeof storedPath !== 'string' || !path.isAbsolute(storedPath)
+        || (path.relative(expected, storedPath) !== '' && path.relative(target, storedPath) !== ''))) {
+      throw errorWith('Session worktree path does not match its managed ID', 'ESESSION_PATH', 409);
+    }
+    let stat;
+    try { stat = await fs.lstat(target, { bigint: true }); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (creating && stat) throw errorWith(`Worktree target for '${id}' already exists`, 'ESESSION_EXISTS', 409);
+    if (stat && (stat.isSymbolicLink() || !stat.isDirectory() || path.relative(target, await canonicalRealpath(target)) !== '')) {
+      throw errorWith('Session worktree target is a link or conflicting path', 'ESESSION_PATH', 409);
+    }
+    return { path: target, stat };
+  }
+  async function ownedWorktree(meta, identity) {
+    const managed = await managedWorktree(meta.id, meta.worktreePath);
+    if (!managed.stat || (identity && !sameFileIdentity(identity, managed.stat))) throw errorWith('Session worktree ownership cannot be confirmed', 'ESESSION_PATH', 409);
+    const repo = await resolveRepository(meta.repoRoot);
+    const records = (await git(repo, ['worktree', 'list', '--porcelain', '-z'])).stdout.split('\0\0');
+    const registered = records.some((record) => {
+      const fields = record.split('\0');
+      const worktree = fields.find((field) => field.startsWith('worktree '))?.slice(9);
+      return worktree && path.relative(managed.path, worktree) === '' && fields.includes(`branch refs/heads/${meta.branch}`);
+    });
+    const marker = await fs.lstat(path.join(managed.path, '.git'));
+    if (!registered || !marker.isFile() || marker.isSymbolicLink()) throw errorWith('Target is not the registered session worktree', 'ESESSION_PATH', 409);
+    const worktreeCommon = (await git(managed.path, ['rev-parse', '--git-common-dir'])).stdout.trim();
+    const repoCommon = (await git(repo, ['rev-parse', '--git-common-dir'])).stdout.trim();
+    const currentBranch = (await git(managed.path, ['branch', '--show-current'])).stdout.trim();
+    if (currentBranch !== meta.branch || path.relative(await canonicalRealpath(path.resolve(repo, repoCommon)), await canonicalRealpath(path.resolve(managed.path, worktreeCommon))) !== '') {
+      throw errorWith('Session worktree repository or branch changed', 'ESESSION_PATH', 409);
+    }
+    return managed;
   }
   function sessionPath(id) { return path.join(sessionRoot, `${safeId(id, 'sessionId')}.json`); }
   async function writeMeta(meta) {
@@ -116,7 +178,11 @@ function createDevelopmentSessionService({
     return meta;
   }
   async function readMeta(id) {
-    try { return JSON.parse(await fs.readFile(sessionPath(id), 'utf8')); }
+    try {
+      const meta = JSON.parse(await fs.readFile(sessionPath(id), 'utf8'));
+      if (meta.id !== safeId(id, 'sessionId')) throw errorWith('Session metadata ID mismatch', 'ESESSION_PATH', 409);
+      return meta;
+    }
     catch (error) { if (error?.code === 'ENOENT') throw errorWith(`Session '${id}' not found`, 'ENOENT', 404); throw error; }
   }
   const projectLocks = createProjectLockManager({ locksDir, lockTimeoutMs, lockLeaseMs: projectLockLeaseMs });
@@ -156,37 +222,59 @@ function createDevelopmentSessionService({
     }
   }
   async function create(input = {}) {
+    const id = input.sessionId === undefined ? `ses-${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}` : safeId(input.sessionId, 'sessionId');
     await init();
     const projectRoot = String(input.projectRoot || '').trim();
     if (!projectRoot) throw errorWith('projectRoot is required', 'EINVAL', 400);
     const repoRoot = await resolveRepository(projectRoot);
     return withProjectLock(repoRoot, async () => {
-      const id = input.sessionId ? safeId(input.sessionId, 'sessionId') : `ses-${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`;
       try { await fs.access(sessionPath(id)); throw errorWith(`Session '${id}' already exists`, 'ESESSION_EXISTS', 409); } catch (error) { if (error?.code !== 'ENOENT') throw error; }
       const baseRef = String(input.baseRef || input.targetBranch || 'HEAD').trim();
       const baseCommit = (await git(repoRoot, ['rev-parse', '--verify', `${baseRef}^{commit}`])).stdout.trim();
       const branch = String(input.branchName || `agentport/${slug(input.projectName || path.basename(repoRoot), 'project')}/${slug(input.agentId || 'agent', 'agent')}-${id.slice(-8)}`).trim();
       if (!/^[A-Za-z0-9._/-]{1,180}$/.test(branch) || branch.includes('..') || branch.endsWith('/') || branch.startsWith('/')) throw errorWith('Invalid branchName', 'EINVAL', 400);
+      const { path: creationPath } = await managedWorktree(id, undefined, true);
       const worktreePath = path.join(worktreeRoot, id);
-      await fs.rm(worktreePath, { recursive: true, force: true });
-      await git(repoRoot, ['worktree', 'add', '--no-track', '-b', branch, worktreePath, baseCommit]);
-      const rules = normalizedRules(input.agentRules);
-      const meta = {
-        version: 1, id,
-        projectName: String(input.projectName || path.basename(repoRoot)),
-        projectRoot: repoRoot, repoRoot, worktreePath,
-        baseRef, targetBranch: String(input.targetBranch || baseRef), baseCommit, branch,
-        agentId: String(input.agentId || 'agent'), clientId: input.clientId || null,
-        task: String(input.task || ''), status: 'active',
-        commands: normalizedCommands(input.commands), agentRules: rules,
-        rulesFound: await rulePaths(worktreePath, rules), jobs: [],
-        createdAt: nowIso(), updatedAt: nowIso(), heartbeatAt: nowIso(),
-        leaseExpiresAt: new Date(Date.now() + Math.max(Number(input.leaseMs || defaultLeaseMs), 60_000)).toISOString(),
-      };
-      try { await writeMeta(meta); return await status(id); }
-      catch (error) {
-        try { await git(repoRoot, ['worktree', 'remove', '--force', worktreePath]); } catch {}
-        try { await git(repoRoot, ['branch', '-D', branch]); } catch {}
+      // Reserve an absent target atomically. Git accepts an existing empty directory.
+      try { await fs.mkdir(creationPath, { mode: 0o700 }); }
+      catch (error) { if (error.code === 'EEXIST') throw errorWith(`Worktree target for '${id}' already exists`, 'ESESSION_EXISTS', 409); throw error; }
+      const reservation = await managedWorktree(id, worktreePath);
+      let added = false;
+      try {
+        await git(repoRoot, ['worktree', 'add', '--no-track', '-b', branch, creationPath, baseCommit]);
+        added = true;
+        const rules = normalizedRules(input.agentRules);
+        const meta = {
+          version: 1, id,
+          projectName: String(input.projectName || path.basename(repoRoot)),
+          projectRoot: repoRoot, repoRoot, worktreePath,
+          baseRef, targetBranch: String(input.targetBranch || baseRef), baseCommit, branch,
+          agentId: String(input.agentId || 'agent'), clientId: input.clientId || null,
+          task: String(input.task || ''), status: 'active',
+          commands: normalizedCommands(input.commands), agentRules: rules,
+          rulesFound: await rulePaths(worktreePath, rules), jobs: [],
+          createdAt: nowIso(), updatedAt: nowIso(), heartbeatAt: nowIso(),
+          leaseExpiresAt: new Date(Date.now() + Math.max(Number(input.leaseMs || defaultLeaseMs), 60_000)).toISOString(),
+        };
+        await ownedWorktree(meta, reservation.stat);
+        await writeMeta(meta); return await status(id);
+      } catch (error) {
+        try {
+          const current = await managedWorktree(id, worktreePath);
+          if (!sameFileIdentity(reservation.stat, current.stat)) throw errorWith('Created target was replaced; preserving it', 'ESESSION_PATH', 409);
+          if (added) {
+            await ownedWorktree({ id, worktreePath, repoRoot, branch }, reservation.stat);
+            const branchHead = (await git(repoRoot, ['rev-parse', '--verify', `refs/heads/${branch}`])).stdout.trim();
+            if (branchHead !== baseCommit) throw errorWith('Created branch changed; preserving worktree', 'ESESSION_PATH', 409);
+            await git(repoRoot, ['worktree', 'remove', '--force', current.path]);
+            await git(repoRoot, ['update-ref', '-d', `refs/heads/${branch}`, baseCommit]);
+          } else {
+            // A failed add may have partially succeeded. Only an empty reservation is removable.
+            await fs.rmdir(current.path);
+          }
+        } catch (cleanupError) {
+          error.details = { ...(error.details || {}), cleanupError: cleanupError.message, worktreePath };
+        }
         throw error;
       }
     });
@@ -249,23 +337,34 @@ function createDevelopmentSessionService({
     meta.lastCommit = (await git(meta.worktreePath, ['rev-parse', 'HEAD'])).stdout.trim(); meta.lastCommitAt = nowIso();
     await writeMeta(meta); return { sessionId: id, committed: true, commit: meta.lastCommit, branch: meta.branch };
   }
-  async function rollback(id, input = {}) {
-    const meta = await readMeta(id);
+  async function rollback(id, input = {}, jobStates) {
+    const initial = await readMeta(id);
     if (String(input.confirm || '') !== id) throw errorWith(`rollback requires confirm='${id}'`, 'ECONFIRM', 409);
-    const mode = String(input.mode || 'working-tree');
-    const target = mode === 'base' ? meta.baseCommit : 'HEAD';
-    await git(meta.worktreePath, ['reset', '--hard', target]);
-    await git(meta.worktreePath, ['clean', '-fd']);
-    meta.lastRollbackAt = nowIso(); meta.lastRollbackMode = mode; await writeMeta(meta);
-    return { sessionId: id, rolledBack: true, mode, target, git: await gitState(meta) };
+    assertSessionJobsIdle(initial, jobStates);
+    return withProjectLock(initial.repoRoot, async () => {
+      const meta = await readMeta(id);
+      if (meta.repoRoot !== initial.repoRoot) throw errorWith('Session project changed while waiting for its lock', 'ESESSION_PATH', 409);
+      assertSessionJobsIdle(meta, jobStates);
+      const owned = await ownedWorktree(meta);
+      const mode = String(input.mode || 'working-tree');
+      const target = mode === 'base' ? meta.baseCommit : 'HEAD';
+      await git(owned.path, ['reset', '--hard', target]);
+      await git(owned.path, ['clean', '-fd']);
+      meta.lastRollbackAt = nowIso(); meta.lastRollbackMode = mode; await writeMeta(meta);
+      return { sessionId: id, rolledBack: true, mode, target, git: await gitState(meta) };
+    });
   }
-  async function merge(id, input = {}) {
+  async function merge(id, input = {}, jobStates) {
     const meta = await readMeta(id);
     if (String(input.confirm || '') !== id) throw errorWith(`merge requires confirm='${id}'`, 'ECONFIRM', 409);
-    const sessionDirty = (await git(meta.worktreePath, ['status', '--porcelain'])).stdout.trim();
+    assertSessionJobsIdle(meta, jobStates);
+    const owned = await ownedWorktree(meta);
+    const sessionDirty = (await git(owned.path, ['status', '--porcelain'])).stdout.trim();
     if (sessionDirty) throw errorWith('Session worktree has uncommitted changes', 'ESESSION_DIRTY', 409);
     const targetBranch = String(input.targetBranch || meta.targetBranch || meta.baseRef).trim();
     return withProjectLock(meta.repoRoot, async () => {
+      assertSessionJobsIdle(await readMeta(id), jobStates);
+      await ownedWorktree(meta);
       const mainDirty = (await git(meta.repoRoot, ['status', '--porcelain'])).stdout.trim();
       if (mainDirty) throw errorWith('Primary project worktree is dirty', 'EPROJECT_DIRTY', 409);
       const current = (await git(meta.repoRoot, ['branch', '--show-current'])).stdout.trim();
@@ -280,13 +379,15 @@ function createDevelopmentSessionService({
       await writeMeta(meta); return { sessionId: id, merged: true, targetBranch, commit: meta.mergeCommit, strategy };
     });
   }
-  async function cleanup(id, input = {}) {
+  async function cleanup(id, input = {}, jobStates) {
     const meta = await readMeta(id); const force = Boolean(input.force); const deleteBranch = Boolean(input.deleteBranch);
     if ((force || deleteBranch) && String(input.confirm || '') !== id) throw errorWith(`cleanup requires confirm='${id}' when force or deleteBranch is used`, 'ECONFIRM', 409);
+    assertSessionJobsIdle(meta, jobStates);
     return withProjectLock(meta.repoRoot, async () => {
-      const args = ['worktree', 'remove']; if (force) args.push('--force'); args.push(meta.worktreePath);
-      try { await git(meta.repoRoot, args); }
-      catch (error) { if (!force) throw error; await fs.rm(meta.worktreePath, { recursive: true, force: true }); }
+      assertSessionJobsIdle(await readMeta(id), jobStates);
+      const owned = await ownedWorktree(meta);
+      const args = ['worktree', 'remove']; if (force) args.push('--force'); args.push(owned.path);
+      await git(meta.repoRoot, args);
       try { await git(meta.repoRoot, ['worktree', 'prune']); } catch {}
       let branchDeleted = false;
       if (deleteBranch) {
@@ -304,4 +405,4 @@ function createDevelopmentSessionService({
   return Object.freeze({ init, create, status, list, heartbeat, attachJob, diff, commit, rollback, merge, cleanup, stats });
 }
 
-module.exports = { createDevelopmentSessionService };
+module.exports = { assertSessionJobsIdle, createDevelopmentSessionService };

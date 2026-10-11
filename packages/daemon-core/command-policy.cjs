@@ -50,13 +50,17 @@ function createCommandPolicy({
     [...stringSet(allowedInterpreters, DEFAULT_INTERPRETERS)].map(normalizeBinaryName),
   );
 
+  function assertExecutionEnabled() {
+    if (!execEnabled) {
+      throw policyError("Command execution is disabled. Set ALLOW_BASH_EXEC=true to enable.");
+    }
+  }
+
   function validateCommand(command) {
     if (typeof command !== "string" || !command.trim()) {
       throw policyError("command is required", 400, "EINVAL");
     }
-    if (!execEnabled) {
-      throw policyError("Command execution is disabled. Set ALLOW_BASH_EXEC=true to enable.");
-    }
+    assertExecutionEnabled();
     if (commandAllowlist.size > 0) {
       if (SHELL_METACHARS_RE.test(command)) {
         throw policyError(
@@ -72,6 +76,7 @@ function createCommandPolicy({
   }
 
   function validateInterpreter(interpreter) {
+    assertExecutionEnabled();
     const raw = String(interpreter || "bash").trim();
     const base = normalizeBinaryName(raw);
     if (!interpreterAllowlist.has(base)) {
@@ -88,6 +93,7 @@ function createCommandPolicy({
     allowExec: execEnabled,
     allowedCommands: Object.freeze([...commandAllowlist]),
     allowedInterpreters: Object.freeze([...interpreterAllowlist]),
+    assertExecutionEnabled,
     validateCommand,
     validateInterpreter,
   });

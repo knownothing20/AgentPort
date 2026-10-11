@@ -7,6 +7,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { createClientRuntime } from "../packages/client-core/client-runtime.js";
 import { createDevelopmentSessionClient } from "../packages/client-core/development-sessions.js";
 import { redactSensitive } from "../packages/client-core/redaction.js";
+import { executionExitCode } from "../packages/shared/execution-result.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packageInfo = JSON.parse((await fs.readFile(path.join(ROOT, "package.json"), "utf8")).replace(/^\uFEFF/, ""));
@@ -18,7 +19,7 @@ const targetProperties = {
 };
 const idempotencyProperties = { idempotencyKey: { type: "string", description: "Stable key for safe retry of a long-running task." } };
 function objectSchema(properties = {}, required = []) { return { type: "object", properties: { ...targetProperties, ...properties }, required }; }
-function textResult(value, isError = false) { const safe = redactSensitive(value); const text = typeof safe === "string" ? safe : JSON.stringify(safe, null, 2); return { content: [{ type: "text", text }], ...(isError ? { isError: true } : {}) }; }
+function textResult(value, isError = false) { const safe = redactSensitive(value); const text = typeof safe === "string" ? safe : JSON.stringify(safe, null, 2); return { content: [{ type: "text", text }], ...(isError || executionExitCode(value) !== 0 ? { isError: true } : {}) }; }
 function tools() { return [
   { name: "remote_connect", description: "Select a logical server or one of its LAN, virtual-LAN, or SSH endpoints for this MCP client session.", inputSchema: objectSchema({ connection: { type: "string", description: "Logical server or endpoint id." } }) },
   { name: "remote_health", description: "Probe every endpoint of a logical server and report identity, latency, and capabilities.", inputSchema: objectSchema({ force: { type: "boolean" } }) },

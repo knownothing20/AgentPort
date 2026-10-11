@@ -169,6 +169,12 @@ is invalidated and a replacement may be loaded; permission errors never trigger
 execution through another route. Execution failures and failed batch items use
 MCP `isError`, while a queued Job remains a successful submission only.
 
+After `EOUTCOME_UNKNOWN`, retain and reconcile the reported script path or Job
+handle; do not replay the operation or switch endpoints. Follow/wait must check
+the actual terminal status and exit code. Empty output with code 0 is successful.
+SSH rejects unsupported ETag, create-only, mode, line/byte and scan-size guards
+before file access; do not remove those guards to make a request succeed.
+
 Local logs redact credential fields and Bearer/assignment values before data
 truncation. Calls include a lightweight terminal event and an origin-call ID
 shared with the broker. `MCP_REMOTE_LOG_TOOL_SUCCESS=1` opts into detailed

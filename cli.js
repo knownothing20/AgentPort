@@ -11,6 +11,9 @@ import { scheduleForcedExit, startParentWatchdog } from "./cli-lifecycle.js";
 import { parseSshDoctorOutput } from "./doctor-utils.js";
 import { SSHClient } from "./ssh-client.js";
 import { validateDaemonSearch } from "./packages/client-core/search-validation.js";
+import { definitelyNotSent, failureDetails, outcomeUnknown, replaySafePost, replaySafeTool } from "./packages/client-core/mcp-recovery.js";
+import { assertGrepSuccess, assertSshProtection, sshTransportInternals } from "./packages/client-transport/ssh.js";
+import { executionExitCode as operationExitCode } from "./packages/shared/execution-result.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -22,6 +25,7 @@ const TIMEOUT_MS = Number(process.env.MCP_REMOTE_TIMEOUT_MS || process.env.NIUMA
 const SAFE_JOB_TIMEOUT_MS = Number(process.env.AGENTPORT_SAFE_JOB_TIMEOUT_MS || 1800000);
 const HTTP_AGENT = new http.Agent({ keepAlive: false });
 const HTTPS_AGENT = new https.Agent({ keepAlive: false });
+const HTTP_OPERATION_STATE = new WeakMap();
 const DEFAULT_TOKEN_ENV_PATH = "~/.agentport/daemon/.env";
 const SESSION_ID = sanitizeStateSegment(process.env.AGENTPORT_SESSION_ID || process.env.CODEX_SESSION_ID || "");
 const stopParentWatchdog = startParentWatchdog();
@@ -35,9 +39,12 @@ function printJson(value) {
 }
 
 function fail(message, code = 1, args = null) {
+  const error = message && typeof message === "object" ? message : null;
+  const text = String(error?.message || message || "Unknown error");
   if (args?.json) {
-    const text = String(message || "Unknown error");
-    const hint = args._?.[0] === "diagnostics"
+    const hint = error?.code === "EOUTCOME_UNKNOWN" || [401, 403].includes(error?.statusCode)
+      ? failureDetails(error).hint
+      : args._?.[0] === "diagnostics"
       ? "Check the local log directory and diagnostics options. This command does not require a remote connection."
       : /Transport closed|ECONNRESET|EPIPE|ETIMEDOUT|ECONNABORTED/i.test(text)
       ? "Native MCP or daemon transport is unstable. Retry with --route ssh or switch to an SSH connection."
@@ -46,48 +53,19 @@ function fail(message, code = 1, args = null) {
       ok: false,
       error: text,
       fallback: hint,
+      ...(error?.code ? { code: error.code } : {}),
+      ...(error?.statusCode ? { statusCode: error.statusCode } : {}),
+      ...(error?.outcome ? { outcome: error.outcome, retryable: false } : {}),
+      ...(error?.recovery ? { recovery: error.recovery } : {}),
+      ...(error?.result ? { result: error.result } : {}),
     });
     process.exitCode = code;
     return;
   }
-  process.stderr.write(`${message}\n`);
+  process.stderr.write(`${text}\n`);
+  const retainedScript = error?.recovery?.remoteWrapper || error?.recovery?.remoteFile;
+  if (retainedScript) process.stderr.write(`Retained script: ${retainedScript}\n`);
   process.exitCode = code;
-}
-
-function operationExitCode(value) {
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const code = operationExitCode(item);
-      if (code !== 0) return code;
-    }
-    return 0;
-  }
-  if (!value || typeof value !== "object") return 0;
-  if (Array.isArray(value.results)) {
-    const code = operationExitCode(value.results);
-    if (code !== 0) return code;
-  }
-  if (value.result && typeof value.result === "object") {
-    const code = operationExitCode(value.result);
-    if (code !== 0) return code;
-  }
-  if (value.job && typeof value.job === "object") {
-    const code = operationExitCode(value.job);
-    if (code !== 0) return code;
-  }
-  const commandCode = Number(value.code);
-  if (Number.isInteger(commandCode) && commandCode !== 0) {
-    return commandCode > 0 && commandCode <= 255 ? commandCode : 1;
-  }
-  const jobCode = Number(value.exitCode);
-  if (Number.isInteger(jobCode) && jobCode !== 0) {
-    return jobCode > 0 && jobCode <= 255 ? jobCode : 1;
-  }
-  const status = Number(value.status);
-  if (Number.isInteger(status) && status >= 400) return 1;
-  if (["error", "failed", "timeout", "cancelled", "canceled", "orphaned"].includes(value.status)) return 1;
-  if (value.ok === false || value.success === false) return 1;
-  return 0;
 }
 
 function applyOperationExitCode(value) {
@@ -459,6 +437,7 @@ async function writeRemoteContent(ctx, targetPath, content) {
     return { mode: "ssh" };
   }
   const data = await postWithFallback(ctx.http, ["/api/fs/write", "/write"], { path: targetPath, content });
+  assertOperationSuccess(data);
   return { mode: "daemon", etag: data.etag };
 }
 
@@ -1124,6 +1103,31 @@ function positiveInt(value, fallback, min = 1, max = 5000) {
   return Math.min(Math.max(parsed, min), max);
 }
 
+function sshProtectionArgs(args = {}) {
+  const createOnly = args.createOnly ?? args["create-only"];
+  if (typeof createOnly === "string" && !/^(true|false|1|0)$/i.test(createOnly)) {
+    throw Object.assign(new Error("createOnly must be true or false"), { code: "EINVAL" });
+  }
+  return {
+    expectedEtag: args.expectedEtag ?? args["expected-etag"],
+    createOnly: createOnly === undefined ? undefined : createOnly === true || /^(true|1)$/i.test(String(createOnly)),
+    mode: args.mode,
+    startLine: args.startLine ?? args["start-line"],
+    endLine: args.endLine ?? args["end-line"],
+    maxBytes: args.maxBytes ?? args["max-bytes"],
+    maxScanBytes: args.maxScanBytes ?? args["max-scan-bytes"],
+    maxFileBytes: args.maxFileBytes ?? args["max-file-bytes"],
+  };
+}
+
+function assertOperationSuccess(result) {
+  if (operationExitCode(result) === 0) return;
+  const error = new Error(result.error || result.message || "Remote operation failed");
+  error.code = typeof result.code === "string" ? result.code : "EREMOTE_RESULT";
+  error.result = result;
+  throw error;
+}
+
 function buildSshGrepCommand(args) {
   const pattern = args.pattern || args._[1];
   const include = listArg(args.include, ["*"]);
@@ -1131,14 +1135,12 @@ function buildSshGrepCommand(args) {
     "node_modules", ".git", "dist", "build", ".next", ".nuxt", ".cache", ".venv", "venv", "__pycache__",
   ]);
   const maxResults = positiveInt(args.maxResults || args["max-results"], 200, 1, 5000);
-  const flags = ["-RIn", "--binary-files=without-match"];
-  if (!args.caseSensitive && !args["case-sensitive"]) flags.push("-i");
-  if (!args.regex) flags.push("-F");
-  for (const item of include) flags.push(`--include=${JSON.stringify(item)}`);
-  for (const dir of excludeDirs) flags.push(`--exclude-dir=${JSON.stringify(dir)}`);
-  const command = `grep ${flags.join(" ")} -- ${JSON.stringify(pattern)} . 2>/dev/null | head -n ${maxResults} || true`;
+  const command = sshTransportInternals.grepCommand({
+    pattern, include, excludeDirs, maxResults, regex: args.regex,
+    caseSensitive: args.caseSensitive || args["case-sensitive"],
+  });
   return {
-    command: args.cwd ? `cd ${JSON.stringify(args.cwd)} && ${command}` : command,
+    command: args.cwd ? `cd -- ${shellSingleQuote(args.cwd)} && ${command}` : command,
     maxResults,
   };
 }
@@ -1174,14 +1176,22 @@ function daemonClient(conn) {
 }
 
 async function postWithFallback(client, paths, payload, { retryNetwork = true } = {}) {
+  const readOnly = replaySafePost(paths)
+    || (paths.every((route) => route === "/api/batch") && replaySafeTool("remote_batch", payload));
   let lastError;
   for (const route of paths) {
     try {
+      if (!readOnly && HTTP_OPERATION_STATE.has(client)) HTTP_OPERATION_STATE.get(client).mutationAttempted = true;
       const response = await client.post(route, payload);
       return response.data;
     } catch (error) {
       lastError = error;
-      if (retryNetwork && !error?.response && ["ECONNRESET", "EPIPE", "ETIMEDOUT", "ECONNABORTED"].includes(error?.code)) {
+      const data = error?.response?.data;
+      const explicitFailure = (data?.success === false || data?.ok === false) && typeof data?.code === "string";
+      const ambiguous = (!error?.response && !definitelyNotSent(error))
+        || (!explicitFailure && [408, 502, 503, 504].includes(error?.response?.status));
+      if (!readOnly && ambiguous) throw outcomeUnknown(route, error);
+      if (readOnly && retryNetwork && !error?.response && ["ECONNRESET", "EPIPE", "ETIMEDOUT", "ECONNABORTED"].includes(error?.code)) {
         await new Promise((resolve) => setTimeout(resolve, 150));
         try {
           const response = await client.post(route, payload);
@@ -1190,12 +1200,20 @@ async function postWithFallback(client, paths, payload, { retryNetwork = true } 
           lastError = retryError;
         }
       }
-      if (![404, 405].includes(error?.response?.status)) break;
+      if (![404, 405].includes(error?.response?.status) || error?.response?.data?.code) break;
     }
   }
-  const status = lastError?.response?.status;
-  const remoteMessage = lastError?.response?.data?.error || lastError?.response?.data?.message;
-  throw new Error(remoteMessage || lastError?.message || `Request failed${status ? ` (${status})` : ""}`);
+  throw requestFailure(lastError);
+}
+
+function requestFailure(cause) {
+  const status = cause?.response?.status;
+  const data = cause?.response?.data;
+  const error = new Error(data?.error || data?.message || cause?.message || `Request failed${status ? ` (${status})` : ""}`, { cause });
+  error.code = data?.code || cause?.code;
+  error.statusCode = status;
+  error.response = cause?.response;
+  return error;
 }
 
 function pathWithQuery(route, query = {}) {
@@ -1225,12 +1243,10 @@ async function getWithFallback(client, paths, query = {}) {
           lastError = retryError;
         }
       }
-      if (![404, 405].includes(error?.response?.status)) break;
+      if (![404, 405].includes(error?.response?.status) || error?.response?.data?.code) break;
     }
   }
-  const status = lastError?.response?.status;
-  const remoteMessage = lastError?.response?.data?.error || lastError?.response?.data?.message;
-  throw new Error(remoteMessage || lastError?.message || `Request failed${status ? ` (${status})` : ""}`);
+  throw requestFailure(lastError);
 }
 
 async function withConnection(options, fn) {
@@ -1245,11 +1261,19 @@ async function withConnection(options, fn) {
     }
   }
   const daemonCtx = { type: "daemon", conn, http: daemonClient(conn), target: connectionTarget(conn, "daemon") };
+  const operationState = { mutationAttempted: false };
+  HTTP_OPERATION_STATE.set(daemonCtx.http, operationState);
   try {
     return await fn(daemonCtx);
   } catch (error) {
     const route = String(options.route || "auto").toLowerCase();
-    const canFallback = route !== "daemon" && isTransportError(error);
+    if (operationState.mutationAttempted && error?.code !== "EOUTCOME_UNKNOWN"
+      && !error?.response && isTransportError(error) && !definitelyNotSent(error)) {
+      throw outcomeUnknown("Operation following a mutation", error);
+    }
+    const daemonRegex = Boolean(options.regex) || options._operations?.some((op) => op.type === "grep" && op.regex);
+    const canFallback = route !== "daemon" && !operationState.mutationAttempted
+      && !daemonRegex && !error?.response && isTransportError(error);
     if (!canFallback) throw error;
 
     const sshConn = fallbackSshConnection(conn, options);
@@ -1501,18 +1525,24 @@ function fallbackSshConnection(primaryConn, options = {}) {
   const baseName = primaryName.endsWith("-agentport-daemon")
     ? primaryName.slice(0, -"-agentport-daemon".length)
     : primaryName;
+  let host;
+  try { host = new URL(primaryConn.url).hostname.toLowerCase().replace(/^\[|\]$/g, ""); }
+  catch { return null; }
+  const sameTarget = (conn) => (conn.type || "daemon") === "ssh"
+    && String(conn.host || "").toLowerCase().replace(/^\[|\]$/g, "") === host;
 
   if (explicit && byName.has(explicit)) {
     const selected = byName.get(explicit);
-    if ((selected.type || "daemon") === "ssh") return selected;
+    if (sameTarget(selected)) return selected;
   }
 
   if (baseName && byName.has(baseName)) {
     const paired = byName.get(baseName);
-    if ((paired.type || "daemon") === "ssh") return paired;
+    if (sameTarget(paired)) return paired;
   }
 
-  return connections.find((conn) => (conn.type || "daemon") === "ssh") || null;
+  const candidates = connections.filter(sameTarget);
+  return candidates.length === 1 ? candidates[0] : null;
 }
 
 async function commandRead(args) {
@@ -1522,6 +1552,7 @@ async function commandRead(args) {
   await withConnection(args, async (ctx) => {
     const { type, http, ssh } = ctx;
     if (type === "ssh") {
+      assertSshProtection("remote_read", sshProtectionArgs(args));
       const content = await ssh.readFile(targetPath);
       if (args.json) {
         printJson(withTarget({ ok: true, mode: "ssh", path: targetPath, content }, ctx));
@@ -1530,7 +1561,10 @@ async function commandRead(args) {
       print(content);
       return;
     }
-    const data = await postWithFallback(http, ["/api/fs/read", "/read"], { path: targetPath });
+    const data = await postWithFallback(http, ["/api/fs/read", "/read"], {
+      path: targetPath, ...sshProtectionArgs(args),
+    });
+    assertOperationSuccess(data);
     if (args.json) {
       const result = { ok: true, mode: "daemon", path: targetPath, etag: data.etag, content: data.content ?? "" };
       for (const key of ["accessScope", "readOnly", "writeEtag"]) {
@@ -1570,6 +1604,7 @@ async function commandWrite(args) {
   await withConnection({ ...args, requireExplicitConnection: true }, async (ctx) => {
     const { type, http, ssh } = ctx;
     if (type === "ssh") {
+      assertSshProtection("remote_write", sshProtectionArgs(args));
       await ssh.writeFile(targetPath, content);
       printJson(withTarget({ ok: true, path: targetPath, mode: "ssh" }, ctx));
       return;
@@ -1577,8 +1612,9 @@ async function commandWrite(args) {
     const data = await postWithFallback(http, ["/api/fs/write", "/write"], {
       path: targetPath,
       content,
-      expectedEtag: typeof args.expectedEtag === "string" ? args.expectedEtag : undefined,
+      ...sshProtectionArgs(args),
     });
+    assertOperationSuccess(data);
     printJson(withTarget({ ok: true, path: targetPath, mode: "daemon", etag: data.etag }, ctx));
   });
 }
@@ -1614,14 +1650,16 @@ async function commandSafeWrite(args) {
     const { type, http, ssh } = ctx;
     let writeResult = {};
     if (type === "ssh") {
+      assertSshProtection("remote_write", sshProtectionArgs(args));
       await ssh.writeFile(targetPath, content);
       writeResult = { mode: "ssh" };
     } else {
       const data = await postWithFallback(http, ["/api/fs/write", "/write"], {
         path: targetPath,
         content,
-        expectedEtag: typeof args.expectedEtag === "string" ? args.expectedEtag : undefined,
+        ...sshProtectionArgs(args),
       });
+      assertOperationSuccess(data);
       writeResult = { mode: "daemon", etag: data.etag };
     }
 
@@ -1675,9 +1713,11 @@ async function commandGrep(args) {
   if (!pattern) throw new Error("Usage: node cli.js grep <pattern> [--cwd path] [--include \"*.js,*.ts\"] [--regex] [--case-sensitive]");
   await withConnection(args, async ({ type, http, ssh }) => {
     if (type === "ssh") {
+      assertSshProtection("remote_grep", sshProtectionArgs(args));
       const safeCwd = ssh.resolveWorkspaceCwd(args.cwd);
       const { command, maxResults } = buildSshGrepCommand({ ...args, pattern, cwd: safeCwd || args.cwd });
       const result = await ssh.exec(command);
+      assertGrepSuccess(result);
       const matches = parseGrepOutput(result.stdout);
       printJson({
         success: true,
@@ -1721,7 +1761,7 @@ async function commandBash(args) {
     }
     if (data.stdout) print(data.stdout.replace(/\s+$/, ""));
     if (data.stderr) process.stderr.write(`${data.stderr.replace(/\s+$/, "")}\n`);
-    if (typeof data.code === "number" && data.code !== 0) process.exitCode = data.code;
+    applyOperationExitCode(data);
   });
 }
 
@@ -2274,12 +2314,23 @@ async function commandScript(args) {
     if (type === "ssh") {
       const remoteFile = remoteScriptPath(ssh, args, interpreter);
       let result;
+      let executionStarted = false;
       await ssh.mkdir(remoteScriptBaseDir(ssh, args));
       try {
         await ssh.writeFile(remoteFile, content);
-        result = await ssh.exec(`${interpreter} ${JSON.stringify(remoteFile)}`, { cwd: args.cwd });
+        executionStarted = true;
+        result = await ssh.exec(`${interpreter} ${shellSingleQuote(remoteFile)}`, { cwd: args.cwd });
+      } catch (cause) {
+        if (executionStarted && !result && !["EWORKSPACE", "EINVAL", "EUNSUPPORTED"].includes(cause.code)) {
+          const error = cause.code === "EOUTCOME_UNKNOWN" ? cause : outcomeUnknown("SSH script", cause);
+          error.recovery = { remoteFile, retained: true };
+          throw error;
+        }
+        throw cause;
       } finally {
-        try { await ssh.rm(remoteFile); } catch {}
+        if (!executionStarted || result) {
+          try { await ssh.rm(remoteFile); } catch {}
+        }
       }
       printJson(withTarget(result, ctx));
       applyOperationExitCode(result);
@@ -2336,16 +2387,25 @@ async function commandSafeScript(args) {
       let cleanup = { skipped: keepRemote };
       let uploadVerification;
       let result;
+      let executionStarted = false;
       await ssh.mkdir(remoteScriptBaseDir(ssh, args));
       try {
         await ssh.writeFile(remoteFile, content);
         uploadVerification = await verifyRemoteContent(ctx, remoteFile, expectedSha256);
-        result = await ssh.exec(`${interpreter} ${JSON.stringify(remoteFile)}`, {
+        executionStarted = true;
+        result = await ssh.exec(`${interpreter} ${shellSingleQuote(remoteFile)}`, {
           cwd: args.cwd,
           preserveOutput: Boolean(args.plain),
         });
+      } catch (cause) {
+        if (executionStarted && !result && !["EWORKSPACE", "EINVAL", "EUNSUPPORTED"].includes(cause.code)) {
+          const error = cause.code === "EOUTCOME_UNKNOWN" ? cause : outcomeUnknown("SSH safe-script", cause);
+          error.recovery = { remoteFile, sha256: expectedSha256, retained: true };
+          throw error;
+        }
+        throw cause;
       } finally {
-        if (!keepRemote) {
+        if (!keepRemote && (!executionStarted || result)) {
           try {
             await ssh.rm(remoteFile);
             cleanup = { ok: true };
@@ -2407,11 +2467,13 @@ async function commandSafeJob(args) {
   await withConnection({ ...args, requireExplicitConnection: true }, async (ctx) => {
     const remoteWrapper = remoteJobWrapperPath(ctx, args);
     let uploaded = false;
+    let submissionAttempted = false;
     try {
       const writeResult = await writeRemoteContent(ctx, remoteWrapper, wrapper);
       uploaded = true;
       const uploadVerification = await verifyRemoteContent(ctx, remoteWrapper, payload.wrapperSha256);
       const submittedCommand = `bash ${shellSingleQuote(remoteWrapper)}`;
+      submissionAttempted = true;
       const job = await startJob(ctx, submittedCommand, {
         ...args,
         defaultJobTimeoutMs: SAFE_JOB_TIMEOUT_MS,
@@ -2429,8 +2491,15 @@ async function commandSafeJob(args) {
       });
       applyOperationExitCode(job);
     } catch (error) {
-      if (uploaded) {
+      const rejected = error?.statusCode >= 400 && error?.statusCode < 500 && error.statusCode !== 408;
+      const retain = error?.code === "EOUTCOME_UNKNOWN"
+        || (submissionAttempted && !definitelyNotSent(error) && !rejected);
+      if (uploaded && !retain) {
         try { await cleanupRemoteContent(ctx, remoteWrapper, args.cwd); } catch {}
+      }
+      if (retain) {
+        error.recovery = { remoteWrapper, sha256: payload.wrapperSha256, retained: true };
+        error.retryable = false;
       }
       throw error;
     }
@@ -2480,7 +2549,7 @@ async function commandSafeApply(args) {
       await ssh.writeFile(remotePatch, content);
       const uploadVerification = await verifyRemoteContent(ctx, remotePatch, expectedSha256);
       const checkResult = await ssh.exec(gitApplyCommand(remotePatch, args, { check: true }), { cwd: args.cwd });
-      if (checkResult.code !== 0) {
+      if (operationExitCode(checkResult) !== 0) {
         if (!cleanup.skipped) {
           try {
             await ssh.rm(remotePatch);
@@ -2516,7 +2585,7 @@ async function commandSafeApply(args) {
           cleanup = { ok: false, error: error.message };
         }
       }
-      const applied = Boolean(!checkOnly && applyResult?.code === 0);
+      const applied = Boolean(!checkOnly && applyResult?.code === 0 && operationExitCode(applyResult) === 0);
       printJson(withTarget({
         ...payload,
         ok: checkOnly || applied,
@@ -2548,7 +2617,7 @@ async function commandSafeApply(args) {
       "",
     ].join("\n");
     const data = await postWithFallback(http, ["/api/exec/script"], { content: script, interpreter: "bash", cwd: args.cwd });
-    const applied = Boolean(checkOnly ? data?.code === 0 || data?.ok : data?.code === 0 || data?.ok);
+    const applied = Boolean(operationExitCode(data) === 0 && (data?.code === 0 || data?.ok === true || data?.success === true));
     printJson(withTarget({
       ...payload,
       ok: applied,
@@ -2574,26 +2643,41 @@ async function commandBatch(args) {
   const payload = readJson(file, null);
   const operations = Array.isArray(payload) ? payload : payload.operations;
   if (!Array.isArray(operations)) throw new Error("Batch file must be an array or { operations: [...] }");
-  await withConnection({ ...args, requireExplicitConnection: batchHasRiskyOperations(operations) }, async (ctx) => {
+  await withConnection({ ...args, _operations: operations, requireExplicitConnection: batchHasRiskyOperations(operations) }, async (ctx) => {
     const { type, http, ssh } = ctx;
     if (type === "ssh") {
+      assertSshProtection("remote_batch", { operations });
       const results = [];
       for (const op of operations) {
-        if (op.type === "read") results.push({ ...op, status: 200, content: await ssh.readFile(op.path) });
-        else if (op.type === "write") {
-          await ssh.writeFile(op.path, sanitizeContent(op.content || ""));
-          results.push({ ...op, status: 200 });
-        } else if (op.type === "stat") results.push({ ...op, status: 200, ...(await ssh.stat(op.path)) });
-        else if (op.type === "glob") results.push({ ...op, status: 200, entries: await ssh.glob(op.pattern, op.cwd) });
-        else if (op.type === "grep") {
-          const safeCwd = ssh.resolveWorkspaceCwd(op.cwd);
-          const { command, maxResults } = buildSshGrepCommand({ ...op, cwd: safeCwd || op.cwd });
-          const result = await ssh.exec(command);
-          const matches = parseGrepOutput(result.stdout);
-          results.push({ ...op, status: 200, engine: "grep", matches, truncated: matches.length >= maxResults });
+        try {
+          if (op.type === "read") results.push({ ...op, status: 200, content: await ssh.readFile(op.path) });
+          else if (op.type === "write") {
+            await ssh.writeFile(op.path, sanitizeContent(op.content || ""));
+            results.push({ ...op, status: 200 });
+          } else if (op.type === "stat") results.push({ ...op, status: 200, ...(await ssh.stat(op.path)) });
+          else if (op.type === "glob") results.push({ ...op, status: 200, entries: await ssh.glob(op.pattern, op.cwd) });
+          else if (op.type === "grep") {
+            const safeCwd = ssh.resolveWorkspaceCwd(op.cwd);
+            const { command, maxResults } = buildSshGrepCommand({ ...op, cwd: safeCwd || op.cwd });
+            const result = await ssh.exec(command);
+            assertGrepSuccess(result);
+            const matches = parseGrepOutput(result.stdout);
+            results.push({ ...op, status: 200, engine: "grep", matches, truncated: matches.length >= maxResults });
+          }
+          else if (op.type === "bash") results.push({ ...op, status: 200, ...(await ssh.exec(op.command, { cwd: op.cwd })) });
+          else results.push({ ...op, status: 400, error: "Unsupported SSH batch operation" });
+        } catch (error) {
+          const unknown = error.code === "EOUTCOME_UNKNOWN"
+            || (["write", "bash"].includes(op.type) && !definitelyNotSent(error)
+              && !["EWORKSPACE", "EINVAL", "EUNSUPPORTED"].includes(error.code));
+          results.push({ type: op.type, status: error.statusCode || 500, error: error.message, code: error.code,
+            ...(error.exitCode !== undefined ? { exitCode: error.exitCode } : {}) });
+          const data = { success: false, results,
+            ...(unknown ? { code: "EOUTCOME_UNKNOWN", outcome: "unknown", retryable: false } : {}) };
+          printJson(withTarget(data, ctx));
+          applyOperationExitCode(data);
+          return;
         }
-        else if (op.type === "bash") results.push({ ...op, status: 200, ...(await ssh.exec(op.command, { cwd: op.cwd })) });
-        else results.push({ ...op, status: 400, error: "Unsupported SSH batch operation" });
       }
       const data = { success: operationExitCode(results) === 0, results };
       printJson(withTarget(data, ctx));
@@ -2781,7 +2865,7 @@ async function main(args) {
 
 const _args = parseArgs(process.argv.slice(2));
 main(_args)
-  .catch((error) => fail(error.message, 1, _args))
+  .catch((error) => fail(error, 1, _args))
   .finally(() => {
     stopParentWatchdog();
     scheduleForcedExit({ exitCode: process.exitCode ?? 0 });

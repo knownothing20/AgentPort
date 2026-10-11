@@ -125,6 +125,7 @@ function createExecService({
   }
 
   async function executeScript(content, options = {}) {
+    policy.assertExecutionEnabled();
     if (typeof content !== "string" || !content.trim()) {
       throw executionError("content is required", "EINVAL", 400);
     }

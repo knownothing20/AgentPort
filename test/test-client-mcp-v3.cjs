@@ -21,6 +21,35 @@ function sendJson(res, status, body) {
   res.end(payload);
 }
 
+function runCli(args, env, timeoutMs = 10_000) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [path.join(ROOT, "client", "modular-cli.js"), ...args], {
+      cwd: ROOT,
+      env: { ...process.env, ...env },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const stdout = [];
+    const stderr = [];
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, timeoutMs);
+    child.stdout.on("data", (chunk) => stdout.push(chunk));
+    child.stderr.on("data", (chunk) => stderr.push(chunk));
+    child.once("error", reject);
+    child.once("close", (code) => {
+      clearTimeout(timer);
+      resolve({
+        code,
+        timedOut,
+        stdout: Buffer.concat(stdout).toString("utf8"),
+        stderr: Buffer.concat(stderr).toString("utf8"),
+      });
+    });
+  });
+}
+
 async function main() {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), "agentport-mcp-v3-"));
   const connections = path.join(temp, "connections.v3.json");
@@ -46,6 +75,26 @@ async function main() {
       if (req.url === "/api/exec/async") {
         receivedKey = req.headers["idempotency-key"];
         return sendJson(res, 200, { success: true, jobId: "mcp-job", taskId: "mcp-job", status: "running" });
+      }
+      if (req.url === "/api/exec") {
+        if (body.command === "empty-success") return sendJson(res, 200, { success: true, code: 0, stdout: "", stderr: "" });
+        if (body.command === "timeout") return sendJson(res, 200, { success: false, code: "ETIMEDOUT", error: "Command timed out" });
+        return sendJson(res, 200, { success: false, code: 7, stdout: "partial output", stderr: "failed" });
+      }
+      if (req.url === "/api/batch") {
+        return sendJson(res, 200, { success: true, results: [{ type: "bash", status: 200, success: false, code: 9, stdout: "partial", stderr: "failed" }] });
+      }
+      if (/^\/api\/jobs\/job-(?:failed|missing|unknown)\/logs/.test(req.url)) {
+        return sendJson(res, 200, { success: true, stdout: { content: "" }, stderr: { content: "" }, cursor: "done" });
+      }
+      if (req.url === "/api/jobs/job-failed") {
+        return sendJson(res, 200, { success: true, job: { status: "error", exitCode: 7 } });
+      }
+      if (req.url === "/api/jobs/job-missing") {
+        return sendJson(res, 200, { success: false, error: "missing job", jobId: "job-missing" });
+      }
+      if (req.url === "/api/jobs/job-unknown") {
+        return sendJson(res, 200, { success: false, outcome: "unknown", code: "EOUTCOME_UNKNOWN", jobId: "job-unknown", status: "unknown" });
       }
       if (req.url === "/api/dev/sessions" && req.method === "POST") {
         sessionCreateBody = body;
@@ -158,6 +207,38 @@ async function main() {
     assert.equal(startedData.data.jobId, "mcp-job");
     assert.equal(startedData.meta.idempotencyKey, "mcp:key:1");
     assert.equal(receivedKey, "mcp:key:1");
+    assert.equal(started.result.isError, undefined, "accepted running Job remains a successful submission");
+
+    const failedExec = await request("tools/call", {
+      name: "remote_bash",
+      arguments: { server: "mcp-server", command: "exit-seven" },
+    });
+    assert.equal(failedExec.result.isError, true);
+    const failedExecValue = JSON.parse(failedExec.result.content[0].text);
+    assert.equal(failedExecValue.data.code, 7);
+    assert.equal(failedExecValue.data.stdout, "partial output");
+    assert.equal(failedExecValue.data.stderr, "failed");
+
+    const timedOutExec = await request("tools/call", {
+      name: "remote_bash",
+      arguments: { server: "mcp-server", command: "timeout" },
+    });
+    assert.equal(timedOutExec.result.isError, true);
+    assert.equal(JSON.parse(timedOutExec.result.content[0].text).data.code, "ETIMEDOUT");
+
+    const failedBatch = await request("tools/call", {
+      name: "remote_batch",
+      arguments: { server: "mcp-server", operations: [{ type: "bash", command: "exit-nine" }] },
+    });
+    assert.equal(failedBatch.result.isError, true);
+    assert.equal(JSON.parse(failedBatch.result.content[0].text).data.results[0].code, 9);
+
+    const emptySuccess = await request("tools/call", {
+      name: "remote_bash",
+      arguments: { server: "mcp-server", command: "empty-success" },
+    });
+    assert.equal(emptySuccess.result.isError, undefined);
+    assert.equal(JSON.parse(emptySuccess.result.content[0].text).data.stdout, "");
 
     const created = await request("tools/call", {
       name: "remote_session_create",
@@ -181,6 +262,71 @@ async function main() {
     });
     const diffData = JSON.parse(diff.result.content[0].text);
     assert.equal(diffData.data.diff, "demo patch");
+
+    const followedFailure = await runCli(
+      ["job", "follow", "job-failed", "--server", "mcp-server", "--interval-ms", "200"],
+      {
+        AGENTPORT_CLIENT_MODE: "v3",
+        AGENTPORT_CONNECTIONS_PATH: connections,
+        AGENTPORT_CLIENT_STATE_PATH: state,
+      },
+    );
+    assert.equal(followedFailure.code, 7, followedFailure.stderr || followedFailure.stdout);
+    assert.match(followedFailure.stdout, /job job-failed: error/);
+
+    const missingJobQuery = await runCli(
+      ["job", "follow", "job-missing", "--server", "mcp-server", "--interval-ms", "200"],
+      {
+        AGENTPORT_CLIENT_MODE: "v3",
+        AGENTPORT_CONNECTIONS_PATH: connections,
+        AGENTPORT_CLIENT_STATE_PATH: state,
+      },
+      3000,
+    );
+    assert.equal(missingJobQuery.timedOut, false, "failed HTTP-200 status queries must stop polling");
+    assert.equal(missingJobQuery.code, 1);
+    assert.match(missingJobQuery.stdout, /"jobId": "job-missing"/);
+    assert.match(missingJobQuery.stdout, /"error": "missing job"/);
+    assert.doesNotMatch(missingJobQuery.stdout, /job job-missing: (?:completed|running)/);
+
+    const unknownJobQuery = await runCli(
+      ["job", "follow", "job-unknown", "--server", "mcp-server", "--interval-ms", "200"],
+      {
+        AGENTPORT_CLIENT_MODE: "v3",
+        AGENTPORT_CONNECTIONS_PATH: connections,
+        AGENTPORT_CLIENT_STATE_PATH: state,
+      },
+      3000,
+    );
+    assert.equal(unknownJobQuery.timedOut, false, "unknown outcomes must stop polling");
+    assert.equal(unknownJobQuery.code, 1);
+    assert.match(unknownJobQuery.stdout, /"jobId": "job-unknown"/);
+    assert.match(unknownJobQuery.stdout, /"outcome": "unknown"/);
+    assert.doesNotMatch(unknownJobQuery.stdout, /job job-unknown: (?:completed|running)/);
+
+    const runningStart = await runCli(
+      ["job", "start", "still-running", "--server", "mcp-server", "--json"],
+      {
+        AGENTPORT_CLIENT_MODE: "v3",
+        AGENTPORT_CONNECTIONS_PATH: connections,
+        AGENTPORT_CLIENT_STATE_PATH: state,
+      },
+    );
+    assert.equal(runningStart.code, 0, runningStart.stderr || runningStart.stdout);
+    assert.equal(JSON.parse(runningStart.stdout).status, "running");
+
+    const failedStatus = await runCli(
+      ["job", "status", "job-failed", "--server", "mcp-server", "--json"],
+      {
+        AGENTPORT_CLIENT_MODE: "v3",
+        AGENTPORT_CONNECTIONS_PATH: connections,
+        AGENTPORT_CLIENT_STATE_PATH: state,
+      },
+    );
+    assert.equal(failedStatus.code, 7);
+    const failedStatusValue = JSON.parse(failedStatus.stdout);
+    assert.equal(failedStatusValue.job.status, "error");
+    assert.equal(failedStatusValue.job.exitCode, 7);
   } finally {
     child.stdin.end();
     await new Promise((resolve) => {
